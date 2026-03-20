@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+env/
+
+# C++ build artifacts
+orbitcore/build/
+*.so
+*.o
+*.dylib
+*.dll
+
+# SPICE kernels (large binary files — download per setup instructions)
+backend/data/spice_kernels/
+
+# Orekit data
+orekit-data/
+orekit-data.zip
+
+# ML models (too large for git)
+backend/data/models/*.pkl
+backend/data/models/*.joblib
+backend/data/models/*.json
+
+# Raw data (fetched at runtime)
+backend/data/tle/*.txt
+backend/data/tle/*.json
+backend/data/conjunctions/*.parquet
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+
+# Docker
+docker-compose.override.yml
