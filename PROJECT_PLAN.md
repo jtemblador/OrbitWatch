@@ -43,13 +43,13 @@ A web-based dashboard that:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Cesium.js Frontend                  │
+│                  Cesium.js Frontend                 │
 │  3D Globe • Orbit Trails • Click Info • Time Slider │
 └──────────────────────┬──────────────────────────────┘
                        │ REST API (JSON)
 ┌──────────────────────▼──────────────────────────────┐
-│                  FastAPI Backend (Python)             │
-│  /satellites • /positions • /conjunctions • /alerts  │
+│                  FastAPI Backend (Python)           │
+│  /satellites • /positions • /conjunctions • /alerts │
 └──────┬───────────┬──────────────┬───────────────────┘
        │           │              │
 ┌──────▼──┐ ┌──────▼─────────┐ ┌─▼────────────────────┐

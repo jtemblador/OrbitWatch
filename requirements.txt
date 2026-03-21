@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+scipy
+pandas
+numpy
+xgboost
+requests
+spiceypy
+sgp4
