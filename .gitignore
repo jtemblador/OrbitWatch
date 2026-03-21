@@ -32,7 +32,11 @@ backend/data/models/*.json
 # Raw data (fetched at runtime)
 backend/data/tle/*.txt
 backend/data/tle/*.json
+backend/data/tle/*.parquet
 backend/data/conjunctions/*.parquet
+
+# Claude Code settings
+.claude/
 
 # IDE
 .vscode/
