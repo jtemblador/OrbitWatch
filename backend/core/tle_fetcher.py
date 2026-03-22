@@ -140,15 +140,25 @@ class GPFetcher:
         if not parquet_path.exists():
             return None
 
+        # Fast pre-check: if file was modified > 2 hours ago, it's definitely stale.
+        # Avoids loading the full Parquet for large catalogs (6000+ Starlink rows).
+        file_age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+            parquet_path.stat().st_mtime, tz=timezone.utc
+        )
+        if file_age >= MIN_FETCH_INTERVAL:
+            return None
+
         df = pd.read_parquet(parquet_path)
         if "fetch_time" not in df.columns or df.empty:
             return None
 
         last_fetch_raw = df["fetch_time"].iloc[0]
         last_fetch_ts = pd.Timestamp(last_fetch_raw)
+        if pd.isna(last_fetch_ts):
+            return None
         if last_fetch_ts.tzinfo is None:
             last_fetch_ts = last_fetch_ts.tz_localize("UTC")
-        last_fetch_dt: datetime = last_fetch_ts.to_pydatetime()
+        last_fetch_dt = last_fetch_ts.to_pydatetime()
 
         age = datetime.now(timezone.utc) - last_fetch_dt
         if age < MIN_FETCH_INTERVAL:
@@ -341,4 +351,4 @@ if __name__ == "__main__":
     fetcher = GPFetcher()
     df = fetcher.fetch("stations")
     print()
-    print(df[["object_name", "norad_cat_id", "object_type", "period", "periapsis", "apoapsis", "decayed"]].to_string(index=False))
+    print(df[["object_name", "norad_cat_id", "period", "periapsis", "apoapsis", "epoch_age_days"]].to_string(index=False))
