@@ -1,24 +1,11 @@
-# Development Notes & Findings
+# Research Notes & Reference Material
 
-This folder tracks technical findings, blockers, decisions, and learnings throughout the OrbitWatch project.
+What we learned about external tools, formats, algorithms, and APIs. Read these when asking "how does X work?" or "what are the rules for Y?"
 
-## Structure
+**Not for:** documenting what we built or how we built it — that goes in `task_logs/`.
 
-Each week gets its own file: `week0_notes.md`, `week2_notes.md`, etc.
+## Files
 
-## What to Document
-
-- **Technical discoveries:** How SPICE works, pybind11 build quirks, Cesium.js patterns
-- **Blockers & solutions:** What went wrong, why, and how you fixed it
-- **Decision rationale:** Why we chose C++ over Rust for propagation, architecture choices
-- **Performance notes:** Timing benchmarks, optimization findings
-- **Code patterns:** Reusable patterns discovered during implementation
-- **Library insights:** How sgp4, spiceypy, Orekit actually work in practice
-
-## Why This Matters
-
-Portfolio-focused development. Employers want to see:
-- Clear problem-solving process
-- Technical depth and decision-making
-- How you approach learning new tools (pybind11, SPICE, Cesium.js)
-- Evidence of careful planning, not just code output
+- **`key_information.md`** — Quick-reference cheat sheet of actionable facts, rules, and gotchas. Consult during implementation.
+- **`week0_notes.md`** — Tasks 0.1–0.4: Accounts, project setup, pybind11/CMake build pipeline, SPICE kernel setup, environment configuration, tech stack decisions
+- **`week2_notes.md`** — Tasks 2.1–2.2 research: TLE format spec, SGP4 theory (STR#3), Revisiting STR#3 corrections, CelesTrak API docs, GP data formats, TEME coordinate frame, GMST rotation approach, GPFetcher audit findings

@@ -2,12 +2,13 @@
 
 **Date:** Mar 20–21, 2026
 **Focus:** Environment setup, C++ toolchain verification, SPICE configuration
+**Tasks covered:** 0.1 (Accounts), 0.2 (Project Setup), 0.3 (C++ Toolchain), 0.4 (SPICE Setup)
 
 ---
 
 ## Key Decisions Made
 
-### 1. Tech Stack Refinement for Aerospace Appeal
+### Tech Stack Refinement for Aerospace Appeal (Task 0.2)
 **Decision:** Replaced pure Python SGP4 stack with C++ (pybind11) + SPICE + Orekit.
 
 **Why:**
@@ -22,13 +23,13 @@
 
 ## Technical Discoveries
 
-### pybind11 + CMake
+### Task 0.3: pybind11 + CMake
 - **Hello world extension**: Successfully compiled C++ function and called from Python
 - **Key insight:** pybind11 is simpler than expected — no manual CFFI. Just declare functions in `bindings.cpp` and they're importable.
 - **Build output:** Module name follows Python version: `orbitcore.cpython-312-x86_64-linux-gnu.so`
 - **Placement:** Copy .so to `backend/` for easy imports
 
-### SPICE (NASA/NAIF toolkit)
+### Task 0.4: SPICE (NASA/NAIF toolkit)
 - **Kernels needed:** Just 3 small files (5KB leap seconds, 129KB constants, 4.8MB orientation)
 - **ECI → geodetic:** SPICE transforms work seamlessly. Test confirmed ECI [6700, 1200, 400] km → reasonable lat/lon/alt
 - **SSL note:** Download required disabling SSL verification (temp workaround for dev environment)
@@ -38,7 +39,7 @@
   - `sp.mxv()` — matrix-vector multiplication
   - `sp.recgeo()` — cartesian → geodetic (x,y,z → lon,lat,alt)
 
-### Environment & Dependencies
+### Task 0.2: Environment & Dependencies
 - System Python already has necessary tools (g++, CMake)
 - `--break-system-packages` workaround avoids virtual env complexity
 - All core deps installed successfully: fastapi, scipy, pandas, spiceypy, sgp4, xgboost
@@ -47,7 +48,7 @@
 
 ## Blockers & Resolutions
 
-### Orekit Python Wrapper Unavailable
+### Task 0.5 (Deferred): Orekit Python Wrapper Unavailable
 **Blocker:** `pip install orekit` fails — no PyPI package.
 
 **Resolution:** Orekit requires Java + separate installation. Deferred to Week 6 when actually needed (conjunction cross-validation). Not on critical path for Weeks 2–5.
@@ -84,22 +85,24 @@ backend/ (copy for import)
 
 ## Learnings for Week 2
 
-### SGP4 Implementation Plan
+### SGP4 Implementation Plan (Prep for Task 2.3)
 - C library `libsgp4` (native) wraps via pybind11
 - Input: TLE lines → Output: (x, y, z) ECI at time T
 - SPICE handles coordinate transforms after that
 - Don't reinvent — leverage existing sgp4 crate or library
 
-### TLE Parsing
+### TLE Parsing (Prep for Task 2.1)
 - `sgp4` Python library already installed — can use for parsing, even if propagation moves to C++
 - TLE format is fixed: 3 lines (name + 2 element lines), each character position matters
 
-### Next Critical Test
-Need to verify: **C++ SGP4 + SPICE together**
-- Fetch real ISS TLE from CelesTrak
-- Run through C++ propagator → get ECI position
-- Pass through SPICE → get lat/lon/alt
+### Next Critical Test (Tasks 2.2 + 2.3)
+Need to verify: **SGP4 + coordinate transforms together**
+- Fetch real ISS data from CelesTrak (Task 2.1 — DONE)
+- Run through SGP4 propagator → get TEME position
+- Convert TEME → ECEF via GMST rotation → geodetic via SPICE recgeo (Task 2.2 — DONE)
 - Compare against known ISS tracker (e.g., N2YO) — should match within 1–2 km
+
+**Update (Mar 22):** Task 2.2 resolved this. SPICE does NOT know TEME — we use GMST Z-rotation instead. See `progress/task_logs/task_2_2_coordinate_transforms.md` for full details.
 
 ---
 

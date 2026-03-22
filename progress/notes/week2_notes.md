@@ -1,11 +1,12 @@
 # Week 2 Notes: TLE Data + SGP4 Propagation Research
 
-**Date:** Mar 21, 2026
+**Date:** Mar 21–22, 2026
 **Focus:** Deep dive into CelesTrak documentation, TLE format, SGP4 theory, and GP data APIs
+**Tasks covered:** 2.1 (GP Data Fetcher), 2.2 (Coordinate Transforms) — research underpinning both
 
 ---
 
-## 1. NORAD Two-Line Element Set Format
+## 1. NORAD Two-Line Element Set Format (Background for Task 2.1)
 
 **Reference:** https://celestrak.org/NORAD/documentation/tle-fmt.php
 
@@ -77,7 +78,7 @@ TLE is a fixed-width, 80-character-per-line format dating from the punch-card er
 
 ---
 
-## 2. Spacetrack Report Number 3 (STR#3)
+## 2. Spacetrack Report Number 3 (STR#3) — Background for Tasks 2.2–2.3
 
 **Reference:** `misc/spacetrk/spacetrk.pdf` (Hoots & Roehrich, 1980)
 
@@ -149,7 +150,7 @@ SGP4 has special handling for decaying/low-orbit satellites:
 
 ---
 
-## 3. Revisiting Spacetrack Report #3 (AIAA 2006-6753)
+## 3. Revisiting Spacetrack Report #3 (AIAA 2006-6753) — Reference for Task 2.3
 
 **Reference:** `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753-Rev3.pdf`
 **Authors:** David Vallado, Paul Crawford, Richard Hujsak, T.S. Kelso
@@ -210,16 +211,18 @@ Comprehensive test suite in `sgp4-ver.tle` covering:
 | Synchronous | 28626, 25954, 24208, 09998 | GEO, low-inclination edge cases |
 | Edge Cases | 23333 (high-e), 28623/16925 (low perigee), 29141 (decaying) | Error handling |
 
-### Coordinate System: TEME
+### Coordinate System: TEME (Resolved in Task 2.2)
 
-SGP4 output is in **TEME** (True Equator, Mean Equinox) — an approximate frame. Must convert:
-- TEME → PEF (Pseudo Earth Fixed) using GMST
-- PEF → ITRF/ECEF for ground coordinates
-- **This is where SPICE comes in** for our project (TEME → J2000 → ITRF93 → geodetic)
+SGP4 output is in **TEME** (True Equator, Mean Equinox) — an approximate frame not known by SPICE. Must convert:
+- TEME → ECEF via GMST Z-axis rotation (single matrix multiply)
+- ECEF → geodetic via SPICE `recgeo()` with WGS-84 ellipsoid
+
+**Originally planned:** TEME → J2000 → ITRF93 → geodetic (via SPICE full pipeline).
+**What actually happened:** SPICE doesn't know TEME (`UNKNOWNFRAME` error). The GMST rotation approach is simpler, sufficient within SGP4's ~1 km accuracy, and avoids precession/nutation matrix complexity. See `progress/task_logs/task_2_2_coordinate_transforms.md` for the full decision analysis.
 
 ---
 
-## 4. CelesTrak GP Data API
+## 4. CelesTrak GP Data API (Reference for Task 2.1)
 
 **Reference:** https://celestrak.org/NORAD/documentation/gp-data-formats.php
 
@@ -307,7 +310,7 @@ sup-gp.php?EPOCH=>now-1&FORMAT=json
 
 ---
 
-## 5. Key JSON/OMM Fields (What Our GPFetcher Parses)
+## 5. Key JSON/OMM Fields — Task 2.1 Input Schema
 
 | Field | SGP4 Input? | Description |
 |-------|-------------|-------------|
@@ -331,7 +334,7 @@ sup-gp.php?EPOCH=>now-1&FORMAT=json
 
 ---
 
-## 6. GPFetcher Audit & Hardening (Mar 21)
+## 6. Task 2.1 Audit: GPFetcher Hardening (Mar 21)
 
 After the initial implementation, audited the fetcher for collision-prediction readiness:
 
@@ -355,14 +358,25 @@ After the initial implementation, audited the fetcher for collision-prediction r
 
 ---
 
-## 7. Implications for OrbitWatch (Updated)
+## 7. Implications for OrbitWatch (Updated Mar 22)
 
 ### What We're Using
 - **Python `sgp4` library** — wraps Vallado's C++ implementation, already installed
-- **JSON/OMM format** via CelesTrak `gp.php` API — already implemented in `GPFetcher`
-- **SPICE** for coordinate transforms (TEME → J2000 → ITRF93 → geodetic)
+- **JSON/OMM format** via CelesTrak `gp.php` API — implemented in `GPFetcher` (Task 2.1 DONE)
+- **GMST Z-rotation** for TEME→ECEF, **SPICE `recgeo()`** for ECEF→geodetic (Task 2.2 DONE)
 
-### Architecture Decision: Python sgp4 vs Custom C++
+### Coordinate Transform Pipeline (RESOLVED — Task 2.2)
+**Original plan:** TEME → J2000 → ITRF93 → geodetic (full SPICE pipeline)
+**What we actually built:** TEME → ECEF (GMST rotation) → geodetic (SPICE `recgeo()`)
+
+**Why the change:** SPICE doesn't know the TEME frame (`UNKNOWNFRAME` error). Three options were evaluated:
+1. SPICE full pipeline (TEME→J2000→ITRF93) — requires precession/nutation matrices, two complex steps
+2. Astropy (native TEME support) — 200MB dependency for one rotation
+3. GMST Z-rotation — **chosen**: single matrix multiply, skips polar motion (~10m) and equation of equinoxes (~30m), both well within SGP4's ~1 km accuracy
+
+Validated with 5 real satellites (ISS, CSS, FREGAT DEB, HTV-X1, CREW DRAGON). 26/26 tests passing.
+
+### Architecture Decision: Python sgp4 vs Custom C++ (Task 2.3 — PENDING)
 The `sgp4` Python library (by Brandon Rhodes) is a compiled C extension that wraps Vallado's validated SGP4 implementation. It uses `Satrec.sgp4init()` to initialize from OMM fields directly — no TLE string parsing needed.
 
 For our C++ `orbitcore/` module, we have two paths:
@@ -375,13 +389,6 @@ For our C++ `orbitcore/` module, we have two paths:
 - Use test cases from Revisiting STR#3 (`sgp4-ver.tle`) to validate our propagator
 - Compare ISS position against N2YO/Heavens-Above (should match within 1-2 km)
 - SGP4 accuracy: ~1 km at epoch, degrades ~5-10 km/day
-
-### Key Gotcha: Coordinate Frame
-SGP4 outputs **TEME**, not J2000 or ECEF. Our SPICE transform pipeline must account for this:
-```
-SGP4 output (TEME) → rotation to J2000 → SPICE pxform to ITRF93 → recgeo to lat/lon/alt
-```
-The TEME→J2000 conversion needs careful handling (precession/nutation). The `sgp4` Python library can output in TEME directly — we need to verify SPICE can handle TEME or if we need an intermediate step.
 
 ---
 
