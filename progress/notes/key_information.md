@@ -223,6 +223,8 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **`get_all_positions()` returns `(results, errors)` tuple:** Changed from returning just a list. Callers must unpack: `results, errors = propagator.get_all_positions(utc_dt)`.
 
+**Fetch/serve separation:** GET endpoints always serve from local Parquet cache. Only `POST /api/refresh` triggers a CelesTrak fetch. No client request in the GET path ever directly contacts CelesTrak. Phase 3 will move the fetch to a background task (202 Accepted) + scheduled auto-refresh.
+
 ---
 
 ## Task Checklist
@@ -269,6 +271,13 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - `GET /api/satellites` returns 30 stations with metadata from cached Parquet
 - `epoch_age_days` recomputed per-request, `object_type` defaults to `"UNKNOWN"`
 - 16/16 tests passing
+
+### Task 3.4 (Data Refresh) — DONE
+- `POST /api/refresh` triggers CelesTrak fetch + propagator reload
+- Status detection via `fetch_time` comparison (no private method access needed)
+- `reload_data()` only called on "fetched" — preserves satrec cache on rate-limited calls
+- All fetcher exceptions caught at API boundary → 502 Bad Gateway
+- 15/15 new tests passing (68 total API tests, 265 total project tests)
 
 ### Task 3.3 (Position Endpoints) — DONE
 - Three endpoints: batch, single (by NORAD ID), ground track

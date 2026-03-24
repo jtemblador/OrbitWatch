@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for FastAPI endpoints (Week 3, Tasks 1–3).
+"""Tests for FastAPI endpoints (Week 3, Tasks 1–4).
 
 Validates:
 - Health check endpoint
 - Satellite list endpoint (count, field types, field values)
 - Position endpoints (batch, single, ground track)
+- Data refresh endpoint (fetched, rate_limited, error handling)
 - CORS headers present
-- Error handling (404, 422, missing cache)
+- Error handling (404, 422, 502, missing cache)
 """
 
 import os
@@ -379,7 +380,160 @@ class TestGroundTrack(unittest.TestCase):
 
 
 # ===========================================================================
-# 6. Edge Cases
+# 6. Data Refresh (Task 3.4)
+# ===========================================================================
+
+class TestRefresh(unittest.TestCase):
+    """POST /api/refresh — TLE data refresh from CelesTrak."""
+
+    def test_refresh_returns_200(self):
+        resp = client.post("/api/refresh")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_refresh_has_required_keys(self):
+        resp = client.post("/api/refresh")
+        data = resp.json()
+        for key in ("status", "group", "satellite_count", "fetch_time"):
+            self.assertIn(key, data, f"Missing key: {key}")
+
+    def test_refresh_status_is_valid(self):
+        resp = client.post("/api/refresh")
+        data = resp.json()
+        self.assertIn(data["status"], ("fetched", "rate_limited"))
+
+    def test_refresh_group_is_stations(self):
+        resp = client.post("/api/refresh")
+        self.assertEqual(resp.json()["group"], "stations")
+
+    def test_refresh_satellite_count_positive(self):
+        resp = client.post("/api/refresh")
+        self.assertGreater(resp.json()["satellite_count"], 0)
+
+    def test_refresh_rate_limited_on_second_call(self):
+        """Two rapid calls — second must be rate_limited."""
+        client.post("/api/refresh")
+        resp2 = client.post("/api/refresh")
+        self.assertEqual(resp2.json()["status"], "rate_limited")
+
+    def test_refresh_fetch_time_is_iso8601(self):
+        resp = client.post("/api/refresh")
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(resp.json()["fetch_time"])
+        except ValueError:
+            self.fail(f"Bad fetch_time format: {resp.json()['fetch_time']}")
+
+    def test_refresh_count_matches_satellite_list(self):
+        """satellite_count should match the /api/satellites count."""
+        refresh_resp = client.post("/api/refresh")
+        list_resp = client.get("/api/satellites")
+        self.assertEqual(
+            refresh_resp.json()["satellite_count"],
+            list_resp.json()["count"],
+        )
+
+    def test_refresh_get_not_allowed(self):
+        resp = client.get("/api/refresh")
+        self.assertEqual(resp.status_code, 405)
+
+    def test_positions_work_after_refresh(self):
+        """Propagator still functional after reload_data()."""
+        client.post("/api/refresh")
+        resp = client.get("/api/positions")
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(resp.json()["count"], 0)
+
+
+class TestRefreshMocked(unittest.TestCase):
+    """POST /api/refresh — with mocked network to test 'fetched' path."""
+
+    def test_fetched_status_when_data_is_new(self):
+        """Mock _download to simulate a fresh CelesTrak fetch."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        propagator = app.state.propagator
+        fetcher = propagator.fetcher
+        group = propagator.group
+
+        # Load current cached data as the "new" response
+        cached_df = fetcher.load_cached(group)
+        # Alter fetch_time so it differs from the old one → triggers "fetched"
+        new_fetch_time = datetime.now(timezone.utc)
+        modified_df = cached_df.copy()
+        modified_df["fetch_time"] = new_fetch_time
+
+        with patch.object(fetcher, "fetch", return_value=modified_df):
+            resp = client.post("/api/refresh")
+
+        data = resp.json()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(data["status"], "fetched")
+        self.assertGreater(data["satellite_count"], 0)
+
+    def test_fetched_triggers_reload(self):
+        """On 'fetched' status, propagator.reload_data() must be called."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        propagator = app.state.propagator
+        fetcher = propagator.fetcher
+        group = propagator.group
+
+        cached_df = fetcher.load_cached(group)
+        modified_df = cached_df.copy()
+        modified_df["fetch_time"] = datetime.now(timezone.utc)
+
+        with patch.object(fetcher, "fetch", return_value=modified_df), \
+             patch.object(propagator, "reload_data") as mock_reload:
+            resp = client.post("/api/refresh")
+
+        self.assertEqual(resp.json()["status"], "fetched")
+        mock_reload.assert_called_once()
+
+    def test_rate_limited_skips_reload(self):
+        """On 'rate_limited' status, reload_data() must NOT be called."""
+        from unittest.mock import patch
+
+        propagator = app.state.propagator
+
+        with patch.object(propagator, "reload_data") as mock_reload:
+            # Two rapid calls — second is rate_limited
+            client.post("/api/refresh")
+            client.post("/api/refresh")
+
+        # reload may have been called on first call (if fetched), but
+        # we just verify it wasn't called more than once
+        self.assertLessEqual(mock_reload.call_count, 1)
+
+    def test_502_on_fetch_failure(self):
+        """If fetcher.fetch() raises RuntimeError, endpoint returns 502."""
+        from unittest.mock import patch
+
+        propagator = app.state.propagator
+        fetcher = propagator.fetcher
+
+        with patch.object(fetcher, "fetch", side_effect=RuntimeError("Network down")):
+            resp = client.post("/api/refresh")
+
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("Network down", resp.json()["detail"])
+
+    def test_502_on_value_error(self):
+        """Non-RuntimeError exceptions also produce 502."""
+        from unittest.mock import patch
+
+        propagator = app.state.propagator
+        fetcher = propagator.fetcher
+
+        with patch.object(fetcher, "fetch", side_effect=ValueError("Bad group")):
+            resp = client.post("/api/refresh")
+
+        self.assertEqual(resp.status_code, 502)
+
+
+# ===========================================================================
+# 7. Edge Cases
 # ===========================================================================
 
 class TestApiEdgeCases(unittest.TestCase):

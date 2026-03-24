@@ -1,5 +1,5 @@
 """
-Satellite metadata and position endpoints.
+Satellite metadata, position, and data refresh endpoints.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -162,4 +162,43 @@ async def get_track(
         "duration_min": duration_min,
         "steps": steps,
         "track": track,
+    }
+
+
+@router.post("/refresh")
+async def refresh_data(request: Request):
+    """Trigger a TLE data refresh from CelesTrak.
+
+    Synchronous for Phase 1 (~30 sats, <2s fetch). Respects CelesTrak's
+    2-hour update interval — returns "rate_limited" if cache is still fresh.
+    """
+    propagator = request.app.state.propagator
+    fetcher = propagator.fetcher
+    group = propagator.group
+
+    # Snapshot old fetch_time to detect whether fetch() actually hit CelesTrak
+    try:
+        old_df = fetcher.load_cached(group)
+        old_fetch_time = pd.Timestamp(old_df["fetch_time"].iloc[0])
+    except (FileNotFoundError, KeyError, IndexError):
+        old_fetch_time = None
+
+    try:
+        new_df = fetcher.fetch(group)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Refresh failed: {e}")
+
+    new_fetch_time = pd.Timestamp(new_df["fetch_time"].iloc[0])
+
+    if old_fetch_time is not None and new_fetch_time == old_fetch_time:
+        status = "rate_limited"
+    else:
+        status = "fetched"
+        propagator.reload_data()
+
+    return {
+        "status": status,
+        "group": group,
+        "satellite_count": len(new_df),
+        "fetch_time": str(new_fetch_time.isoformat()),
     }

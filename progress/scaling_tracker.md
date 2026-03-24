@@ -9,6 +9,7 @@
 | # | File | Line | Issue | Fix | Phase |
 |---|------|------|-------|-----|-------|
 | 1 | `backend/core/propagator.py` | — | 6,000 individual Python→C++ boundary crossings in batch propagation | Add `orbitcore.sgp4_batch(satrecs, tsinces)` C++ function that loops in native code and returns all positions in one crossing. Requires new pybind11 bindings + moving coordinate transforms to C++ (or returning TEME bulk). Est. ~3-5x speedup at 6k sats. | Phase 3 |
+| 2 | `backend/routers/satellites.py` | — | `POST /api/refresh` is synchronous — blocks until CelesTrak fetch completes | Switch to **202 Accepted + background task** pattern: POST returns immediately with a job ID, fetch runs via FastAPI `BackgroundTasks` or Celery, client polls `GET /api/refresh/status/{id}`. At 6k Starlink sats, fetch + parse could take 5-10s — too long to block a request. Also add scheduled auto-refresh (cron/APScheduler every 6-8h) so no client request ever directly triggers a CelesTrak fetch in the critical path. Phase 1 is fine synchronous (30 sats, <2s fetch). | Phase 3 |
 
 ## Resolved Items
 

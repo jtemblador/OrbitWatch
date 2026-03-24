@@ -28,3 +28,13 @@
 - Review found: single + track endpoints didn't catch `RuntimeError` from SGP4 propagation failure → would 500 on decayed orbits. Fixed.
 - Pre-build: swapped all 3 production `iterrows()` to `iloc`, vectorized `_build_indexes()`, resolved 3 scaling tracker items
 - New scaling tracker item: C++ batch SGP4 (`orbitcore.sgp4_batch()`) for Phase 3 — eliminates 6k Python→C++ boundary crossings
+
+## Task 3.4: Data Refresh Endpoint (Mar 24)
+
+- `POST /api/refresh` triggers CelesTrak fetch + propagator reload
+- Status detection: compare `fetch_time` before/after `fetcher.fetch()` — same = `"rate_limited"`, different = `"fetched"`
+- `reload_data()` only called on actual fetch — avoids clearing satrec cache on rate-limited calls
+- Broad `except Exception` at API boundary — fetcher can fail multiple ways (RuntimeError, ValueError, urllib)
+- Double Parquet read on rate-limited path (load_cached + fetch's _load_if_fresh) — acceptable at 30 sats, noted for Phase 3
+- Scaling tracker updated: Phase 3 upgrade to 202 Accepted + background task + scheduled auto-refresh
+- Design principle: GET endpoints serve from local cache, only POST /refresh touches CelesTrak

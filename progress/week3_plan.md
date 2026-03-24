@@ -139,7 +139,7 @@ Return positions over a time range for orbit trail rendering (Week 4–5 fronten
 
 ---
 
-### ⬜ 4. Data Refresh Endpoint (`POST /api/refresh`)
+### ✅ 4. Data Refresh Endpoint (`POST /api/refresh`)
 
 Trigger a TLE data refresh from CelesTrak.
 
@@ -149,9 +149,11 @@ Trigger a TLE data refresh from CelesTrak.
 - Returns status: fetched, rate-limited, or error
 
 **Success criteria:**
-- [ ] Fresh data fetched and propagator reloaded
-- [ ] Rate-limited if called within 2 hours of last fetch
-- [ ] Does not break in-flight position requests
+- [x] Fresh data fetched and propagator reloaded
+- [x] Rate-limited if called within 2 hours of last fetch
+- [x] Does not break in-flight position requests
+
+**Actual:** 15 new tests passing (68 total API). Status detection via `fetch_time` comparison. `reload_data()` only called on actual fetch (preserves satrec cache). All fetcher exceptions → 502.
 
 ---
 
@@ -198,8 +200,8 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 2. ✅ **App skeleton** — FastAPI + CORS + health check + shared propagator (6 tests)
 3. ✅ **`/api/satellites`** — simplest endpoint (no propagation, just cached data) (16 tests)
 4. ✅ **`/api/positions`** — single, batch, and ground track (33 new tests, 53 total API tests)
-5. ⬜ **`/api/refresh`** — data refresh
-6. ⬜ **Tests** — TestClient-based API tests (53 so far, more to come)
+5. ✅ **`/api/refresh`** — data refresh (15 new tests, 68 total API tests)
+6. ⬜ **Tests** — TestClient-based API tests (68 so far, more to come)
 
 ---
 
@@ -244,7 +246,7 @@ tests/
 - [ ] `/api/positions` → 30 positions with valid lat/lon/alt/speed
 - [ ] `/api/positions/25544` → ISS position (~420 km alt)
 - [ ] `/api/positions/25544/track` → ground track points
-- [ ] `/api/refresh` → triggers data reload
+- [x] `/api/refresh` → triggers data reload
 - [ ] `/docs` → Swagger UI with typed schemas
 - [ ] All API tests pass
 - [ ] Ready for Cesium.js frontend integration in Week 4
