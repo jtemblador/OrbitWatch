@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.core.propagator import SatellitePropagator
+from backend.models.schemas import HealthResponse
 from backend.routers.satellites import router as satellites_router
 
 
@@ -39,7 +40,7 @@ app.add_middleware(
 app.include_router(satellites_router)
 
 
-@app.get("/api/health")
+@app.get("/api/health", response_model=HealthResponse)
 async def health_check():
     return {"status": "ok"}
 

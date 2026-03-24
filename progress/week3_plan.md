@@ -157,7 +157,7 @@ Trigger a TLE data refresh from CelesTrak.
 
 ---
 
-### ⬜ 5. Pydantic Response Models
+### ✅ 5. Pydantic Response Models
 
 Define response schemas so FastAPI auto-generates OpenAPI docs.
 
@@ -168,8 +168,10 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 - Response wrappers with `count`, `timestamp`, list of items
 
 **Success criteria:**
-- [ ] `/docs` (Swagger UI) shows all endpoints with typed schemas
-- [ ] Response validation catches any propagator output mismatches
+- [x] `/docs` (Swagger UI) shows all endpoints with typed schemas
+- [x] Response validation catches any propagator output mismatches
+
+**Actual:** 8 Pydantic models in `backend/models/schemas.py`. All 9 models appear in OpenAPI schema. 14 new tests (82 total API tests). `errors` field correctly nullable via Pydantic v2 `anyOf`.
 
 ---
 
@@ -196,12 +198,12 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 
 ## Implementation Order
 
-1. ⬜ **Pydantic models** — define data shapes first
+1. ✅ **Pydantic models** — 8 response models, all endpoints wired (14 new tests, 82 total API tests)
 2. ✅ **App skeleton** — FastAPI + CORS + health check + shared propagator (6 tests)
 3. ✅ **`/api/satellites`** — simplest endpoint (no propagation, just cached data) (16 tests)
 4. ✅ **`/api/positions`** — single, batch, and ground track (33 new tests, 53 total API tests)
 5. ✅ **`/api/refresh`** — data refresh (15 new tests, 68 total API tests)
-6. ⬜ **Tests** — TestClient-based API tests (68 so far, more to come)
+6. ✅ **Tests** — 82 API tests across 10 test classes (schema tests complete Task 3.6)
 
 ---
 
@@ -213,7 +215,7 @@ backend/
 ├── routers/
 │   └── satellites.py    ⬜ CREATE — all satellite/position endpoints
 ├── models/
-│   └── schemas.py       ⬜ CREATE — Pydantic response models
+│   └── schemas.py       ✅ CREATED — 8 Pydantic response models
 ├── core/
 │   ├── propagator.py    ✅ EXISTS — SatellitePropagator (Week 2)
 │   ├── tle_fetcher.py   ✅ EXISTS — GPFetcher (Week 2)
@@ -247,6 +249,6 @@ tests/
 - [ ] `/api/positions/25544` → ISS position (~420 km alt)
 - [ ] `/api/positions/25544/track` → ground track points
 - [x] `/api/refresh` → triggers data reload
-- [ ] `/docs` → Swagger UI with typed schemas
-- [ ] All API tests pass
+- [x] `/docs` → Swagger UI with typed schemas
+- [x] All API tests pass (82 total)
 - [ ] Ready for Cesium.js frontend integration in Week 4

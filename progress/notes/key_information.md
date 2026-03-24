@@ -279,6 +279,12 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - All fetcher exceptions caught at API boundary → 502 Bad Gateway
 - 15/15 new tests passing (68 total API tests, 265 total project tests)
 
+### Task 3.5 (Pydantic Response Models) — DONE
+- 8 Pydantic models in `backend/models/schemas.py`, `response_model=` on all 6 endpoints
+- OpenAPI at `/openapi.json` includes all models with typed fields
+- `errors` field is `list[PositionError] | None = None` — Pydantic v2 uses `anyOf` (not `default`) in OpenAPI
+- 14/14 new tests passing (82 total API tests)
+
 ### Task 3.3 (Position Endpoints) — DONE
 - Three endpoints: batch, single (by NORAD ID), ground track
 - `iterrows()` eliminated from all production code (replaced with `iloc` + vectorized `dict(zip(...))`)

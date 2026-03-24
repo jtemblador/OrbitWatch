@@ -32,7 +32,7 @@ A web-based dashboard that:
 - **Deployment:** Docker
 - **Project name:** OrbitWatch
 - **Dataset scaling path:**
-  - Phase 1: Space Stations (~15 objects) — ISS, Tiangong, etc.
+  - Phase 1: Space Stations (~30 objects) — ISS, Tiangong, crew vehicles, debris
   - Phase 2: Brightest/Visual satellites (~150 objects)
   - Phase 3: Starlink constellation (~6,000 objects)
   - Phase 4: Full catalog + debris (10,000+)
@@ -69,25 +69,23 @@ A web-based dashboard that:
 
 **Data Sources (free, no heavy downloads):**
 - **CelesTrak** (celestrak.org) — Curated TLE sets, no account needed, REST API
-  - `stations` — ISS, Tiangong (~15 objects) ← Phase 1
+  - `stations` — ISS, Tiangong, crew vehicles, debris (~30 objects) ← Phase 1
   - `visual` — Brightest satellites (~150 objects) ← Phase 2
   - `starlink` — Starlink constellation (~6,000) ← Phase 3
   - `active` — All active satellites (~10,000) ← Phase 4
 - **Space-Track.org** — Official USSPACECOM source, free account required
   - Conjunction Data Messages (CDMs) for ML training data
 
-**TLE Format:**
-```
-ISS (ZARYA)
-1 25544U 98067A   24050.53073472  .00016717  00000+0  10270-3 0  9017
-2 25544  51.6400 208.5513 0005678  35.5106 324.6267 15.49560479434601
-```
+**Data Format (OMM/JSON, not legacy TLE):**
+We use CelesTrak's JSON/OMM format instead of legacy TLE because:
+- TLE is limited to 5-digit NORAD catalog numbers (cap hit ~July 2026)
+- JSON provides ISO 8601 dates (no Y2K epoch ambiguity)
+- JSON includes all OMM fields in a structured, parseable format
 
 **Tools:**
-- `requests` — Fetch TLE data via HTTP
-- `sgp4` — Parse TLE format natively
+- `urllib` — Fetch OMM/JSON data via HTTP (stdlib, no `requests` dependency)
 - `pandas` — Organize satellite metadata
-- Parquet files for local storage
+- Parquet files for local storage (atomic writes, fast reads)
 
 ---
 
@@ -95,38 +93,44 @@ ISS (ZARYA)
 **What:** Given a TLE, compute where a satellite is (or will be) at any point in time.
 
 **How it works:**
-- TLE data + SGP4 algorithm = satellite position in ECI coordinates at time T
-- SPICE converts ECI → ECEF → geodetic (lat, lon, alt) using NASA-standard transformations
+- OMM data + SGP4 algorithm = satellite position in TEME coordinates at time T
+- GMST Z-rotation converts TEME → ECEF, then SPICE recgeo converts ECEF → geodetic (lat, lon, alt)
 - SGP4 is the standard model used by NORAD/USSPACECOM
 - Accounts for Earth's gravity, atmospheric drag, lunar/solar perturbations
 - C++ implementation handles thousands of satellites per second
 
 **Tools:**
-- **C++ SGP4** — Core propagation algorithm, compiled as a Python extension via pybind11
-- **SPICE / spiceypy** — NASA-standard coordinate frame transformations (ECI → ECEF → lat/lon/alt)
+- **C++ SGP4** — Vallado's SGP4.cpp wrapped via pybind11 into `orbitcore` module
+- **GMST Z-rotation** — Custom TEME→ECEF transform (SPICE does NOT know the TEME frame)
+- **SPICE / spiceypy** — ECEF → geodetic conversion only (`spice.recgeo()`)
 - **pybind11** — Exposes C++ functions to Python seamlessly
 
 **Key functions (exposed to Python via pybind11):**
-- `propagate_satellite(tle, time)` → (x, y, z) in ECI, then SPICE converts to (lat, lon, alt)
-- `propagate_batch(tle_list, time_range)` → positions for all satellites over a time window
-- `get_ground_track(tle, duration_hours)` → path a satellite traces over Earth
-- `get_orbit_path(tle, periods)` → full 3D orbital ellipse for Cesium rendering
+- `orbitcore.sgp4init(whichconst, opsmode, satnum, epoch, bstar, ndot, nddot, ecco, argpo, inclo, mo, no_kozai, nodeo)` → `Satrec`
+- `orbitcore.sgp4(satrec, tsince)` → `((x,y,z), (vx,vy,vz))` in TEME (km, km/s)
+- `orbitcore.jday(yr,mo,dy,hr,mn,sec)` → `(jd, jdFrac)`
+- `orbitcore.getgravconst(GravConst.WGS72)` → dict of gravity constants
 
 ---
 
 ### Component 3: FastAPI Backend
 **What:** REST API serving satellite data to the Cesium.js frontend.
 
-**Endpoints:**
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/satellites` | GET | List all tracked satellites with metadata |
-| `/api/satellites/{id}` | GET | Detail for one satellite |
-| `/api/positions?time=T` | GET | Current positions of all satellites at time T |
-| `/api/orbit/{id}?periods=N` | GET | Orbital path for rendering in Cesium |
-| `/api/conjunctions?hours=H` | GET | Predicted close approaches in next H hours |
-| `/api/conjunctions/{id}` | GET | Detail for a specific conjunction event |
-| `/api/refresh` | POST | Re-fetch latest TLE data from CelesTrak |
+**Endpoints (implemented):**
+| Endpoint | Method | Description | Status |
+|----------|--------|-------------|--------|
+| `/api/health` | GET | Health check | ✅ |
+| `/api/satellites` | GET | List all tracked satellites with metadata | ✅ |
+| `/api/positions` | GET | Batch positions of all satellites at time T | ✅ |
+| `/api/positions/{norad_id}` | GET | Single satellite position by NORAD ID | ✅ |
+| `/api/positions/{norad_id}/track` | GET | Ground track points for orbit trail | ✅ |
+| `/api/refresh` | POST | Re-fetch latest OMM data from CelesTrak | ✅ |
+
+**Endpoints (planned):**
+| Endpoint | Method | Description | Week |
+|----------|--------|-------------|------|
+| `/api/conjunctions` | GET | Predicted close approaches | 6 |
+| `/api/conjunctions/{id}` | GET | Detail for a specific conjunction event | 6 |
 
 **Tools:**
 - `FastAPI` — Async Python web framework
@@ -224,11 +228,11 @@ ISS (ZARYA)
 | Layer | Tool | Purpose |
 |-------|------|---------|
 | Compute core | **C++ (pybind11)** | SGP4 propagation + conjunction pair scanning |
-| Coordinate transforms | **SPICE / spiceypy** | NASA-standard ECI → ECEF → geodetic conversion |
+| Coordinate transforms | **GMST rotation + SPICE** | TEME → ECEF (custom) → geodetic (SPICE recgeo) |
 | Conjunction validation | **Orekit** (Python bindings) | Cross-check results against ESA/CNES standard |
 | Frontend | Cesium.js | 3D globe, orbit rendering, time animation |
 | Backend | FastAPI + uvicorn | REST API serving satellite data |
-| Data fetch | requests | Pull TLE from CelesTrak / Space-Track |
+| Data fetch | urllib (stdlib) | Pull OMM/JSON from CelesTrak / Space-Track |
 | Data storage | pandas, Parquet | Satellite catalog and conjunction records |
 | Computation | scipy | Closest approach time refinement |
 | ML | XGBoost or CatBoost | Collision risk classification |
@@ -241,54 +245,51 @@ ISS (ZARYA)
 ```
 OrbitWatch/
 ├── PROJECT_PLAN.md
-├── README.md
+├── CLAUDE.md                        # AI context for Claude Code sessions
 ├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── orbitcore/                       # C++ extension module
+├── orbitcore/                       # C++ extension module (source)
 │   ├── CMakeLists.txt              # Build config for pybind11
 │   ├── src/
-│   │   ├── sgp4.cpp                # SGP4 propagation implementation
-│   │   ├── conjunction.cpp         # Pair scanning (coarse + medium filter)
-│   │   └── bindings.cpp            # pybind11 Python bindings
+│   │   ├── SGP4.cpp               # Vallado's SGP4 implementation (3,247 lines)
+│   │   └── bindings.cpp           # pybind11 Python bindings
 │   └── include/
-│       ├── sgp4.h
-│       └── conjunction.h
+│       └── SGP4.h
 ├── backend/
 │   ├── main.py                     # FastAPI app entry point
+│   ├── orbitcore.cpython-312-*.so  # Compiled C++ extension
 │   ├── routers/
-│   │   ├── satellites.py           # /api/satellites endpoints
-│   │   ├── positions.py            # /api/positions endpoints
-│   │   └── conjunctions.py         # /api/conjunctions endpoints
+│   │   └── satellites.py          # All API endpoints (satellites, positions, refresh)
 │   ├── core/
-│   │   ├── tle_fetcher.py          # Fetch TLE from CelesTrak / Space-Track
-│   │   ├── tle_parser.py           # Parse TLE into satellite objects
-│   │   ├── propagator.py           # Calls C++ SGP4 + SPICE transforms
-│   │   └── conjunction_detector.py # Calls C++ scanner + scipy refinement
-│   ├── ml/
-│   │   ├── risk_classifier.py      # ML risk classification model
-│   │   └── train.py                # Training script
+│   │   ├── tle_fetcher.py         # GPFetcher — OMM/JSON from CelesTrak + Parquet cache
+│   │   ├── propagator.py          # SatellitePropagator — full pipeline orchestrator
+│   │   └── coordinate_transforms.py  # TEME → ECEF → geodetic
 │   └── data/
-│       ├── tle/                    # Raw TLE files
-│       ├── spice_kernels/          # SPICE kernel files (Earth, leap seconds)
-│       ├── conjunctions/           # Detected conjunction records
-│       └── models/                 # Trained ML models
-├── frontend/
-│   ├── index.html                  # Main page
-│   ├── css/
-│   │   └── style.css
-│   └── js/
-│       ├── app.js                  # Main Cesium app logic
-│       ├── satellite_layer.js      # Satellite rendering on globe
-│       ├── orbit_renderer.js       # Orbit trail / ground track drawing
-│       ├── conjunction_viz.js      # Conjunction event visualization
-│       ├── time_controls.js        # Play/pause/scrub time
-│       └── sidebar.js              # Search, filters, alert table
-└── tests/
-    ├── test_propagation.py
-    ├── test_conjunction.py
-    └── test_api.py
+│       ├── tle/                   # Cached Parquet files (stations.parquet, etc.)
+│       └── spice_kernels/         # SPICE kernels (leap seconds, Earth orientation)
+├── frontend/                       # Cesium.js frontend (Week 4)
+│   └── index.html
+├── progress/                       # Documentation and tracking
+│   ├── roadmap.md
+│   ├── scaling_tracker.md         # Phase 3 performance items
+│   ├── week{N}_plan.md
+│   ├── task_logs/                 # Per-task completion logs
+│   └── notes/
+│       ├── week{N}_notes.md
+│       └── key_information.md     # Durable findings and gotchas
+└── tests/                          # 265 tests across 6 files
+    ├── test_api.py                # 68 tests — FastAPI endpoints
+    ├── test_propagator.py         # 80 tests — full pipeline
+    ├── test_sgp4_cpp.py           # 54 tests — C++ engine + Vallado verification
+    ├── test_gp_fetcher.py         # 37 tests — data fetch + cache
+    ├── test_coordinate_transforms.py  # 26 tests — TEME→ECEF→geodetic
+    └── test_spice.py              # Kernel loading verification
 ```
+
+**Files planned but not yet created:**
+- `backend/routers/conjunctions.py` — Week 6
+- `backend/core/conjunction_detector.py` — Week 6
+- `backend/ml/risk_classifier.py` — Week 7
+- `Dockerfile`, `docker-compose.yml` — Week 8
 
 ---
 
@@ -296,7 +297,7 @@ OrbitWatch/
 
 | Phase | Dataset | Objects | Purpose |
 |-------|---------|---------|---------|
-| 1 | CelesTrak `stations` | ~15 | Get everything working end-to-end |
+| 1 | CelesTrak `stations` | ~30 | Get everything working end-to-end |
 | 2 | CelesTrak `visual` | ~150 | Test visualization at moderate scale |
 | 3 | CelesTrak `starlink` | ~6,000 | Stress test conjunction detection (all similar altitudes) |
 | 4 | CelesTrak `active` + debris | 10,000+ | Full production catalog |
@@ -305,27 +306,28 @@ OrbitWatch/
 
 ## Key Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| C++ / pybind11 build system | Start with a minimal "hello world" binding in Week 0. Get CMake + pybind11 compiling before writing real logic. |
-| Cesium.js learning curve | Cesium has excellent docs and a Sandcastle examples gallery. Many satellite demos exist to reference. |
-| Computation time at scale (Phase 3-4) | C++ pair scanning + coarse altitude band filtering. Conjunction scan runs as background task, not blocking UI. |
-| TLE accuracy degrades over time | Display TLE age as a quality indicator in the UI. Auto-refresh daily. |
-| Cesium rendering performance at 6k+ objects | Use Cesium's `PointPrimitiveCollection` (GPU-accelerated) instead of individual entities. Only render orbit trails for selected satellites. |
-| ML training data for collision risk | Use Space-Track CDM data. Supplement with synthetic conjunctions if needed. |
-| SPICE kernel management | Only need 2-3 small kernels (leap seconds, Earth orientation). Download once, commit paths to config. |
-| Scope creep | Stick to the phase plan. Each phase is a working, demoable product. |
+| Risk | Mitigation | Status |
+|------|------------|--------|
+| C++ / pybind11 build system | Started with minimal binding, got CMake + pybind11 compiling early | ✅ Resolved |
+| SPICE kernel management | Only need 3 small kernels, downloaded once, paths in config | ✅ Resolved |
+| SPICE TEME frame support | SPICE does NOT know TEME — built custom GMST Z-rotation instead | ✅ Resolved |
+| Cesium.js learning curve | Cesium has excellent docs and Sandcastle examples gallery | Week 4 |
+| Computation time at scale (Phase 3-4) | C++ pair scanning + coarse altitude band filtering. Tracked in scaling_tracker.md | Week 6–8 |
+| TLE accuracy degrades over time | `epoch_age_days` surfaced in API responses. Auto-refresh via POST /api/refresh | ✅ Mitigated |
+| Cesium rendering performance at 6k+ objects | Use Cesium's `PointPrimitiveCollection` (GPU-accelerated) instead of individual entities | Week 5/8 |
+| ML training data for collision risk | Use Space-Track CDM data. Supplement with synthetic conjunctions if needed | Week 7 |
+| Scope creep | Stick to the phase plan. Each phase is a working, demoable product | Ongoing |
 
 ---
 
-## TODO Before Starting
+## Setup Checklist
 
-- [ ] Create a free Space-Track.org account (needed for CDM historical data)
-- [ ] Get a free Cesium Ion access token (for terrain/imagery tiles)
-- [ ] Set up the project repo with git
-- [ ] Install C++ toolchain (g++/clang, CMake, pybind11)
-- [ ] Install Python dependencies: fastapi, uvicorn, scipy, pandas, xgboost, requests, spiceypy
-- [ ] Download SPICE kernels (naif0012.tls, pck00011.tpc, earth_latest_high_prec.bpc)
-- [ ] Install Orekit Python wrapper
-- [ ] Install Docker
-- [ ] Build and test a minimal pybind11 "hello world" extension
+- [x] Set up the project repo with git
+- [x] Install C++ toolchain (g++/clang, CMake, pybind11)
+- [x] Install Python dependencies: fastapi, uvicorn, scipy, pandas, spiceypy
+- [x] Download SPICE kernels (naif0012.tls, pck00011.tpc, earth_latest_high_prec.bpc)
+- [x] Build and test pybind11 C++ extension (orbitcore)
+- [ ] Create a free Space-Track.org account (needed for CDM historical data — Week 7)
+- [ ] Get a free Cesium Ion access token (for terrain/imagery tiles — Week 4)
+- [ ] Install Orekit Python wrapper (Week 6)
+- [ ] Install Docker (Week 8)

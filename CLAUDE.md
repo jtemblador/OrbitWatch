@@ -8,12 +8,12 @@ Jose Temblador — CS honors student (CSUDH, graduating May 2026) building this 
 
 ## Tech Stack
 - **Compute core:** C++ with pybind11 (SGP4 propagation + conjunction pair scanning)
-- **Coordinate transforms:** NASA SPICE toolkit via spiceypy
+- **Coordinate transforms:** GMST Z-rotation (TEME→ECEF) + SPICE recgeo (ECEF→geodetic)
 - **Conjunction validation:** Orekit (ESA/CNES standard, Python bindings)
 - **Backend:** Python, FastAPI, uvicorn
 - **ML:** XGBoost or CatBoost (collision risk classifier)
 - **Frontend:** Cesium.js (industry-standard 3D globe), vanilla JS
-- **Data:** CelesTrak (TLE), Space-Track.org (CDM conjunction data)
+- **Data:** CelesTrak (OMM/JSON format, not legacy TLE), Space-Track.org (CDM conjunction data)
 - **Storage:** Pandas, Parquet files
 - **Deployment:** Docker
 
@@ -26,13 +26,13 @@ FastAPI Backend (Python)
    ├── C++ Core (pybind11)
    │   ├── SGP4 Propagation Engine
    │   └── Conjunction Pair Scanner (coarse + medium filter)
-   ├── SPICE Coordinate Transforms (ECI → ECEF → lat/lon/alt)
+   ├── Coordinate Transforms (TEME → GMST rotation → ECEF → SPICE geodetic)
    ├── Orekit Conjunction Validation
    └── ML Risk Classifier (XGBoost/CatBoost)
 ```
 
 ## Dataset Scaling Path
-1. Space Stations (~15 objects) — Phase 1
+1. Space Stations (~30 objects) — Phase 1 (current)
 2. Brightest/Visual (~150 objects) — Phase 2
 3. Starlink (~6,000 objects) — Phase 3
 4. Full catalog + debris (10,000+) — Phase 4
@@ -40,10 +40,17 @@ FastAPI Backend (Python)
 ## Key Files
 - **Project plan:** `PROJECT_PLAN.md`
 - **Roadmap:** `progress/roadmap.md`
-- **Weekly progress:** `progress/week0_setup.md`, etc.
-- **C++ extension:** `orbitcore/` (CMakeLists.txt, src/, include/)
+- **Scaling tracker:** `progress/scaling_tracker.md` (Phase 3 perf items)
+- **Weekly plans:** `progress/week{N}_plan.md`
+- **Task logs:** `progress/task_logs/task_{N}_{slug}.md`
+- **Key findings:** `progress/notes/key_information.md`
+- **C++ extension source:** `orbitcore/` (CMakeLists.txt, src/, include/)
+- **C++ compiled module:** `backend/orbitcore.cpython-312-x86_64-linux-gnu.so`
 - **Backend entry point:** `backend/main.py`
-- **Frontend entry point:** `frontend/index.html`
+- **API routes:** `backend/routers/satellites.py`
+- **Core pipeline:** `backend/core/propagator.py`, `tle_fetcher.py`, `coordinate_transforms.py`
+- **Frontend entry point:** `frontend/index.html` (not yet built)
+- **Tests:** `tests/` (265 tests across 6 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -51,14 +58,19 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Week 0–1 — Setup + C++ Foundation
+- **Phase:** Week 3 — FastAPI Backend (Apr 10–16, 2026)
 - **Timeline:** Mar 20 – May 15, 2026 (8 weeks)
-- **Next steps:** Create accounts, init repo, install C++ toolchain + pybind11, set up SPICE, verify TLE fetch
+- **Completed:** Weeks 0–2 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper), Week 3 Tasks 3.1–3.4 (FastAPI skeleton, satellite list, position endpoints, data refresh)
+- **Next steps:** Task 3.5 (Pydantic response models), then Week 4 (Cesium.js frontend)
+- **Tests:** 265 passing across 6 test files
 
 ## Notes for Future Sessions
 - Jose's ML experience is with CatBoost/XGBoost/LightGBM from his NFL prediction project — same pipeline pattern applies here
-- He's comfortable with Python, Pandas, Parquet, REST APIs, and Streamlit but this is his first time using Cesium.js, FastAPI, C++/pybind11, and SPICE
+- He's now comfortable with FastAPI, C++/pybind11, and SPICE — first time was this project. Still new to Cesium.js (Week 4)
 - The project should be demoable and portfolio-ready by May 15
 - Keep the code modular and well-structured — this will be shown to employers
 - C++ and SPICE were chosen specifically to appeal to aerospace employers (SpaceX, K2 Space, Aerospace Corp, etc.)
 - Orekit is used for cross-validation of conjunction results, not as the primary engine
+- Data is fetched as OMM/JSON from CelesTrak (not legacy TLE format) — future-proofs against the NORAD 5-digit catalog number cap (~July 2026)
+- SPICE does NOT know the TEME frame — we handle TEME→ECEF via GMST Z-rotation, then SPICE for geodetic only
+- Phase 3 scaling items tracked in `progress/scaling_tracker.md` (C++ batch SGP4, background refresh, etc.)

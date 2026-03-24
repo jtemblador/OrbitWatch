@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for FastAPI endpoints (Week 3, Tasks 1–4).
+"""Tests for FastAPI endpoints (Week 3, Tasks 1–5).
 
 Validates:
 - Health check endpoint
 - Satellite list endpoint (count, field types, field values)
 - Position endpoints (batch, single, ground track)
 - Data refresh endpoint (fetched, rate_limited, error handling)
+- Pydantic response models and OpenAPI schema
 - CORS headers present
 - Error handling (404, 422, 502, missing cache)
 """
@@ -533,7 +534,118 @@ class TestRefreshMocked(unittest.TestCase):
 
 
 # ===========================================================================
-# 7. Edge Cases
+# 7. Pydantic Response Models & OpenAPI (Task 3.5)
+# ===========================================================================
+
+class TestOpenAPISchema(unittest.TestCase):
+    """Verify OpenAPI schema includes all Pydantic response models."""
+
+    @classmethod
+    def setUpClass(cls):
+        resp = client.get("/openapi.json")
+        cls.schema = resp.json()
+        cls.models = cls.schema.get("components", {}).get("schemas", {})
+
+    def test_openapi_endpoint_returns_200(self):
+        resp = client.get("/openapi.json")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_all_response_models_present(self):
+        expected = [
+            "HealthResponse", "SatelliteInfo", "SatelliteListResponse",
+            "PositionResult", "PositionError", "BatchPositionResponse",
+            "TrackPoint", "TrackResponse", "RefreshResponse",
+        ]
+        for name in expected:
+            self.assertIn(name, self.models, f"Missing schema: {name}")
+
+    def test_satellite_info_fields(self):
+        props = self.models["SatelliteInfo"]["properties"]
+        expected_fields = [
+            "name", "norad_id", "object_type", "epoch", "epoch_age_days",
+            "period_min", "inclination_deg", "apoapsis_km", "periapsis_km",
+        ]
+        for field in expected_fields:
+            self.assertIn(field, props, f"SatelliteInfo missing field: {field}")
+
+    def test_position_result_fields(self):
+        props = self.models["PositionResult"]["properties"]
+        expected_fields = [
+            "name", "norad_id", "lat", "lon", "alt_km", "speed_km_s",
+            "epoch_age_days",
+        ]
+        for field in expected_fields:
+            self.assertIn(field, props, f"PositionResult missing field: {field}")
+
+    def test_batch_position_errors_optional(self):
+        """errors field should be nullable (optional)."""
+        props = self.models["BatchPositionResponse"]["properties"]
+        self.assertIn("errors", props)
+        # Pydantic v2 represents Optional as anyOf: [array, null]
+        any_of = props["errors"].get("anyOf", [])
+        type_names = [t.get("type") for t in any_of]
+        self.assertIn("null", type_names)
+
+    def test_track_point_fields(self):
+        props = self.models["TrackPoint"]["properties"]
+        for field in ("lat", "lon", "alt_km", "timestamp"):
+            self.assertIn(field, props, f"TrackPoint missing field: {field}")
+
+    def test_refresh_response_fields(self):
+        props = self.models["RefreshResponse"]["properties"]
+        for field in ("status", "group", "satellite_count", "fetch_time"):
+            self.assertIn(field, props, f"RefreshResponse missing field: {field}")
+
+    def test_all_endpoints_have_responses(self):
+        """Every endpoint should have at least a 200 response defined."""
+        paths = self.schema["paths"]
+        for path, methods in paths.items():
+            for method, detail in methods.items():
+                responses = detail.get("responses", {})
+                self.assertIn("200", responses,
+                              f"{method.upper()} {path} missing 200 response")
+
+
+class TestResponseValidation(unittest.TestCase):
+    """Verify Pydantic models validate actual endpoint responses."""
+
+    def test_health_matches_model(self):
+        from backend.models.schemas import HealthResponse
+        data = client.get("/api/health").json()
+        HealthResponse(**data)  # Raises ValidationError if mismatch
+
+    def test_satellite_list_matches_model(self):
+        from backend.models.schemas import SatelliteListResponse
+        data = client.get("/api/satellites").json()
+        parsed = SatelliteListResponse(**data)
+        self.assertEqual(parsed.count, len(parsed.satellites))
+
+    def test_batch_positions_matches_model(self):
+        from backend.models.schemas import BatchPositionResponse
+        data = client.get("/api/positions").json()
+        parsed = BatchPositionResponse(**data)
+        self.assertEqual(parsed.count, len(parsed.positions))
+
+    def test_single_position_matches_model(self):
+        from backend.models.schemas import PositionResult
+        data = client.get(f"/api/positions/{ISS_NORAD}").json()
+        parsed = PositionResult(**data)
+        self.assertEqual(parsed.norad_id, ISS_NORAD)
+
+    def test_track_matches_model(self):
+        from backend.models.schemas import TrackResponse
+        data = client.get(f"/api/positions/{ISS_NORAD}/track").json()
+        parsed = TrackResponse(**data)
+        self.assertEqual(len(parsed.track), parsed.steps)
+
+    def test_refresh_matches_model(self):
+        from backend.models.schemas import RefreshResponse
+        data = client.post("/api/refresh").json()
+        RefreshResponse(**data)  # Raises ValidationError if mismatch
+
+
+# ===========================================================================
+# 8. Edge Cases
 # ===========================================================================
 
 class TestApiEdgeCases(unittest.TestCase):

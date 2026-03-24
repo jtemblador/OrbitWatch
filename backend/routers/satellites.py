@@ -7,10 +7,18 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from backend.models.schemas import (
+    BatchPositionResponse,
+    PositionResult,
+    RefreshResponse,
+    SatelliteListResponse,
+    TrackResponse,
+)
+
 router = APIRouter(prefix="/api")
 
 
-@router.get("/satellites")
+@router.get("/satellites", response_model=SatelliteListResponse)
 async def list_satellites(request: Request):
     """Return metadata for all satellites in the group (no propagation needed)."""
     # Phase 1: single shared propagator, always "stations".
@@ -73,7 +81,7 @@ def _format_position(result: dict) -> dict:
     }
 
 
-@router.get("/positions")
+@router.get("/positions", response_model=BatchPositionResponse)
 async def get_positions(request: Request, time: str | None = None):
     """Batch-propagate all satellites to current or specified UTC time."""
     propagator = request.app.state.propagator
@@ -95,7 +103,7 @@ async def get_positions(request: Request, time: str | None = None):
     return response
 
 
-@router.get("/positions/{norad_id}")
+@router.get("/positions/{norad_id}", response_model=PositionResult)
 async def get_position(request: Request, norad_id: int, time: str | None = None):
     """Propagate a single satellite by NORAD catalog number."""
     propagator = request.app.state.propagator
@@ -114,7 +122,7 @@ async def get_position(request: Request, norad_id: int, time: str | None = None)
     return _format_position(result)
 
 
-@router.get("/positions/{norad_id}/track")
+@router.get("/positions/{norad_id}/track", response_model=TrackResponse)
 async def get_track(
     request: Request,
     norad_id: int,
@@ -165,7 +173,7 @@ async def get_track(
     }
 
 
-@router.post("/refresh")
+@router.post("/refresh", response_model=RefreshResponse)
 async def refresh_data(request: Request):
     """Trigger a TLE data refresh from CelesTrak.
 

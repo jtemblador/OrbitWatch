@@ -38,3 +38,22 @@
 - Double Parquet read on rate-limited path (load_cached + fetch's _load_if_fresh) — acceptable at 30 sats, noted for Phase 3
 - Scaling tracker updated: Phase 3 upgrade to 202 Accepted + background task + scheduled auto-refresh
 - Design principle: GET endpoints serve from local cache, only POST /refresh touches CelesTrak
+
+## Task 3.5: Pydantic Response Models (Mar 24)
+
+- 8 models in `backend/models/schemas.py` — one per response shape, no inheritance
+- All datetime/timestamp fields modeled as `str` since we call `.isoformat()` before returning
+- `errors` in `BatchPositionResponse` uses `list[PositionError] | None = None` — Pydantic v2 serializes as `anyOf` in OpenAPI, not `default`
+- `response_model=` added to all 6 endpoints (1 in main.py, 5 in satellites.py)
+- Minor behavior change: batch response now includes `"errors": null` when no errors (previously key was omitted). Better for frontend — consistent shape.
+- No `__init__.py` needed in `backend/models/` — Python 3 implicit namespace packages
+
+## Flaky Test: `TestPerformance.test_index_lookup_is_constant_time` (to fix end of week)
+
+- **What:** `tests/test_propagator.py` — asserts 100 name lookups < 0.05s, occasionally hits 0.077s
+- **Root cause:** Tight timing threshold on a non-deterministic operation. First lookup triggers lazy `_ensure_data()` (Parquet load + index build), which inflates the measurement.
+- **Fix options (end of Week 3):**
+  1. Warm up the propagator before timing (call `_ensure_data()` in setUp)
+  2. Raise threshold to 0.1s (still validates O(1) vs O(n), less flaky)
+  3. Measure per-lookup time instead of total (amortizes cold-start)
+- **Not a correctness issue** — lookups are O(1) via dict index, this is just a flaky timing assertion
