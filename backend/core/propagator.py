@@ -120,11 +120,8 @@ class SatellitePropagator:
     def _build_indexes(self):
         """Build O(1) lookup indexes from the DataFrame."""
         df = self._df
-        self._name_index = {}
-        self._norad_index = {}
-        for idx, row in df.iterrows():
-            self._name_index[row["object_name"].upper()] = idx
-            self._norad_index[int(row["norad_cat_id"])] = idx
+        self._name_index = dict(zip(df["object_name"].str.upper(), df.index))
+        self._norad_index = dict(zip(df["norad_cat_id"].astype(int), df.index))
 
     def reload_data(self):
         """Force reload from cache (call after a fresh fetch)."""
@@ -230,7 +227,7 @@ class SatellitePropagator:
             "epoch_age_days": float(row["epoch_age_days"]),
         }
 
-    def get_all_positions(self, utc_dt: datetime) -> list[dict]:
+    def get_all_positions(self, utc_dt: datetime) -> tuple[list[dict], list[dict]]:
         """
         Propagate all satellites in the group to a specific time.
 
@@ -238,24 +235,25 @@ class SatellitePropagator:
             utc_dt: UTC datetime to propagate to
 
         Returns:
-            List of position dicts (same format as get_position)
+            (results, errors) — results are position dicts (same format as
+            get_position), errors are dicts with name, norad_id, reason.
         """
         df = self._ensure_data()
         results = []
         errors = []
 
-        for _, row in df.iterrows():
+        for i in range(len(df)):
+            row = df.iloc[i]
             try:
                 results.append(self._propagate_row(row, utc_dt))
             except RuntimeError as e:
-                errors.append((row["object_name"], str(e)))
+                errors.append({
+                    "name": row["object_name"],
+                    "norad_id": int(row["norad_cat_id"]),
+                    "reason": str(e),
+                })
 
-        if errors:
-            print(f"  {len(errors)} satellites failed to propagate:")
-            for name, err in errors:
-                print(f"    {name}: {err}")
-
-        return results
+        return results, errors
 
     def get_positions_at_times(
         self, name: str, utc_dts: list[datetime]

@@ -8,15 +8,15 @@
 
 | # | File | Line | Issue | Fix | Phase |
 |---|------|------|-------|-----|-------|
-| 1 | `backend/routers/satellites.py` | 25 | `iterrows()` in `/api/satellites` response building | Vectorized DataFrame → list-of-dicts (e.g. `df.to_dict(orient="records")` + rename) | Phase 3 |
-| 2 | `backend/core/propagator.py` | 125 | `iterrows()` in `_build_indexes()` | Vectorized: `dict(zip(df["object_name"].str.upper(), df.index))` | Phase 3 |
-| 3 | `backend/core/propagator.py` | 247 | `iterrows()` in `get_all_positions()` batch propagation | Unavoidable per-sat SGP4 call, but loop overhead matters at 6k. Consider C++ batch path. | Phase 3 |
+| 1 | `backend/core/propagator.py` | — | 6,000 individual Python→C++ boundary crossings in batch propagation | Add `orbitcore.sgp4_batch(satrecs, tsinces)` C++ function that loops in native code and returns all positions in one crossing. Requires new pybind11 bindings + moving coordinate transforms to C++ (or returning TEME bulk). Est. ~3-5x speedup at 6k sats. | Phase 3 |
 
 ## Resolved Items
 
 | # | File | Issue | Resolution | Date |
 |---|------|-------|------------|------|
-| — | — | — | — | — |
+| 1 | `backend/routers/satellites.py` | `iterrows()` in `/api/satellites` | Replaced with `iloc[i]` index-based iteration | 2026-03-24 |
+| 2 | `backend/core/propagator.py` | `iterrows()` in `_build_indexes()` | Vectorized with `dict(zip(...))` | 2026-03-24 |
+| 3 | `backend/core/propagator.py` | `iterrows()` in `get_all_positions()` | Replaced with `iloc[i]` index-based iteration | 2026-03-24 |
 
 ---
 

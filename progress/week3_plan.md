@@ -77,7 +77,7 @@ Return metadata for all satellites in the current group (Phase 1 = stations).
 
 ---
 
-### ⬜ 3. Position Endpoints
+### ✅ 3. Position Endpoints
 
 #### `GET /api/positions` — All satellites, current time
 
@@ -128,12 +128,14 @@ Return positions over a time range for orbit trail rendering (Week 4–5 fronten
 - Returns array of `{lat, lon, alt, timestamp}` points
 
 **Success criteria:**
-- [ ] `/api/positions` returns all ~30 satellites with valid lat/lon/alt
-- [ ] `/api/positions/25544` returns ISS position (alt ~400–435 km)
-- [ ] `/api/positions/25544/track` returns 60 points spanning ~1 orbit
-- [ ] Custom `time` param works (ISO 8601 string)
-- [ ] Unknown NORAD ID returns 404
-- [ ] Response time < 1s for batch, < 100ms for single satellite
+- [x] `/api/positions` returns all ~30 satellites with valid lat/lon/alt
+- [x] `/api/positions/25544` returns ISS position (alt ~400–435 km)
+- [x] `/api/positions/25544/track` returns 60 points spanning ~1 orbit
+- [x] Custom `time` param works (ISO 8601 string)
+- [x] Unknown NORAD ID returns 404
+- [x] Response time < 1s for batch, < 100ms for single satellite
+
+**Actual:** 33 new tests passing. `iterrows()` replaced with `iloc` in all production files. `get_all_positions()` now returns `(results, errors)` tuple. RuntimeError caught on single + track endpoints.
 
 ---
 
@@ -195,9 +197,9 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 1. ⬜ **Pydantic models** — define data shapes first
 2. ✅ **App skeleton** — FastAPI + CORS + health check + shared propagator (6 tests)
 3. ✅ **`/api/satellites`** — simplest endpoint (no propagation, just cached data) (16 tests)
-4. ⬜ **`/api/positions`** — single, batch, and ground track
+4. ✅ **`/api/positions`** — single, batch, and ground track (33 new tests, 53 total API tests)
 5. ⬜ **`/api/refresh`** — data refresh
-6. ⬜ **Tests** — TestClient-based API tests (22 so far, more to come)
+6. ⬜ **Tests** — TestClient-based API tests (53 so far, more to come)
 
 ---
 

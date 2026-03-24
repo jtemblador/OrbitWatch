@@ -217,6 +217,12 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **Scaling tracker:** `progress/scaling_tracker.md` centrally tracks all `iterrows()` and other Phase 3 performance items. Add entries there whenever flagging code with `# ⚠ PERF`.
 
+**`+` in query strings decoded as space:** `?time=2026-03-24T12:00:00+00:00` breaks because `+` becomes ` `. Use `Z` suffix for UTC or `%2B` URL encoding. This affects any endpoint accepting ISO 8601 time params.
+
+**Propagator `RuntimeError` must be caught at API layer:** Any endpoint calling propagator methods (`get_position_by_norad_id`, `get_positions_at_times`) must catch `RuntimeError` — SGP4 propagation can fail for decayed orbits. Batch endpoint handles this internally via `get_all_positions()` error collection; single and track endpoints need explicit try/except.
+
+**`get_all_positions()` returns `(results, errors)` tuple:** Changed from returning just a list. Callers must unpack: `results, errors = propagator.get_all_positions(utc_dt)`.
+
 ---
 
 ## Task Checklist
@@ -263,3 +269,11 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - `GET /api/satellites` returns 30 stations with metadata from cached Parquet
 - `epoch_age_days` recomputed per-request, `object_type` defaults to `"UNKNOWN"`
 - 16/16 tests passing
+
+### Task 3.3 (Position Endpoints) — DONE
+- Three endpoints: batch, single (by NORAD ID), ground track
+- `iterrows()` eliminated from all production code (replaced with `iloc` + vectorized `dict(zip(...))`)
+- `get_all_positions()` returns `(results, errors)` tuple, errors surfaced in API response
+- `RuntimeError` from SGP4 failure caught on single + track endpoints (422, not 500)
+- 53/53 API tests passing (33 new for Task 3.3)
+- 250/250 total tests passing

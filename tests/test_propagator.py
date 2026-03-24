@@ -404,7 +404,7 @@ class TestBatchPropagation(unittest.TestCase):
     def setUpClass(cls):
         cls.prop = SatellitePropagator()
         cls.now = datetime.now(timezone.utc)
-        cls.results = cls.prop.get_all_positions(cls.now)
+        cls.results, cls.errors = cls.prop.get_all_positions(cls.now)
 
     def test_all_30_stations_propagate(self):
         """All 30 Phase 1 stations must propagate without error."""
@@ -626,7 +626,7 @@ class TestPerformance(unittest.TestCase):
         now = datetime.now(timezone.utc)
 
         start = time.perf_counter()
-        results = prop.get_all_positions(now)
+        results, _ = prop.get_all_positions(now)
         elapsed = time.perf_counter() - start
 
         self.assertGreaterEqual(len(results), 25)

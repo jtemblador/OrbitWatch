@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for FastAPI endpoints (Week 3, Tasks 1–2).
+"""Tests for FastAPI endpoints (Week 3, Tasks 1–3).
 
 Validates:
 - Health check endpoint
 - Satellite list endpoint (count, field types, field values)
+- Position endpoints (batch, single, ground track)
 - CORS headers present
-- Error handling (missing cache)
+- Error handling (404, 422, missing cache)
 """
 
 import os
@@ -195,7 +196,190 @@ class TestSatelliteList(unittest.TestCase):
 
 
 # ===========================================================================
-# 3. Edge Cases
+# 3. Batch Positions (Task 3.3)
+# ===========================================================================
+
+class TestBatchPositions(unittest.TestCase):
+    """GET /api/positions — all satellites at current time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.resp = client.get("/api/positions")
+        cls.data = cls.resp.json()
+
+    def test_returns_200(self):
+        self.assertEqual(self.resp.status_code, 200)
+
+    def test_response_has_required_keys(self):
+        for key in ("count", "timestamp", "positions"):
+            self.assertIn(key, self.data)
+
+    def test_count_matches_list_length(self):
+        self.assertEqual(self.data["count"], len(self.data["positions"]))
+
+    def test_count_approximately_30(self):
+        self.assertGreater(self.data["count"], 10)
+        self.assertLess(self.data["count"], 50)
+
+    def test_position_has_required_fields(self):
+        required = {"name", "norad_id", "lat", "lon", "alt_km", "speed_km_s", "epoch_age_days"}
+        for pos in self.data["positions"]:
+            self.assertTrue(
+                required.issubset(pos.keys()),
+                f"Missing fields in {pos.get('name', '?')}: {required - pos.keys()}",
+            )
+
+    def test_all_latitudes_valid(self):
+        for pos in self.data["positions"]:
+            self.assertGreaterEqual(pos["lat"], -90.0, pos["name"])
+            self.assertLessEqual(pos["lat"], 90.0, pos["name"])
+
+    def test_all_longitudes_valid(self):
+        for pos in self.data["positions"]:
+            self.assertGreaterEqual(pos["lon"], -180.0, pos["name"])
+            self.assertLessEqual(pos["lon"], 180.0, pos["name"])
+
+    def test_all_altitudes_positive(self):
+        for pos in self.data["positions"]:
+            self.assertGreater(pos["alt_km"], 0, pos["name"])
+
+    def test_all_speeds_reasonable(self):
+        for pos in self.data["positions"]:
+            self.assertGreater(pos["speed_km_s"], 1.0, pos["name"])
+            self.assertLess(pos["speed_km_s"], 11.0, pos["name"])
+
+    def test_custom_time_param(self):
+        resp = client.get("/api/positions?time=2026-03-24T12:00:00Z")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("2026-03-24T12:00:00", data["timestamp"])
+        self.assertGreater(data["count"], 0)
+
+    def test_malformed_time_returns_422(self):
+        resp = client.get("/api/positions?time=not-a-date")
+        self.assertEqual(resp.status_code, 422)
+
+    def test_timestamp_is_iso8601(self):
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(self.data["timestamp"])
+        except ValueError:
+            self.fail(f"Bad timestamp format: {self.data['timestamp']}")
+
+    def test_no_numpy_types_in_json(self):
+        import json
+        json.dumps(self.data)
+
+
+# ===========================================================================
+# 4. Single Position (Task 3.3)
+# ===========================================================================
+
+class TestSinglePosition(unittest.TestCase):
+    """GET /api/positions/{norad_id} — single satellite."""
+
+    def test_iss_returns_200(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_iss_has_required_fields(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        data = resp.json()
+        for key in ("name", "norad_id", "lat", "lon", "alt_km", "speed_km_s"):
+            self.assertIn(key, data)
+
+    def test_iss_altitude_bounds(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        data = resp.json()
+        self.assertGreater(data["alt_km"], LEO_ALT_MIN)
+        self.assertLess(data["alt_km"], LEO_ALT_MAX)
+
+    def test_iss_norad_id_matches(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        self.assertEqual(resp.json()["norad_id"], ISS_NORAD)
+
+    def test_iss_speed_bounds(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        data = resp.json()
+        self.assertGreater(data["speed_km_s"], 7.0)
+        self.assertLess(data["speed_km_s"], 8.0)
+
+    def test_unknown_norad_id_returns_404(self):
+        resp = client.get("/api/positions/9999999")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_custom_time_param(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time=2026-03-24T12:00:00Z")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_malformed_time_returns_422(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time=not-a-date")
+        self.assertEqual(resp.status_code, 422)
+
+
+# ===========================================================================
+# 5. Ground Track (Task 3.3)
+# ===========================================================================
+
+class TestGroundTrack(unittest.TestCase):
+    """GET /api/positions/{norad_id}/track — orbit trail points."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.resp = client.get(f"/api/positions/{ISS_NORAD}/track")
+        cls.data = cls.resp.json()
+
+    def test_returns_200(self):
+        self.assertEqual(self.resp.status_code, 200)
+
+    def test_response_has_required_keys(self):
+        for key in ("norad_id", "name", "duration_min", "steps", "track"):
+            self.assertIn(key, self.data)
+
+    def test_default_60_points(self):
+        self.assertEqual(len(self.data["track"]), 60)
+
+    def test_track_point_has_required_fields(self):
+        for pt in self.data["track"]:
+            for key in ("lat", "lon", "alt_km", "timestamp"):
+                self.assertIn(key, pt, f"Missing {key} in track point")
+
+    def test_track_latitudes_valid(self):
+        for pt in self.data["track"]:
+            self.assertGreaterEqual(pt["lat"], -90.0)
+            self.assertLessEqual(pt["lat"], 90.0)
+
+    def test_track_altitudes_positive(self):
+        for pt in self.data["track"]:
+            self.assertGreater(pt["alt_km"], 0)
+
+    def test_custom_steps(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}/track?steps=10&duration_min=45")
+        data = resp.json()
+        self.assertEqual(len(data["track"]), 10)
+        self.assertEqual(data["duration_min"], 45)
+
+    def test_timestamps_span_duration(self):
+        from datetime import datetime
+        track = self.data["track"]
+        t_first = datetime.fromisoformat(track[0]["timestamp"])
+        t_last = datetime.fromisoformat(track[-1]["timestamp"])
+        span_min = (t_last - t_first).total_seconds() / 60
+        # 60 steps over 90 min → last point at step 59 → ~88.5 min from first
+        self.assertGreater(span_min, 80)
+        self.assertLess(span_min, 95)
+
+    def test_unknown_norad_id_returns_404(self):
+        resp = client.get("/api/positions/9999999/track")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_malformed_time_returns_422(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}/track?time=garbage")
+        self.assertEqual(resp.status_code, 422)
+
+
+# ===========================================================================
+# 6. Edge Cases
 # ===========================================================================
 
 class TestApiEdgeCases(unittest.TestCase):
