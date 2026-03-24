@@ -106,38 +106,41 @@ raps # Week 2 — TLE Data + C++ SGP4 Propagation (Apr 3–9, 2026)
 
 ---
 
-### ⬜ 4. Python Propagator Wrapper (backend/core/propagator.py) — NEXT
+### ✅ 4. Python Propagator Wrapper (backend/core/propagator.py) — DONE
 
 **Orchestrates:** GPFetcher → C++ SGP4 → coordinate transforms
 
-```python
-class SatellitePropagator:
-    def get_position(self, satellite_name: str, utc_dt: datetime) -> dict:
-        """
-        Returns: {'lat': float, 'lon': float, 'alt': float, 'name': str, 'timestamp': datetime}
-        """
-        # 1. Get OMM row from GPFetcher cache
-        # 2. Convert OMM fields → sgp4init params (degrees→radians, rev/day→rad/min)
-        # 3. orbitcore.sgp4init() → Satrec
-        # 4. orbitcore.sgp4(satrec, tsince) → TEME (x,y,z,vx,vy,vz)
-        # 5. teme_to_geodetic() → lat/lon/alt + ECEF position
-        # 6. Return result dict
-```
+**What was built:**
+- `omm_to_sgp4_params(row)` — handles all unit conversions from OMM → sgp4init params
+- `SatellitePropagator` class with lazy data loading, O(1) name/NORAD lookup indexes, and Satrec caching
+- `get_position(name, utc_dt)` — single satellite by name
+- `get_position_by_norad_id(norad_id, utc_dt)` — single satellite by NORAD ID
+- `get_all_positions(utc_dt)` — batch propagate all satellites in group
+- `get_positions_at_times(name, utc_dts)` — ground track / time series for one satellite
 
-**Unit conversions the wrapper must handle:**
-- Degrees → radians for angular elements (inclination, RAAN, etc.)
+**Unit conversions implemented:**
+- Degrees → radians for angular elements (inclination, RAAN, argp, mean anomaly)
 - rev/day → rad/min for mean_motion: `÷ xpdotp` where `xpdotp = 1440/(2π)`
-- `mean_motion_dot`: already divided by 2 in OMM format → `÷ (xpdotp × 1440)`
+- `mean_motion_dot`: OMM value `÷ (xpdotp × 1440)`
+- `mean_motion_ddot`: OMM value `÷ (xpdotp × 1440²)`
 - ISO 8601 epoch → Julian date → epoch days (`jd - 2433281.5` for sgp4init)
 
+**Scalability design (Phase 3 ready):**
+- O(1) lookup indexes (`_name_index`, `_norad_index`) built once on data load — no DataFrame scans per call
+- Satrec cache: `sgp4init()` runs once per satellite, `sgp4()` reused for all time steps
+- Satrec memory: ~1 KB each → 6,000 Starlink sats = ~6 MB total
+
+> **⚠ PERF TODO (Week 8 Phase 3 scale-up):** `get_all_positions()` uses `df.iterrows()` — acceptable at 30 sats, needs replacement with vectorized iteration at 6,000+. See roadmap flag.
+
 **Success criteria:**
-- [ ] ISS position at known time matches public trackers (±2 km)
-- [ ] All 30 Phase 1 stations propagatable without error
-- [ ] Propagate 30 satellites in <1 sec
+- [x] ISS: alt=428 km, speed=7.659 km/s — correct
+- [x] All 30 Phase 1 stations propagated without error
+- [x] Propagate 30 satellites in <1 sec (typically ~0.1s)
+- [x] Cross-validated: all 30 stations match Python sgp4 to sub-meter
 
 ---
 
-### ✅ 5. Unit Tests — DONE (Tasks 1–3 fully tested)
+### ✅ 5. Unit Tests — DONE
 
 1. **SGP4 Propagation** ✅ (54/54 in `tests/test_sgp4_cpp.py`)
    - [x] C++ module imports, version string, GravConst enum, Satrec struct
@@ -158,7 +161,17 @@ class SatellitePropagator:
    - [x] ISS groundtrack over full orbit stays within inclination band
    - [x] GPS altitude ~20200 km verified through full pipeline
 
-> **Total: 117/117 tests passing** across test_gp_fetcher.py (37), test_coordinate_transforms.py (26), test_sgp4_cpp.py (54).
+4. **Propagator Wrapper** ✅ (80/80 in `tests/test_propagator.py`)
+   - [x] Unit conversion correctness (20 tests: degrees→radians, rev/day→rad/min, epoch)
+   - [x] ISS/CSS single-satellite sanity (altitude, speed, lat bounded by inclination)
+   - [x] All 30 Phase 1 stations batch propagate (positive alt, valid lat/lon, reasonable speeds)
+   - [x] Multi-time propagation / ground track (longitude sweep, altitude stability, lat oscillation)
+   - [x] Caching and indexes (lazy load, O(1) lookup, cache clear, case-insensitive)
+   - [x] Performance: 30 sats < 1s, 100 time steps < 1s, constant-time index lookup
+   - [x] Scalability simulation: 6000-sat index build < 1s, 1000 lookups < 10ms
+   - [x] Cross-validation: all 30 stations match Python sgp4 to sub-meter
+
+> **Total: 197/197 tests passing** across test_gp_fetcher.py (37), test_coordinate_transforms.py (26), test_sgp4_cpp.py (54), test_propagator.py (80).
 
 ---
 
@@ -167,8 +180,8 @@ class SatellitePropagator:
 1. ✅ **GP Data Fetcher** — done (37/37 tests)
 2. ✅ **Coordinate Transforms** — done (26/26 tests, GMST approach)
 3. ✅ **C++ SGP4 Engine** — done (54/54 tests, Vallado C++ via pybind11)
-4. ⬜ **Propagator Wrapper** — NEXT: glues 1+2+3 together, handles unit conversions
-5. ✅ **Tests** — 117/117 total (Tasks 1–3 fully covered, Task 4 tests pending)
+4. ✅ **Propagator Wrapper** — done (80/80 tests, O(1) indexes, Satrec cache)
+5. ✅ **Tests** — 197/197 total
 
 ---
 
@@ -179,7 +192,7 @@ backend/
 ├── core/
 │   ├── tle_fetcher.py           ✅ DONE (37 tests)
 │   ├── coordinate_transforms.py ✅ DONE (26 tests)
-│   └── propagator.py            ⬜ NEXT
+│   └── propagator.py            ✅ DONE (80 tests)
 ├── orbitcore.cpython-312-x86_64-linux-gnu.so  ✅ Built (import orbitcore)
 └── data/tle/stations.parquet    ✅ Generated
 
@@ -198,7 +211,8 @@ orbitcore/
 tests/
 ├── test_gp_fetcher.py           ✅ 37/37 passing
 ├── test_coordinate_transforms.py ✅ 26/26 passing
-└── test_sgp4_cpp.py             ✅ 54/54 passing
+├── test_sgp4_cpp.py             ✅ 54/54 passing
+└── test_propagator.py           ✅ 80/80 passing
 ```
 
 ---
@@ -210,8 +224,8 @@ tests/
 - [x] Coordinate transform module implemented (TEME → ECEF → geodetic via GMST)
 - [x] C++ SGP4 compiles and exposes via pybind11 (54 tests, 33 Vallado test sats validated)
 - [x] ISS position accurate — 409 km altitude, 7.67 km/s, matches Python sgp4 exactly
-- [ ] All 30 stations propagatable without error (needs propagator.py wrapper)
-- [ ] Propagator wrapper integrates GPFetcher → C++ SGP4 → coordinate transforms
+- [x] All 30 stations propagatable without error
+- [x] Propagator wrapper integrates GPFetcher → C++ SGP4 → coordinate transforms
 
 ---
 
@@ -221,7 +235,7 @@ tests/
 |------|----------|-----------|
 | ~~SPICE doesn't support TEME frame natively~~ | ~~Medium~~ | **RESOLVED** — Used GMST Z-rotation, validated with 5 satellites |
 | ~~Vallado's C++ build issues with CMake~~ | ~~Medium~~ | **RESOLVED** — Clean build, no warnings. Key: no precompiled headers, no stdafx, no CLR |
-| Unit conversion mistakes (deg→rad, rev/day→rad/min) | High | Cross-validated C++ vs Python sgp4 — identical. Still relevant for propagator.py wrapper |
+| ~~Unit conversion mistakes (deg→rad, rev/day→rad/min)~~ | ~~High~~ | **RESOLVED** — Cross-validated all 30 stations vs Python sgp4, sub-meter match |
 | ~~Accuracy worse than expected~~ | ~~Medium~~ | **RESOLVED** — Sub-micrometer match vs reference. SGP4 accuracy is ~1 km at epoch as expected |
 
 ---

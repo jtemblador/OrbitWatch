@@ -398,10 +398,20 @@ Validated with 5 real satellites (ISS, CSS, FREGAT DEB, HTV-X1, CREW DRAGON). 26
 - End-to-end: C++ SGP4 → coordinate transforms → ISS lat/lon/alt verified
 - 54/54 tests passing
 
-### Next Step: Propagator Wrapper (Task 2.4)
-- `propagator.py` orchestrates: GPFetcher cache → unit conversion → `orbitcore.sgp4init()` → `orbitcore.sgp4()` → `teme_to_geodetic()`
-- Key conversions: degrees→radians, rev/day→rad/min, ISO 8601→Julian Date→epoch days
-- Must handle all 30 Phase 1 stations without error
+### Task 2.4: Propagator Wrapper (DONE)
+
+`backend/core/propagator.py` orchestrates the full pipeline. Key findings:
+
+**Unit conversions validated:** All 13 `sgp4init()` parameters correctly converted. All 30 stations cross-validated against Python sgp4 library to sub-meter ECEF accuracy.
+
+**Scalability design added (not in original plan):**
+The naive lookup (`df["object_name"].str.upper() == name.upper()`) would be O(n) per API call — fine at 30 sats, slow at 6,000. Added O(1) dict indexes (`_name_index`, `_norad_index`) built once on data load.
+
+Satrec cache: `sgp4init()` is expensive (computes perturbation coefficients), `sgp4()` is cheap. Caching Satrec per NORAD ID means repeated time-step propagations skip initialization entirely.
+
+**Remaining perf TODO:** `get_all_positions()` uses `df.iterrows()` — flagged in roadmap for Phase 3 (Week 8) before Starlink scale-up.
+
+**Results:** 80/80 tests passing. 30 satellites in ~0.1s. ISS: alt=428 km, speed=7.659 km/s.
 
 ---
 
