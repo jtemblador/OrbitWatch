@@ -48,6 +48,12 @@
 - Minor behavior change: batch response now includes `"errors": null` when no errors (previously key was omitted). Better for frontend — consistent shape.
 - No `__init__.py` needed in `backend/models/` — Python 3 implicit namespace packages
 
+## Task 3.6: Unit Tests (Mar 24) — Completed via prior tasks
+
+- No new tests needed — all 10 checklist items were covered incrementally across Tasks 3.1–3.5
+- 82 API tests across 10 test classes: TestHealthCheck, TestCorsHeaders, TestSatelliteList, TestBatchPositions, TestSinglePosition, TestGroundTrack, TestRefresh, TestRefreshMocked, TestOpenAPISchema, TestResponseValidation, TestApiEdgeCases
+- All use FastAPI `TestClient`, network calls mocked in `TestRefreshMocked`
+
 ## Flaky Test: `TestPerformance.test_index_lookup_is_constant_time` (to fix end of week)
 
 - **What:** `tests/test_propagator.py` — asserts 100 name lookups < 0.05s, occasionally hits 0.077s

@@ -175,7 +175,7 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 
 ---
 
-### ⬜ 6. Unit Tests (`tests/test_api.py`)
+### ✅ 6. Unit Tests (`tests/test_api.py`)
 
 **What to test:**
 - Health check returns 200
@@ -190,9 +190,11 @@ Define response schemas so FastAPI auto-generates OpenAPI docs.
 - Response schemas match Pydantic models
 
 **Success criteria:**
-- [ ] All API tests pass
-- [ ] Tests use FastAPI `TestClient` (no real server needed)
-- [ ] Network calls mocked where appropriate
+- [x] All API tests pass
+- [x] Tests use FastAPI `TestClient` (no real server needed)
+- [x] Network calls mocked where appropriate
+
+**Actual:** All 10 test items covered by 82 tests across 10 test classes, distributed across Tasks 3.1–3.5 as each endpoint was built. No additional tests needed.
 
 ---
 
@@ -242,13 +244,13 @@ tests/
 
 ## Success Criteria (Definition of Done)
 
-- [ ] `uvicorn backend.main:app` starts cleanly
-- [ ] `/api/health` → 200
-- [ ] `/api/satellites` → 30 stations with correct metadata
-- [ ] `/api/positions` → 30 positions with valid lat/lon/alt/speed
-- [ ] `/api/positions/25544` → ISS position (~420 km alt)
-- [ ] `/api/positions/25544/track` → ground track points
+- [x] `uvicorn backend.main:app` starts cleanly
+- [x] `/api/health` → 200
+- [x] `/api/satellites` → 30 stations with correct metadata
+- [x] `/api/positions` → 30 positions with valid lat/lon/alt/speed
+- [x] `/api/positions/25544` → ISS position (~420 km alt)
+- [x] `/api/positions/25544/track` → ground track points
 - [x] `/api/refresh` → triggers data reload
 - [x] `/docs` → Swagger UI with typed schemas
 - [x] All API tests pass (82 total)
-- [ ] Ready for Cesium.js frontend integration in Week 4
+- [x] Ready for Cesium.js frontend integration in Week 4
