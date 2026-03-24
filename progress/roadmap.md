@@ -60,9 +60,8 @@
 - Write README.md (project description, screenshots, how to run)
 - Record demo GIF/video for portfolio
 
-> **⚠ PERF FLAG (before Phase 3 scale-up):** `SatellitePropagator.get_all_positions()` uses
-> `df.iterrows()` — fine at 30 sats, slow at 6,000. Replace with vectorized pandas or a
-> pre-built list of rows before scaling. Tracked in `task_logs/task_2_4_propagator_wrapper.md`.
+> **⚠ PERF FLAG (before Phase 3 scale-up):** Multiple `iterrows()` calls across the codebase
+> are fine at 30 sats but will be slow at 6,000. All items tracked in `progress/scaling_tracker.md`.
 
 ---
 

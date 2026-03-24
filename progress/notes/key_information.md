@@ -205,6 +205,20 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 ---
 
+## FastAPI Backend (Week 3)
+
+**TestClient lifespan gotcha:** `TestClient(app)` at module level does NOT trigger lifespan events. Must enter context manager (`__enter__()`) for `app.state` to be populated. This affects any test that accesses endpoints depending on lifespan-initialized state.
+
+**gp.php omits `OBJECT_TYPE`:** The simple `gp.php` endpoint does not return the `OBJECT_TYPE` field for any satellite. Only `sup-gp.php` or Space-Track provide it. API defaults to `"UNKNOWN"`.
+
+**Stations group includes debris:** CelesTrak's "stations" group is not limited to crewed LEO stations. Includes rocket bodies and debris (e.g., `FREGAT DEB` at 2263 km apoapsis). Do not assume tight LEO altitude bounds for the entire group.
+
+**`epoch_age_days` recomputation:** The value cached in Parquet is computed at fetch time and goes stale. API endpoints recompute it from `utcnow()` on each request.
+
+**Scaling tracker:** `progress/scaling_tracker.md` centrally tracks all `iterrows()` and other Phase 3 performance items. Add entries there whenever flagging code with `# ⚠ PERF`.
+
+---
+
 ## Task Checklist
 
 ### Task 2.1 (GP Data Fetcher) — DONE
@@ -233,14 +247,19 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - Validated: 32/33 Vallado test sats match Python sgp4 to sub-micrometer
 - 54/54 tests passing (including end-to-end C++ SGP4 → coordinate transforms → geodetic)
 
-### Task 2.4 (Propagator Wrapper) — NEXT
-- Orchestrate: GPFetcher → unit conversion → `orbitcore.sgp4init()` → `orbitcore.sgp4()` → `teme_to_geodetic()`
-- Angular unit conversion: JSON degrees → sgp4 radians
-- Mean motion conversion: rev/day → rad/min (`÷ xpdotp` where `xpdotp = 1440/(2π)`)
-- `mean_motion_dot`: OMM value `÷ (xpdotp × 1440)` (already /2 in OMM format)
-- Epoch conversion: ISO 8601 → Julian date → epoch days (`jd - 2433281.5`)
-- Must propagate all 30 Phase 1 stations without error
+### Task 2.4 (Propagator Wrapper) — DONE
+- Full pipeline: GPFetcher → unit conversion → C++ SGP4 → coordinate transforms → result dict
+- 80/80 tests passing
+- Cross-validated all 30 stations against Python sgp4 to sub-meter
 
-### Task 2.5 (Tests) — MOSTLY DONE
-- 117/117 tests passing across all test files
-- Remaining: propagator wrapper tests (Task 2.4)
+### Task 2.5 (Tests) — DONE
+- 197/197 tests passing across all Week 2 test files
+
+### Task 3.1 (FastAPI Skeleton) — DONE
+- FastAPI app with CORS, lifespan-based shared propagator, health check
+- 6/6 tests passing
+
+### Task 3.2 (Satellite List) — DONE
+- `GET /api/satellites` returns 30 stations with metadata from cached Parquet
+- `epoch_age_days` recomputed per-request, `object_type` defaults to `"UNKNOWN"`
+- 16/16 tests passing
