@@ -62,18 +62,19 @@ SGP4 (TEME) → GMST Z-rotation → ECEF → SPICE recgeo → geodetic
 
 ---
 
-## Vallado C++ Source Files (Our Starting Point for Task 2.3)
+## Vallado C++ Source (Wrapped in Task 2.3)
 
-```
-sgp4unit.cpp / sgp4unit.h    — Core SGP4/SDP4 propagator (SGP4init + SGP4)
-sgp4io.cpp / sgp4io.h        — TLE parsing I/O routines
-sgp4ext.cpp / sgp4ext.h      — Extension utilities (angle conversions, etc.)
-testcpp.cpp                   — Test driver program
-```
+**Source:** `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753/sgp4/cpp/SGP4/SGP4/SGP4.cpp` (3,247 lines)
+**Wrapped into:** `orbitcore/src/SGP4.cpp` + `orbitcore/include/SGP4.h`
+**Bindings:** `orbitcore/src/bindings.cpp` (pybind11)
 
-Key functions:
-- `SGP4Funcs::sgp4init()` — Initialize satellite record from orbital elements (called once per satellite)
-- `SGP4Funcs::sgp4()` — Propagate to time T, returns position/velocity in TEME (called repeatedly)
+The consolidated `SGP4.cpp` contains everything (sgp4unit + sgp4ext + sgp4io merged into one file under `SGP4Funcs` namespace). We do NOT use `twoline2rv()` — we init from OMM fields directly via `sgp4init()`.
+
+Key functions exposed to Python:
+- `orbitcore.sgp4init(whichconst, opsmode, satnum, epoch, bstar, ndot, nddot, ecco, argpo, inclo, mo, no_kozai, nodeo)` → `Satrec`
+- `orbitcore.sgp4(satrec, tsince)` → `((x,y,z), (vx,vy,vz))` in TEME (km, km/s)
+- `orbitcore.jday(yr,mo,dy,hr,mn,sec)` → `(jd, jdFrac)`
+- `orbitcore.getgravconst(GravConst.WGS72)` → dict of gravity constants
 
 All bug fixes in the code are marked with the comment keyword **`sgp4fix`** — search for it to see every correction vs original STR#3.
 
@@ -223,19 +224,23 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - ISS ground track verified over 7 days — lat bounded by inclination, alt stable
 - 26/26 tests passing
 
-### Task 2.3 (C++ SGP4 Engine) — NEXT
-- **Start with Vallado's C++ source** at `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753/sgp4/cpp/`
-- Decide: wrap Vallado's code via pybind11 OR use Python `sgp4` for propagation and C++ only for conjunction scanning
-- Validate against `sgp4-ver.tle` test cases
-- Use WGS-72 constants
+### Task 2.3 (C++ SGP4 Engine) — DONE
+- Wrapped Vallado's `SGP4.cpp` (3,247 lines) via pybind11 into `orbitcore/`
+- Chose Option A (own C++ wrapper) over Option B (Python sgp4 library) for portfolio value + conjunction scanner integration
+- Exposes: `sgp4init()`, `sgp4()`, `jday()`, `invjday()`, `getgravconst()`, `Satrec` class, `GravConst` enum
+- Used WGS-72 constants, AFSPC opsmode
+- Back-computes `jdsatepoch` from epoch parameter (Vallado's `sgp4init` doesn't set it — only `twoline2rv` does)
+- Validated: 32/33 Vallado test sats match Python sgp4 to sub-micrometer
+- 54/54 tests passing (including end-to-end C++ SGP4 → coordinate transforms → geodetic)
 
-### Task 2.4 (Propagator Wrapper) — PENDING
-- Orchestrate: GPFetcher → sgp4init (from OMM fields) → sgp4 propagate → coordinate transform
+### Task 2.4 (Propagator Wrapper) — NEXT
+- Orchestrate: GPFetcher → unit conversion → `orbitcore.sgp4init()` → `orbitcore.sgp4()` → `teme_to_geodetic()`
 - Angular unit conversion: JSON degrees → sgp4 radians
-- Mean motion conversion: rev/day → rad/min
-- Epoch conversion: ISO 8601 → Julian date
+- Mean motion conversion: rev/day → rad/min (`÷ xpdotp` where `xpdotp = 1440/(2π)`)
+- `mean_motion_dot`: OMM value `÷ (xpdotp × 1440)` (already /2 in OMM format)
+- Epoch conversion: ISO 8601 → Julian date → epoch days (`jd - 2433281.5`)
+- Must propagate all 30 Phase 1 stations without error
 
-### Task 2.5 (Tests) — PENDING
-- Use Vallado's test cases for SGP4 validation
-- Compare ISS position against N2YO/Heavens-Above (within 1-2 km)
-- Test coordinate transform chain end-to-end
+### Task 2.5 (Tests) — MOSTLY DONE
+- 117/117 tests passing across all test files
+- Remaining: propagator wrapper tests (Task 2.4)

@@ -358,10 +358,10 @@ After the initial implementation, audited the fetcher for collision-prediction r
 
 ---
 
-## 7. Implications for OrbitWatch (Updated Mar 22)
+## 7. Implications for OrbitWatch (Updated Mar 23)
 
 ### What We're Using
-- **Python `sgp4` library** — wraps Vallado's C++ implementation, already installed
+- **Our own C++ SGP4 via pybind11** (`import orbitcore`) — wraps Vallado's validated 2020 implementation (Task 2.3 DONE)
 - **JSON/OMM format** via CelesTrak `gp.php` API — implemented in `GPFetcher` (Task 2.1 DONE)
 - **GMST Z-rotation** for TEME→ECEF, **SPICE `recgeo()`** for ECEF→geodetic (Task 2.2 DONE)
 
@@ -376,19 +376,32 @@ After the initial implementation, audited the fetcher for collision-prediction r
 
 Validated with 5 real satellites (ISS, CSS, FREGAT DEB, HTV-X1, CREW DRAGON). 26/26 tests passing.
 
-### Architecture Decision: Python sgp4 vs Custom C++ (Task 2.3 — PENDING)
-The `sgp4` Python library (by Brandon Rhodes) is a compiled C extension that wraps Vallado's validated SGP4 implementation. It uses `Satrec.sgp4init()` to initialize from OMM fields directly — no TLE string parsing needed.
+### Architecture Decision: Custom C++ Wrapping (Task 2.3 — RESOLVED)
 
-For our C++ `orbitcore/` module, we have two paths:
-1. **Use Vallado's reference C++ code** from `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753/sgp4/cpp/` as a starting point
-2. **Use the Python sgp4 library** for propagation and reserve C++ for conjunction scanning (the hot path)
+**Two options were evaluated:**
+1. **Wrap Vallado's C++ via pybind11** — own the propagation engine, portfolio value, tighter C++ integration for conjunction scanning
+2. **Use Python `sgp4` library** — already wraps same code, less work, reserve C++ for conjunction scanning only
 
-**Decision deferred to Task 2.3** — evaluate both approaches.
+**Chose Option 1.** Rationale:
+- Portfolio signal: demonstrates C++/pybind11 with real aerospace-grade code to employers
+- Performance: conjunction scanner (Week 6) can call SGP4 directly in C++ without Python/C++ boundary overhead per satellite per timestep
+- Full control: we own the propagation engine, can extend it for batch propagation later
 
-### Validation Strategy
-- Use test cases from Revisiting STR#3 (`sgp4-ver.tle`) to validate our propagator
-- Compare ISS position against N2YO/Heavens-Above (should match within 1-2 km)
-- SGP4 accuracy: ~1 km at epoch, degrades ~5-10 km/day
+**What was built:** Vallado's `SGP4.cpp` (3,247 lines, namespace `SGP4Funcs`) wrapped via pybind11 bindings in `orbitcore/src/bindings.cpp`. Exposes `sgp4init()`, `sgp4()`, `jday()`, `invjday()`, `getgravconst()`, `Satrec` class, `GravConst` enum.
+
+**Key finding during wrapping:** `sgp4init()` does NOT set `jdsatepoch`/`jdsatepochF` — only `twoline2rv()` does. Since we bypass TLE string parsing (we init from OMM fields directly), we back-compute the Julian Date in our binding layer.
+
+### Validation Results (Task 2.3)
+- **32/33 Vallado test satellites** match Python `sgp4` library to sub-micrometer (< 1 nm)
+- 1 satellite (23599, deep-space e=0.714) differed by 0.9 km: opsmode='a' (AFSPC) vs 'i' (improved). Confirmed identical at same opsmode — not a bug
+- ISS at epoch: altitude 409 km, speed 7.67 km/s
+- End-to-end: C++ SGP4 → coordinate transforms → ISS lat/lon/alt verified
+- 54/54 tests passing
+
+### Next Step: Propagator Wrapper (Task 2.4)
+- `propagator.py` orchestrates: GPFetcher cache → unit conversion → `orbitcore.sgp4init()` → `orbitcore.sgp4()` → `teme_to_geodetic()`
+- Key conversions: degrees→radians, rev/day→rad/min, ISO 8601→Julian Date→epoch days
+- Must handle all 30 Phase 1 stations without error
 
 ---
 

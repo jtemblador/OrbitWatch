@@ -12,7 +12,7 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(orbitcore
     src/bindings.cpp
     src/hello.cpp
+    src/SGP4.cpp
 )
 
-# Link against any libraries if needed (none for hello world)
 target_include_directories(orbitcore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
