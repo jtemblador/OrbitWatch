@@ -52,5 +52,8 @@ Thumbs.db
 .env
 .env.local
 
+# Frontend secrets (Cesium Ion token)
+frontend/js/config.js
+
 # Docker
 docker-compose.override.yml

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.core.propagator import SatellitePropagator
 from backend.models.schemas import HealthResponse
@@ -43,6 +44,11 @@ app.include_router(satellites_router)
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
     return {"status": "ok"}
+
+
+# Serve frontend static files — mounted AFTER API routes so /api/* resolves first.
+# html=True makes "/" serve index.html.
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 
 if __name__ == "__main__":

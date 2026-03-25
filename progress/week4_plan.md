@@ -21,15 +21,15 @@
 
 ## Prerequisites
 
-- [ ] Create a free Cesium Ion account at [ion.cesium.com](https://ion.cesium.com)
-- [ ] Get an access token for terrain/imagery tiles
-- [ ] Store token in environment variable or config (NOT committed to repo)
+- [x] Create a free Cesium Ion account at [ion.cesium.com](https://ion.cesium.com)
+- [x] Get an access token for terrain/imagery tiles
+- [x] Store token in `frontend/js/config.js` (gitignored, template in `config.example.js`)
 
 ---
 
 ## Main Tasks
 
-### ⬜ 1. Cesium.js Setup (`frontend/index.html`)
+### ✅ 1. Cesium.js Setup (`frontend/index.html`)
 
 Get a basic Cesium globe rendering in the browser.
 
@@ -40,9 +40,11 @@ Get a basic Cesium globe rendering in the browser.
 - FastAPI serves `frontend/` as static files
 
 **Success criteria:**
-- [ ] Opening `http://localhost:8000` shows a spinning 3D globe
-- [ ] Globe has terrain and satellite imagery from Cesium Ion
-- [ ] No console errors
+- [x] Opening `http://localhost:8000` shows a spinning 3D globe
+- [x] Globe has terrain and satellite imagery from Cesium Ion (terrain disabled for UHD 620, imagery via Ion)
+- [x] No console errors
+
+**Actual:** Cesium 1.139.1 via jsDelivr CDN. Terrain disabled for integrated GPU performance. Token in gitignored `config.js` with missing-token guard. StaticFiles mount after API routes. 82/82 tests passing.
 
 ---
 
@@ -121,27 +123,72 @@ Wire up the frontend to be served by FastAPI and add basic styling.
 
 ```
 frontend/
-├── index.html          ⬜ CREATE — main page with Cesium viewer
+├── index.html          ✅ CREATED — main page with Cesium 1.139.1 via CDN
 ├── css/
-│   └── style.css       ⬜ CREATE — layout, info panel styling
+│   └── style.css       ✅ CREATED — full-viewport layout
 └── js/
-    ├── app.js          ⬜ CREATE — init Cesium viewer, orchestrate modules
+    ├── config.js       ✅ CREATED — Cesium Ion token (gitignored)
+    ├── config.example.js ✅ CREATED — token template for repo cloners
+    ├── app.js          ✅ CREATED — init Cesium viewer, token guard, UHD 620 opts
     ├── satellites.js   ⬜ CREATE — fetch positions, render points, auto-refresh
     └── info-panel.js   ⬜ CREATE — click handler, popup rendering, orbit trail
 
 backend/
-└── main.py             MODIFY — add StaticFiles mount for frontend/
+└── main.py             ✅ MODIFIED — added StaticFiles mount for frontend/
 ```
 
 ---
 
 ## Implementation Order
 
-1. ⬜ **Cesium setup** — globe rendering, Ion token, static file serving
+1. ✅ **Cesium setup** — globe rendering, Ion token, static file serving
 2. ⬜ **Satellite points** — fetch + render 30 dots, auto-refresh
 3. ⬜ **Click interaction** — info popup with position data
 4. ⬜ **Orbit trail** — ground track rendering on selection
 5. ⬜ **Polish** — layout, styling, labels
+
+---
+
+## Competitive Research (Pre-Week 4)
+
+Surveyed 9 satellite visualization sites to inform architecture decisions.
+
+### Rendering Engine Landscape
+
+| Site | Renderer | Max Objects | SGP4 Location |
+|------|----------|-------------|---------------|
+| satellitemap.space | Custom WebGL (TWGL.js) | 8,000+ | Client (satellite.js) |
+| satellitetracker3d.com | Three.js + Web Workers | 24,000+ | Client (satellite.js) |
+| AstriaGraph (UT Austin) | **Cesium.js** (Entity API) | 17,000+ | Client (Kepler per-frame) |
+| keeptrack.space | Custom WebGL 2.0 | 37,000+ | Client (Web Workers) |
+| trackthesky.com | **Cesium.js** | 9,000+ | Client (satellite.js) |
+| stuffin.space | Custom WebGL + GLSL | Full catalog | Client (satellite.js) |
+| agsattrack.com | **Cesium.js** | Dynamic | Client |
+| 3dsatellitetracker.com | Three.js | ~1,000 | Client |
+| scad3d.com | Three.js (likely) | Thousands | Client |
+
+### Key Findings
+
+1. **Cesium.js is validated** — trackthesky.com runs 9K+ satellites on Cesium successfully. AstriaGraph is laggy because it uses Entity + CallbackProperty (per-frame JS Kepler solving for 17K objects). We will use `PointPrimitiveCollection` + precomputed server-side positions — completely different perf profile.
+
+2. **Our server-side SGP4 is an advantage** — Every other site runs satellite.js (client-side SGP4). Our C++ propagation backend means the frontend just renders precomputed positions — no main-thread contention with orbit math.
+
+3. **UHD 620 (integrated GPU) constraint** — Dev machine has no discrete GPU. Mitigations: disable terrain initially (ellipsoid only), low-res imagery, cap pixel ratio at 1x, use `PointPrimitiveCollection` (single draw call).
+
+4. **Performance patterns from the best sites:**
+   - satellitetracker3d.com: All 24K sats as ONE `THREE.Points` draw call + Web Workers for propagation
+   - satellitemap.space: Viewport-based label culling (names only for central screen area), connection-speed-aware asset loading
+   - keeptrack.space: Custom WebGL 2.0, handles 37K objects at 60fps
+
+5. **UI patterns worth adopting (future weeks):**
+   - Info panel with TLE data, orbital params, speed/height/lat/lon (satellitetracker3d.com)
+   - Bottom-left quick-info overlay on hover (satellitetracker3d.com)
+   - Color-coding by object type: payload=blue, debris=gray, rocket body=orange (stuffin.space)
+   - Time controls: pause/10x/60x speed (trackthesky.com) — planned for Week 5
+   - Orbit filters by type (GEO/MEO/LEO/HEO) and tag groups (trackthesky.com)
+   - Proximity alert color highlighting (scad3d.com) — relevant for conjunction visualization
+
+6. **Why NOT Three.js or custom WebGL:** Both require building Earth rendering, WGS84 coordinate handling, camera controls, and picking from scratch. Cesium provides all of this out of the box. With 5 weeks remaining and the focus on the full pipeline (SGP4 → API → visualization → ML), Cesium's development speed advantage is decisive. Three.js is valid but costs 2-3 extra weeks of frontend work.
 
 ---
 
@@ -155,6 +202,7 @@ backend/
 | Auto-refresh interval | 5 seconds is a good starting point. Each refresh = 1 API call returning 30 positions. At Phase 3 (6k sats), may need to reduce frequency or use WebSocket. |
 | Cesium CDN version | Pin to a specific version (e.g., `1.115`) to avoid breaking changes |
 | Browser compatibility | Cesium requires WebGL. Works in all modern browsers. |
+| Intel UHD 620 | Integrated GPU — disable terrain during dev, use ellipsoid + low-res imagery, cap pixelRatio at 1. `PointPrimitiveCollection` keeps draw calls minimal. |
 
 ---
 

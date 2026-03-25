@@ -227,6 +227,18 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 ---
 
+## Cesium.js Frontend (Week 4)
+
+**StaticFiles catch-all changes HTTP status codes:** Mounting `StaticFiles(directory="frontend", html=True)` at `/` means undefined routes return 404 from the static mount instead of 405 from FastAPI's router. This affects any test asserting 405 Method Not Allowed. Accept both 404 and 405 in tests.
+
+**Use `PointPrimitiveCollection`, NOT Entity API:** Cesium Entity API has per-object overhead (picking, labels, property evaluation). AstriaGraph uses Entity + CallbackProperty for 17K objects and is laggy. `PointPrimitiveCollection` batches all points into a single GPU draw call. trackthesky.com uses this pattern for 9K+ satellites successfully.
+
+**Cesium Ion token is client-side:** Unlike backend `.env` secrets, the Ion token is embedded in frontend JS (same as Google Maps API keys). Restrict by domain in Ion dashboard for production. Stored in gitignored `config.js` with committed `config.example.js` template.
+
+**UHD 620 performance settings:** `terrain: undefined` (ellipsoid only), `resolutionScale: 1.0`, all default UI widgets disabled. These are the three biggest GPU savers for integrated graphics.
+
+---
+
 ## Task Checklist
 
 ### Task 2.1 (GP Data Fetcher) — DONE
@@ -296,3 +308,10 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - `RuntimeError` from SGP4 failure caught on single + track endpoints (422, not 500)
 - 53/53 API tests passing (33 new for Task 3.3)
 - 250/250 total tests passing
+
+### Task 4.1 (Cesium.js Setup) — DONE
+- Cesium 1.139.1 via jsDelivr CDN, no bundler
+- Viewer with terrain disabled (UHD 620), all default UI stripped, resolutionScale 1.0
+- Token in gitignored `config.js`, template in `config.example.js`, missing-token guard in `app.js`
+- FastAPI StaticFiles mount at `/` after API routes (html=True)
+- 82/82 API tests passing

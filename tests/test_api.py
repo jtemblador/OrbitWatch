@@ -435,7 +435,9 @@ class TestRefresh(unittest.TestCase):
 
     def test_refresh_get_not_allowed(self):
         resp = client.get("/api/refresh")
-        self.assertEqual(resp.status_code, 405)
+        # 405 without static mount, 404 with catch-all StaticFiles mount —
+        # both correctly reject GET on a POST-only endpoint.
+        self.assertIn(resp.status_code, (404, 405))
 
     def test_positions_work_after_refresh(self):
         """Propagator still functional after reload_data()."""
