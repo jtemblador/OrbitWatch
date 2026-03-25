@@ -237,6 +237,12 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **UHD 620 performance settings:** `terrain: undefined` (ellipsoid only), `resolutionScale: 1.0`, all default UI widgets disabled. These are the three biggest GPU savers for integrated graphics.
 
+**Cesium label `FILL_AND_OUTLINE` causes distortion.** Text outline rasterization on label textures produces artifacts at oblique angles. Use `FILL` style with `showBackground: true` (translucent dark) for clean rendering. Also: `disableDepthTestDistance: Number.POSITIVE_INFINITY` defeats globe occlusion — remove it so labels behind Earth are hidden.
+
+**`Cartesian3.fromDegrees(lon, lat, height)` — height is in meters.** API returns `alt_km`. Must multiply by 1000. Longitude is the first argument (not latitude).
+
+**Cesium position setter copies the value.** A scratch `Cartesian3` can be reused across all primitives in a loop — Cesium copies on assignment, doesn't store the reference. Safe for lerp loops with a single scratch object.
+
 ---
 
 ## Task Checklist
@@ -315,3 +321,11 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - Token in gitignored `config.js`, template in `config.example.js`, missing-token guard in `app.js`
 - FastAPI StaticFiles mount at `/` after API routes (html=True)
 - 82/82 API tests passing
+
+### Task 4.2 (Satellite Points on Globe) — DONE
+- `PointPrimitiveCollection` + `LabelCollection` for GPU-batched rendering
+- Smooth interpolation at ~20fps between 5-second API refreshes
+- CartoDB dark tiles (`dark_all`) for base map — country borders on dark background
+- Label style: FILL only (FILL_AND_OUTLINE causes rendering artifacts)
+- `Cartesian3.fromDegrees` height in meters — `alt_km * 1000`
+- 279/279 tests passing (no regressions)

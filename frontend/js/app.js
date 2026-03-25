@@ -17,8 +17,14 @@ if (typeof CESIUM_ION_TOKEN === "undefined" || CESIUM_ION_TOKEN === "YOUR_CESIUM
 Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
 const viewer = new Cesium.Viewer("cesiumContainer", {
-  // Terrain disabled — ellipsoid only for Intel UHD 620 performance.
-  // Re-enable with Cesium.createWorldTerrainAsync() when on discrete GPU.
+  // CartoDB dark tiles — country borders + labels on a dark background.
+  // Dark base makes satellite points pop visually.
+  baseLayer: new Cesium.ImageryLayer(
+    new Cesium.UrlTemplateImageryProvider({
+      url: "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+      credit: "Map tiles by CartoDB, under CC BY 3.0. Data by OpenStreetMap, under ODbL.",
+    })
+  ),
   terrain: undefined,
 
   // Strip default UI widgets we don't need yet

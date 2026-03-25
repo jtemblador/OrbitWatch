@@ -48,7 +48,7 @@ Get a basic Cesium globe rendering in the browser.
 
 ---
 
-### ⬜ 2. Satellite Points on Globe
+### ✅ 2. Satellite Points on Globe
 
 Fetch satellite positions from the API and render them as points.
 
@@ -59,9 +59,11 @@ Fetch satellite positions from the API and render them as points.
 - Auto-refresh positions every 5 seconds (satellites move ~40 km/s → noticeable drift in seconds)
 
 **Success criteria:**
-- [ ] ~30 colored dots visible on globe at correct positions
-- [ ] Points move in real-time as positions auto-refresh
-- [ ] ISS visible at ~420 km altitude, moving noticeably
+- [x] ~30 colored dots visible on globe at correct positions
+- [x] Points move in real-time as positions auto-refresh
+- [x] ISS visible at ~420 km altitude, moving noticeably
+
+**Actual:** `PointPrimitiveCollection` + `LabelCollection` with smooth interpolation (~20fps throttled). CartoDB dark tiles for base map. Labels use FILL style with translucent background (FILL_AND_OUTLINE caused rendering artifacts). 279/279 tests passing.
 
 **Performance note:** Use `PointPrimitiveCollection` not individual `Entity` objects. Entities are fine at 30 but will choke at 6,000 Starlink sats (Phase 3). Starting with the scalable approach now avoids a rewrite.
 
@@ -130,7 +132,7 @@ frontend/
     ├── config.js       ✅ CREATED — Cesium Ion token (gitignored)
     ├── config.example.js ✅ CREATED — token template for repo cloners
     ├── app.js          ✅ CREATED — init Cesium viewer, token guard, UHD 620 opts
-    ├── satellites.js   ⬜ CREATE — fetch positions, render points, auto-refresh
+    ├── satellites.js   ✅ CREATED — fetch positions, render points + labels, interpolation
     └── info-panel.js   ⬜ CREATE — click handler, popup rendering, orbit trail
 
 backend/
@@ -142,7 +144,7 @@ backend/
 ## Implementation Order
 
 1. ✅ **Cesium setup** — globe rendering, Ion token, static file serving
-2. ⬜ **Satellite points** — fetch + render 30 dots, auto-refresh
+2. ✅ **Satellite points** — fetch + render 30 dots, labels, interpolation, dark tiles
 3. ⬜ **Click interaction** — info popup with position data
 4. ⬜ **Orbit trail** — ground track rendering on selection
 5. ⬜ **Polish** — layout, styling, labels
