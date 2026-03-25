@@ -50,7 +50,8 @@ FastAPI Backend (Python)
 - **API routes:** `backend/routers/satellites.py`
 - **Core pipeline:** `backend/core/propagator.py`, `tle_fetcher.py`, `coordinate_transforms.py`
 - **Frontend entry point:** `frontend/index.html` (not yet built)
-- **Tests:** `tests/` (265 tests across 6 test files)
+- **Pydantic schemas:** `backend/models/schemas.py` (8 response models)
+- **Tests:** `tests/` (265 tests across 7 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -58,11 +59,11 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Week 3 — FastAPI Backend (Apr 10–16, 2026)
+- **Phase:** Week 4 — Cesium.js Globe (Apr 17–23, 2026)
 - **Timeline:** Mar 20 – May 15, 2026 (8 weeks)
-- **Completed:** Weeks 0–2 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper), Week 3 Tasks 3.1–3.4 (FastAPI skeleton, satellite list, position endpoints, data refresh)
-- **Next steps:** Task 3.5 (Pydantic response models), then Week 4 (Cesium.js frontend)
-- **Tests:** 265 passing across 6 test files
+- **Completed:** Weeks 0–3 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests)
+- **Next steps:** Week 4 (Cesium.js 3D frontend — globe, satellite points, click interaction, orbit trails)
+- **Tests:** 265 passing across 7 test files (82 API + 183 backend/engine)
 
 ## Notes for Future Sessions
 - Jose's ML experience is with CatBoost/XGBoost/LightGBM from his NFL prediction project — same pipeline pattern applies here

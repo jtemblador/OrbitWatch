@@ -1,0 +1,170 @@
+# Week 4 — Cesium.js Globe (Apr 17–23, 2026)
+
+**Goal:** Render Phase 1 satellites on an interactive 3D globe powered by Cesium.js, connected to the FastAPI backend. By the end of this week, a user can open a browser, see ~30 satellites orbiting Earth in real-time, and click any satellite to see its info.
+
+---
+
+## What We Have (from Weeks 2–3)
+
+| Component | Endpoint | What it returns |
+|-----------|----------|-----------------|
+| Satellite metadata | `GET /api/satellites` | 30 stations with name, norad_id, epoch, orbital params |
+| Batch positions | `GET /api/positions?time=T` | lat, lon, alt_km, speed_km_s for all 30 sats at time T |
+| Single position | `GET /api/positions/{norad_id}` | Position for one satellite |
+| Ground track | `GET /api/positions/{norad_id}/track?duration_min=90&steps=60` | 60 lat/lon/alt points spanning ~1 orbit |
+| Data refresh | `POST /api/refresh` | Triggers fresh TLE fetch from CelesTrak |
+| OpenAPI docs | `GET /docs` | Swagger UI with typed schemas for all endpoints |
+
+**All responses are Pydantic-validated JSON.** Frontend just needs to fetch and render.
+
+---
+
+## Prerequisites
+
+- [ ] Create a free Cesium Ion account at [ion.cesium.com](https://ion.cesium.com)
+- [ ] Get an access token for terrain/imagery tiles
+- [ ] Store token in environment variable or config (NOT committed to repo)
+
+---
+
+## Main Tasks
+
+### ⬜ 1. Cesium.js Setup (`frontend/index.html`)
+
+Get a basic Cesium globe rendering in the browser.
+
+**What to build:**
+- HTML page loading Cesium.js via CDN (no npm/bundler for Phase 1)
+- Cesium Ion access token configuration
+- Basic `Cesium.Viewer` with Earth globe, default imagery, terrain
+- FastAPI serves `frontend/` as static files
+
+**Success criteria:**
+- [ ] Opening `http://localhost:8000` shows a spinning 3D globe
+- [ ] Globe has terrain and satellite imagery from Cesium Ion
+- [ ] No console errors
+
+---
+
+### ⬜ 2. Satellite Points on Globe
+
+Fetch satellite positions from the API and render them as points.
+
+**What to build:**
+- On page load, `fetch('/api/positions')` to get all 30 satellite positions
+- Render each satellite as a colored point using `Cesium.PointPrimitiveCollection` (GPU-accelerated, scales to Phase 3)
+- Point color: all red for Phase 1 (stations). Will differentiate by type in Phase 2+ when `object_type` is available.
+- Auto-refresh positions every 5 seconds (satellites move ~40 km/s → noticeable drift in seconds)
+
+**Success criteria:**
+- [ ] ~30 colored dots visible on globe at correct positions
+- [ ] Points move in real-time as positions auto-refresh
+- [ ] ISS visible at ~420 km altitude, moving noticeably
+
+**Performance note:** Use `PointPrimitiveCollection` not individual `Entity` objects. Entities are fine at 30 but will choke at 6,000 Starlink sats (Phase 3). Starting with the scalable approach now avoids a rewrite.
+
+---
+
+### ⬜ 3. Satellite Info Popup (Click Interaction)
+
+Click a satellite point → show info panel.
+
+**What to build:**
+- Click handler on satellite points
+- On click, fetch `/api/positions/{norad_id}` for fresh data
+- Display popup/panel with: name, NORAD ID, altitude, speed, lat/lon, epoch age
+- Close popup on click elsewhere or click X
+
+**Success criteria:**
+- [ ] Clicking a satellite shows info popup with correct data
+- [ ] Popup updates with fresh position data
+- [ ] Clicking elsewhere dismisses popup
+
+---
+
+### ⬜ 4. Orbit Trail for Selected Satellite
+
+Show the orbital path when a satellite is selected.
+
+**What to build:**
+- On satellite click, fetch `/api/positions/{norad_id}/track?duration_min=90&steps=120`
+- Render as a polyline using `Cesium.PolylineCollection` (or entity polyline)
+- Trail follows the ground track (lat/lon projected onto globe surface) or 3D orbit path at altitude
+- Clear previous trail when selecting a different satellite
+
+**Success criteria:**
+- [ ] Selecting a satellite shows its ~90-minute orbit trail
+- [ ] Trail is visually smooth (120 points over 90 min)
+- [ ] Selecting a different satellite replaces the trail
+- [ ] ISS trail wraps around globe at ~51.6° inclination
+
+---
+
+### ⬜ 5. Static Files + Layout Polish
+
+Wire up the frontend to be served by FastAPI and add basic styling.
+
+**What to build:**
+- FastAPI `StaticFiles` mount for `frontend/` directory
+- Minimal CSS: globe fills viewport, info panel overlays top-right corner
+- Satellite name labels (optional — may be too cluttered at 30 sats, but try it)
+- Page title: "OrbitWatch — Satellite Tracker"
+
+**Success criteria:**
+- [ ] `uvicorn backend.main:app` serves both API and frontend
+- [ ] Clean, full-viewport layout with no scrollbars
+- [ ] Works in Chrome/Firefox/Edge
+
+---
+
+## File Structure
+
+```
+frontend/
+├── index.html          ⬜ CREATE — main page with Cesium viewer
+├── css/
+│   └── style.css       ⬜ CREATE — layout, info panel styling
+└── js/
+    ├── app.js          ⬜ CREATE — init Cesium viewer, orchestrate modules
+    ├── satellites.js   ⬜ CREATE — fetch positions, render points, auto-refresh
+    └── info-panel.js   ⬜ CREATE — click handler, popup rendering, orbit trail
+
+backend/
+└── main.py             MODIFY — add StaticFiles mount for frontend/
+```
+
+---
+
+## Implementation Order
+
+1. ⬜ **Cesium setup** — globe rendering, Ion token, static file serving
+2. ⬜ **Satellite points** — fetch + render 30 dots, auto-refresh
+3. ⬜ **Click interaction** — info popup with position data
+4. ⬜ **Orbit trail** — ground track rendering on selection
+5. ⬜ **Polish** — layout, styling, labels
+
+---
+
+## Things to Watch
+
+| Concern | Detail |
+|---------|--------|
+| Cesium Ion token | Must NOT be committed to repo. Use env var or separate config file in `.gitignore` |
+| `PointPrimitiveCollection` vs `Entity` | Start with PointPrimitiveCollection — it's GPU-accelerated and scales to 6k+ points. Entity API is simpler but won't scale. |
+| CORS | Already configured `allow_origins=["*"]` in FastAPI. If serving frontend from same origin (static files), CORS isn't even needed for API calls. |
+| Auto-refresh interval | 5 seconds is a good starting point. Each refresh = 1 API call returning 30 positions. At Phase 3 (6k sats), may need to reduce frequency or use WebSocket. |
+| Cesium CDN version | Pin to a specific version (e.g., `1.115`) to avoid breaking changes |
+| Browser compatibility | Cesium requires WebGL. Works in all modern browsers. |
+
+---
+
+## Success Criteria (Definition of Done)
+
+- [ ] 3D globe renders with Cesium Ion terrain/imagery
+- [ ] ~30 satellite points visible at correct positions
+- [ ] Points move in real-time (auto-refresh)
+- [ ] Click satellite → info popup with name, altitude, speed, position
+- [ ] Selected satellite shows ~90-minute orbit trail
+- [ ] Served by FastAPI (`uvicorn backend.main:app`)
+- [ ] No console errors, clean layout
+- [ ] Ready for Week 5 polish (time controls, toggle groups)

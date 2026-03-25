@@ -259,6 +259,8 @@ OrbitWatch/
 │   ├── orbitcore.cpython-312-*.so  # Compiled C++ extension
 │   ├── routers/
 │   │   └── satellites.py          # All API endpoints (satellites, positions, refresh)
+│   ├── models/
+│   │   └── schemas.py            # 8 Pydantic response models (OpenAPI schema)
 │   ├── core/
 │   │   ├── tle_fetcher.py         # GPFetcher — OMM/JSON from CelesTrak + Parquet cache
 │   │   ├── propagator.py          # SatellitePropagator — full pipeline orchestrator
@@ -276,8 +278,8 @@ OrbitWatch/
 │   └── notes/
 │       ├── week{N}_notes.md
 │       └── key_information.md     # Durable findings and gotchas
-└── tests/                          # 265 tests across 6 files
-    ├── test_api.py                # 68 tests — FastAPI endpoints
+└── tests/                          # 265 tests across 7 files
+    ├── test_api.py                # 82 tests — FastAPI endpoints + schema validation
     ├── test_propagator.py         # 80 tests — full pipeline
     ├── test_sgp4_cpp.py           # 54 tests — C++ engine + Vallado verification
     ├── test_gp_fetcher.py         # 37 tests — data fetch + cache
