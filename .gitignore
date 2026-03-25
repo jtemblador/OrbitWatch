@@ -38,6 +38,9 @@ backend/data/conjunctions/*.parquet
 # Claude Code settings
 .claude/
 
+# Superpowers brainstorm sessions
+.superpowers/
+
 # IDE
 .vscode/
 .idea/

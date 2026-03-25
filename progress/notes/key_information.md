@@ -243,6 +243,10 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **Cesium position setter copies the value.** A scratch `Cartesian3` can be reused across all primitives in a loop — Cesium copies on assignment, doesn't store the reference. Safe for lerp loops with a single scratch object.
 
+**Cesium `PolylineFade` material does NOT exist.** The generic `Fade` material works on `PolylineCollection` via `materialInput.st` (s = 0→1 along length), but makes trailing portions fully transparent. For orbit trails, use solid `Color` material instead.
+
+**`ScreenSpaceEventHandler` + `scene.pick()` for satellite click detection.** Returns the `PointPrimitive` with its `id` property (set to `norad_id`). Check `satellites.has(picked.primitive.id)` to confirm it's a satellite and not another primitive.
+
 ---
 
 ## Task Checklist
@@ -329,3 +333,12 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - Label style: FILL only (FILL_AND_OUTLINE causes rendering artifacts)
 - `Cartesian3.fromDegrees` height in meters — `alt_km * 1000`
 - 279/279 tests passing (no regressions)
+
+### Tasks 4.3+4.4 (Info Panel + Orbit Trail) — DONE
+- Click handler via `ScreenSpaceEventHandler` + `scene.pick()` on satellite points
+- Bottom-left fixed info panel with position data (live) + orbital params (cached at startup)
+- Auto-refresh every 5 seconds while satellite is selected
+- 90-minute orbit trail via `PolylineCollection` — solid cyan (#4fc3f7) polyline, 120 steps
+- Trail toggle checkbox in panel, race condition guard on async fetch
+- `satelliteMetadata` Map added to `satellites.js` — caches `/api/satellites` at startup
+- Frontend-only changes, no backend modifications

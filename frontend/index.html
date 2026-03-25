@@ -17,8 +17,9 @@
 
   <!-- Config (gitignored — contains Cesium Ion token) -->
   <script src="/js/config.js"></script>
-  <!-- App modules (load order matters: app.js creates viewer, satellites.js uses it) -->
+  <!-- App modules (load order matters: app → satellites → info-panel) -->
   <script src="/js/app.js"></script>
   <script src="/js/satellites.js"></script>
+  <script src="/js/info-panel.js"></script>
 </body>
 </html>

@@ -69,7 +69,7 @@ Fetch satellite positions from the API and render them as points.
 
 ---
 
-### ⬜ 3. Satellite Info Popup (Click Interaction)
+### ✅ 3. Satellite Info Popup (Click Interaction)
 
 Click a satellite point → show info panel.
 
@@ -80,13 +80,15 @@ Click a satellite point → show info panel.
 - Close popup on click elsewhere or click X
 
 **Success criteria:**
-- [ ] Clicking a satellite shows info popup with correct data
-- [ ] Popup updates with fresh position data
-- [ ] Clicking elsewhere dismisses popup
+- [x] Clicking a satellite shows info popup with correct data
+- [x] Popup updates with fresh position data
+- [x] Clicking elsewhere dismisses popup
+
+**Actual:** Bottom-left fixed panel with vertical key-value table. Shows position data (live from API) + orbital params (cached at startup from `/api/satellites`). Auto-refreshes every 5 seconds. Dark theme with cyan (#4fc3f7) accent. `ScreenSpaceEventHandler` for click detection via `scene.pick()`.
 
 ---
 
-### ⬜ 4. Orbit Trail for Selected Satellite
+### ✅ 4. Orbit Trail for Selected Satellite
 
 Show the orbital path when a satellite is selected.
 
@@ -97,10 +99,12 @@ Show the orbital path when a satellite is selected.
 - Clear previous trail when selecting a different satellite
 
 **Success criteria:**
-- [ ] Selecting a satellite shows its ~90-minute orbit trail
-- [ ] Trail is visually smooth (120 points over 90 min)
-- [ ] Selecting a different satellite replaces the trail
-- [ ] ISS trail wraps around globe at ~51.6° inclination
+- [x] Selecting a satellite shows its ~90-minute orbit trail
+- [x] Trail is visually smooth (120 points over 90 min)
+- [x] Selecting a different satellite replaces the trail
+- [x] ISS trail wraps around globe at ~51.6° inclination
+
+**Actual:** `PolylineCollection` with solid cyan (#4fc3f7) polyline, 120 steps over 90 minutes. Toggle checkbox in info panel. Initially tried `Fade` material for gradient effect — trail behind satellite was invisible, switched to solid `Color` material. Race condition guard prevents stale trail on rapid selection changes.
 
 ---
 
@@ -133,7 +137,7 @@ frontend/
     ├── config.example.js ✅ CREATED — token template for repo cloners
     ├── app.js          ✅ CREATED — init Cesium viewer, token guard, UHD 620 opts
     ├── satellites.js   ✅ CREATED — fetch positions, render points + labels, interpolation
-    └── info-panel.js   ⬜ CREATE — click handler, popup rendering, orbit trail
+    └── info-panel.js   ✅ CREATED — click handler, info panel, orbit trail
 
 backend/
 └── main.py             ✅ MODIFIED — added StaticFiles mount for frontend/
@@ -145,8 +149,8 @@ backend/
 
 1. ✅ **Cesium setup** — globe rendering, Ion token, static file serving
 2. ✅ **Satellite points** — fetch + render 30 dots, labels, interpolation, dark tiles
-3. ⬜ **Click interaction** — info popup with position data
-4. ⬜ **Orbit trail** — ground track rendering on selection
+3. ✅ **Click interaction** — info panel with position + orbital data, auto-refresh
+4. ✅ **Orbit trail** — solid cyan polyline, 90-min ground track, toggle checkbox
 5. ⬜ **Polish** — layout, styling, labels
 
 ---

@@ -35,6 +35,10 @@ let lastLerpTime = 0;
 // Guard against overlapping fetches.
 let fetchInFlight = false;
 
+// Satellite metadata cache — orbital params from /api/satellites (fetched once at startup).
+// Map<norad_id, { object_type, epoch, epoch_age_days, period_min, inclination_deg, apoapsis_km, periapsis_km }>
+const satelliteMetadata = new Map();
+
 // Scratch Cartesian3 — reused each frame to avoid GC pressure.
 // Safe: Cesium's position setter copies the value, not the reference.
 const scratchCartesian = new Cesium.Cartesian3();
@@ -158,6 +162,32 @@ async function refreshSatellites() {
   }
 }
 
+/**
+ * Fetch satellite metadata (orbital params) once at startup.
+ * Cached in satelliteMetadata map for the info panel.
+ */
+async function fetchSatelliteMetadata() {
+  try {
+    const resp = await fetch("/api/satellites");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    for (const sat of data.satellites) {
+      satelliteMetadata.set(sat.norad_id, {
+        object_type: sat.object_type,
+        epoch: sat.epoch,
+        epoch_age_days: sat.epoch_age_days,
+        period_min: sat.period_min,
+        inclination_deg: sat.inclination_deg,
+        apoapsis_km: sat.apoapsis_km,
+        periapsis_km: sat.periapsis_km,
+      });
+    }
+  } catch (err) {
+    console.error("Failed to fetch satellite metadata:", err);
+  }
+}
+
 // --- Startup ---
+fetchSatelliteMetadata();
 refreshSatellites();
 setInterval(refreshSatellites, REFRESH_INTERVAL_MS);
