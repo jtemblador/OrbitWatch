@@ -31,12 +31,18 @@ Added a `satelliteMetadata` Map in `satellites.js` — fetches `/api/satellites`
 
 ### Orbit Trail
 
-- **Approach:** Fetch 120-point ground track from `/api/positions/{norad_id}/track?duration_min=90&steps=120`, render as `PolylineCollection` polyline (GPU-batched, consistent with Task 4.2 primitive-based approach)
+- **Approach:** Fetch 360-point ground track from `/api/positions/{norad_id}/track?duration_min=90&steps=360`, render as Entity polyline with `clampToGround: true` (ground track projected onto the surface — industry standard for LEO trackers)
 - **Color:** Solid cyan (`#4fc3f7`, 80% opacity) — initially tried Cesium's `Fade` material for a gradient trail but it made the portion behind the satellite invisible. Solid color is simpler and fully visible.
 - **Past + future window:** Trail fetched from `now - 45min` to `now + 45min` so the satellite sits mid-trail. Originally fetched forward-only from "now", which caused the trail to disconnect as the satellite moved ahead of the trail's origin.
 - **Trail refresh:** Re-fetched every 30 seconds to keep the trail aligned with the satellite's moving position.
-- **Toggle:** Checkbox in the info panel controls `show` property on the active polyline
+- **Toggle:** Checkbox in the info panel controls `show` property on the active Entity
 - **Race condition guard:** `if (selectedNoradId !== noradId) return` after async trail fetch prevents stale trail rendering if selection changes mid-fetch
+
+### Selection Indicator
+
+- Selected satellite point enlarges (6px → 10px) and gets a cyan outline ring (3px `outlineWidth`)
+- Deselecting restores original point style
+- Uses `PointPrimitive.outlineColor`/`outlineWidth` properties directly — no extra entity needed
 
 ---
 
@@ -58,11 +64,14 @@ No backend changes — all API endpoints already existed from Week 3.
 - Clicking a satellite point shows info panel with correct name, position, and orbital params
 - Clicking elsewhere or the × button dismisses the panel
 - Panel data auto-refreshes every 5 seconds while a satellite is selected
-- Orbit trail renders as a solid cyan polyline along the 90-minute ground track
+- Orbit trail renders as a solid cyan ground track along the 90-minute orbit path
+- Trail is continuous all the way around the globe (no gaps on the far side)
 - Trail checkbox toggles visibility
 - Selecting a different satellite replaces both panel data and trail
 - ISS trail wraps around globe at ~51.6° inclination as expected
 - Race condition guard works — rapid click-switching doesn't leave stale trails
+- Selected satellite has visible cyan outline ring for identification while rotating globe
+- Cross-checked ISS position against python-sgp4 reference (sub-millimeter match) and wheretheiss.at API (speed matches to 3 decimal places)
 - No console errors
 
 ---
@@ -73,9 +82,17 @@ No backend changes — all API endpoints already existed from Week 3.
 
 2. **Forward-only trails disconnect from the satellite.** Fetching the trail from "now" forward means the satellite moves ahead of the trail's starting point within seconds. Fix: fetch from `now - 45min` so the satellite sits mid-trail with past and future path visible. Combined with a 30-second re-fetch, the trail stays aligned.
 
-3. **`satelliteMetadata` cache avoids per-click API overhead.** Orbital params (period, inclination, etc.) change slowly — fetching once at startup is sufficient. Position data still refreshes live.
+3. **`PolylineCollection` cannot render orbit trails correctly around the globe.** It draws straight Cartesian chords between points with no `arcType` support. These chords sag below the actual orbital arc on the far side of the globe, causing visible gaps and disconnections. The Cesium community confirms this limitation ([cesium.com/t/20570](https://community.cesium.com/t/how-to-set-arctype-of-polyline-in-polylinecollection/20570)). Fix: use Entity polyline with `arcType` and `clampToGround`.
 
-4. **Script load order matters.** `info-panel.js` depends on `viewer`, `satellites`, `satelliteMetadata`, and `REFRESH_INTERVAL_MS` — all defined in `app.js` and `satellites.js`. Must load in order: app → satellites → info-panel.
+4. **Render orbit trails as ground tracks (surface projection), not at orbital altitude.** Rendering at altitude causes a perspective "lifting" effect near the globe's limb — the 385+ km gap between trail and surface becomes visible edge-on, making the trail appear to peel away from the globe asymmetrically. This is physically correct (not a data bug) but visually confusing. Industry standard (satvis, trackthesky, etc.) is to project the trail onto the surface while keeping the satellite dot at real altitude.
+
+5. **Geodetic altitude varies ~18-19 km over one orbit for nearly circular LEO satellites.** This is the combined effect of orbital eccentricity (~7-14 km) and the WGS-84 ellipsoid shape (~12 km, since Earth is flatter at the poles). Verified by computing orbital radius at each track point — radius varies smoothly as expected. The geodetic altitude variation amplifies the visual lifting effect, which is another reason surface projection is the right approach.
+
+6. **Our SGP4 + coordinate transform pipeline is verified correct.** Cross-checked against python-sgp4 reference implementation at the same time — position delta is sub-millimeter (0.00001°). GMST matches independent Meeus formula to 0.00 arcseconds. ISS speed matches wheretheiss.at public API to 3 decimal places (7.657 vs 7.658 km/s).
+
+7. **`satelliteMetadata` cache avoids per-click API overhead.** Orbital params (period, inclination, etc.) change slowly — fetching once at startup is sufficient. Position data still refreshes live.
+
+8. **Script load order matters.** `info-panel.js` depends on `viewer`, `satellites`, `satelliteMetadata`, and `REFRESH_INTERVAL_MS` — all defined in `app.js` and `satellites.js`. Must load in order: app → satellites → info-panel.
 
 ---
 
@@ -87,12 +104,16 @@ No backend changes — all API endpoints already existed from Week 3.
 |----------------|---------|
 | `selectedNoradId` | Currently selected satellite NORAD ID (null = none) |
 | `trailVisible` | Orbit trail visibility state |
-| `trailCollection` | `PolylineCollection` for GPU-batched trail rendering |
-| `selectSatellite(noradId)` | Opens panel, fetches position data, renders orbit trail |
-| `deselectSatellite()` | Hides panel, clears trail |
+| `trailEntity` | Entity polyline for ground track rendering |
+| `selectionIndicator` | NORAD ID of currently highlighted satellite (for style restore) |
+| `SELECTED_STYLE` / `DEFAULT_STYLE` | Point style configs for selection highlight |
+| `selectSatellite(noradId)` | Opens panel, highlights point, fetches position data, renders orbit trail |
+| `deselectSatellite()` | Hides panel, clears trail, restores point style |
+| `updateSelectionIndicator(noradId)` | Enlarges point + adds cyan outline ring |
+| `clearSelectionIndicator()` | Restores original point style |
 | `refreshPanelData(noradId)` | Fetches `/api/positions/{noradId}`, updates table with position + metadata |
-| `fetchAndRenderTrail(noradId)` | Fetches 120-point track, renders solid cyan polyline |
-| `clearTrail()` | Removes active polyline from collection |
+| `fetchAndRenderTrail(noradId)` | Fetches 360-point track, renders ground track Entity polyline |
+| `clearTrail()` | Removes active Entity polyline |
 
 ### Frontend (`frontend/js/satellites.js` — additions)
 

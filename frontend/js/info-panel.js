@@ -14,11 +14,13 @@ let trailVisible = true;
 let lastTrailRefresh = 0;
 const TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s to keep it aligned with satellite
 
-// Orbit trail — PolylineCollection for GPU-batched rendering.
-const trailCollection = viewer.scene.primitives.add(
-  new Cesium.PolylineCollection()
-);
-let activeTrail = null; // current Polyline reference
+// Orbit trail — Entity polyline projected as ground track (industry standard).
+// Rendering at orbital altitude causes perspective "lift" near the globe's limb;
+// projecting onto the surface matches how satvis, trackthesky, etc. render trails.
+let trailEntity = null;
+
+// Selection indicator — cyan ring around the selected satellite.
+let selectionIndicator = null;
 
 // --- DOM: Info Panel ---
 const panel = document.createElement("div");
@@ -55,8 +57,8 @@ document.getElementById("info-panel-close").addEventListener("click", deselectSa
 
 document.getElementById("trail-checkbox").addEventListener("change", function () {
   trailVisible = this.checked;
-  if (activeTrail) {
-    activeTrail.show = trailVisible;
+  if (trailEntity) {
+    trailEntity.show = trailVisible;
   }
 });
 
@@ -71,6 +73,9 @@ async function selectSatellite(noradId) {
   const name = entry ? entry.label.text : `NORAD ${noradId}`;
   document.getElementById("info-panel-title").textContent = name;
 
+  // Highlight selected satellite with a cyan ring
+  updateSelectionIndicator(noradId);
+
   // Fetch fresh position + show panel data
   await refreshPanelData(noradId);
 
@@ -84,6 +89,36 @@ function deselectSatellite() {
   selectedNoradId = null;
   panel.style.display = "none";
   clearTrail();
+  clearSelectionIndicator();
+}
+
+// --- Selection Indicator (highlight selected satellite's point) ---
+
+const SELECTED_STYLE = { pixelSize: 10, outlineColor: Cesium.Color.CYAN, outlineWidth: 3 };
+const DEFAULT_STYLE = { pixelSize: 6, outlineColor: Cesium.Color.TRANSPARENT, outlineWidth: 0 };
+
+function updateSelectionIndicator(noradId) {
+  clearSelectionIndicator();
+  const entry = satellites.get(noradId);
+  if (!entry) return;
+
+  // Enlarge point + add cyan outline ring
+  entry.point.pixelSize = SELECTED_STYLE.pixelSize;
+  entry.point.outlineColor = SELECTED_STYLE.outlineColor;
+  entry.point.outlineWidth = SELECTED_STYLE.outlineWidth;
+  selectionIndicator = noradId; // track which satellite is highlighted
+}
+
+function clearSelectionIndicator() {
+  if (selectionIndicator !== null) {
+    const entry = satellites.get(selectionIndicator);
+    if (entry) {
+      entry.point.pixelSize = DEFAULT_STYLE.pixelSize;
+      entry.point.outlineColor = DEFAULT_STYLE.outlineColor;
+      entry.point.outlineWidth = DEFAULT_STYLE.outlineWidth;
+    }
+    selectionIndicator = null;
+  }
 }
 
 async function refreshPanelData(noradId) {
@@ -125,9 +160,9 @@ async function refreshPanelData(noradId) {
 // --- Orbit Trail ---
 
 function clearTrail() {
-  if (activeTrail) {
-    trailCollection.remove(activeTrail);
-    activeTrail = null;
+  if (trailEntity) {
+    viewer.entities.remove(trailEntity);
+    trailEntity = null;
   }
 }
 
@@ -138,26 +173,31 @@ async function fetchAndRenderTrail(noradId) {
     // Start trail 45 min in the past so the satellite sits mid-trail,
     // showing both where it's been and where it's going.
     const startTime = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    // 360 steps (one every ~15s) eliminates chord sag between points at altitude.
     const resp = await fetch(
-      `/api/positions/${noradId}/track?duration_min=90&steps=120&time=${startTime}`
+      `/api/positions/${noradId}/track?duration_min=90&steps=360&time=${startTime}`
     );
     if (!resp.ok) return;
     const data = await resp.json();
 
     if (selectedNoradId !== noradId) return; // selection changed during fetch
 
+    // Ground track: project onto surface (industry standard for LEO trackers).
+    // Rendering at orbital altitude causes perspective "lift" near the globe's limb.
     const positions = data.track.map(pt =>
-      Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.alt_km * 1000)
+      Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, 0)
     );
 
     if (positions.length < 2) return;
 
-    activeTrail = trailCollection.add({
-      positions: positions,
-      width: 2.0,
-      material: Cesium.Material.fromType("Color", {
-        color: new Cesium.Color(0.31, 0.76, 0.97, 0.8), // #4fc3f7 with slight transparency
-      }),
+    trailEntity = viewer.entities.add({
+      polyline: {
+        positions: positions,
+        width: 2.0,
+        arcType: Cesium.ArcType.GEODESIC, // follow Earth's curvature for surface track
+        material: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
+        clampToGround: true,
+      },
       show: trailVisible,
     });
 

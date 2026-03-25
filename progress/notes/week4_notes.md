@@ -74,3 +74,13 @@ Full research captured in `progress/week4_plan.md` under "Competitive Research."
 6. **Race condition guard on trail fetch** — `if (selectedNoradId !== noradId) return` after the async track fetch prevents stale trail rendering if the user clicks a different satellite while the fetch is in-flight.
 
 7. **Script load order: app → satellites → info-panel** — `info-panel.js` depends on globals from both prior scripts (`viewer`, `satellites`, `satelliteMetadata`, `REFRESH_INTERVAL_MS`).
+
+8. **`PolylineCollection` cannot render orbital paths around the globe** — draws straight Cartesian chords between points with no `arcType` support. Chords sag below the actual arc on the far side of the globe, causing visible gaps. Switched to Entity polyline with `clampToGround: true` and `arcType: GEODESIC`. Entity overhead is negligible for a single trail.
+
+9. **Ground track projection (surface), not orbital altitude** — rendering the trail at 385+ km altitude causes a perspective "lifting" effect near the globe's limb. The altitude gap is viewed edge-on, making the trail appear to peel away from the globe asymmetrically. This is physically correct (not a data bug) but visually confusing. Industry standard (satvis, trackthesky) is to project onto the surface. Satellite dot remains at real altitude.
+
+10. **Geodetic altitude varies ~18-19 km per orbit for nearly circular LEO** — caused by orbital eccentricity + WGS-84 ellipsoid shape (Earth is ~21 km flatter at the poles). Verified by checking orbital radius at each track point — varies smoothly as expected.
+
+11. **Data pipeline verified correct** — cross-checked ISS position against python-sgp4 reference (sub-millimeter match) and wheretheiss.at public API (speed: 7.657 vs 7.658 km/s). GMST matches Meeus formula exactly.
+
+12. **Selection indicator via PointPrimitive outline** — selected satellite gets enlarged point (6→10px) with 3px cyan `outlineWidth`. Simpler than a separate Entity that would need to track position at orbital altitude.

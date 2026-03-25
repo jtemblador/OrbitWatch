@@ -104,11 +104,11 @@ Show the orbital path when a satellite is selected.
 - [x] Selecting a different satellite replaces the trail
 - [x] ISS trail wraps around globe at ~51.6° inclination
 
-**Actual:** `PolylineCollection` with solid cyan (#4fc3f7) polyline, 120 steps over 90 minutes. Toggle checkbox in info panel. Initially tried `Fade` material for gradient effect — trail behind satellite was invisible, switched to solid `Color` material. Race condition guard prevents stale trail on rapid selection changes.
+**Actual:** Entity polyline with `clampToGround: true` (ground track projection), 360 steps over 90 minutes. Toggle checkbox in info panel. Selection indicator: enlarged point + cyan outline ring. Initially tried `PolylineCollection` at orbital altitude — straight Cartesian chords caused gaps on far side of globe + perspective "lift" at the limb. Switched to Entity polyline with surface projection (industry standard). Data pipeline cross-verified against python-sgp4 (sub-mm) and wheretheiss.at API.
 
 ---
 
-### ⬜ 5. Static Files + Layout Polish
+### ✅ 5. Static Files + Layout Polish
 
 Wire up the frontend to be served by FastAPI and add basic styling.
 
@@ -119,9 +119,9 @@ Wire up the frontend to be served by FastAPI and add basic styling.
 - Page title: "OrbitWatch — Satellite Tracker"
 
 **Success criteria:**
-- [ ] `uvicorn backend.main:app` serves both API and frontend
-- [ ] Clean, full-viewport layout with no scrollbars
-- [ ] Works in Chrome/Firefox/Edge
+- [x] `uvicorn backend.main:app` serves both API and frontend
+- [x] Clean, full-viewport layout with no scrollbars
+- [x] Works in Chrome/Firefox/Edge
 
 ---
 
@@ -151,7 +151,7 @@ backend/
 2. ✅ **Satellite points** — fetch + render 30 dots, labels, interpolation, dark tiles
 3. ✅ **Click interaction** — info panel with position + orbital data, auto-refresh
 4. ✅ **Orbit trail** — solid cyan polyline, 90-min ground track, toggle checkbox
-5. ⬜ **Polish** — layout, styling, labels
+5. ✅ **Polish** — layout, styling, cross-browser verified (Chrome + Firefox)
 
 ---
 

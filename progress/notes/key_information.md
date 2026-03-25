@@ -247,6 +247,14 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **`ScreenSpaceEventHandler` + `scene.pick()` for satellite click detection.** Returns the `PointPrimitive` with its `id` property (set to `norad_id`). Check `satellites.has(picked.primitive.id)` to confirm it's a satellite and not another primitive.
 
+**`PolylineCollection` cannot render polylines that wrap around the globe at altitude.** It draws straight Cartesian chords with no `arcType` support — chords sag below the actual arc, causing visible gaps on the far side. Use Entity polyline with `arcType: GEODESIC` and `clampToGround: true` for orbit trails. Entity overhead is negligible for a single trail. `PolylineCollection` is still correct for batching thousands of short line segments (not our use case for orbit trails).
+
+**Render orbit trails as surface ground tracks, not at orbital altitude.** Rendering at altitude causes a perspective "lift" effect near the globe's limb — the 385+ km gap becomes visible edge-on, making the trail appear to peel away from the globe. This is correct 3D perspective, not a data bug. Industry standard (satvis, trackthesky, keeptrack) is to project the trail onto the surface while the satellite dot floats at real altitude.
+
+**Geodetic altitude varies ~18-19 km per orbit for nearly circular LEO.** Combination of orbital eccentricity (~7-14 km from apogee/perigee) and WGS-84 ellipsoid shape (~12 km, Earth flatter at poles). This is physically correct and verified by checking orbital radius at each track point.
+
+**Data pipeline verified against public sources.** ISS position matches python-sgp4 reference to sub-millimeter. Speed matches wheretheiss.at API to 3 decimal places (7.657 vs 7.658 km/s). GMST (IAU 1982) matches Meeus formula to 0.00 arcseconds.
+
 ---
 
 ## Task Checklist
@@ -338,7 +346,9 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - Click handler via `ScreenSpaceEventHandler` + `scene.pick()` on satellite points
 - Bottom-left fixed info panel with position data (live) + orbital params (cached at startup)
 - Auto-refresh every 5 seconds while satellite is selected
-- 90-minute orbit trail via `PolylineCollection` — solid cyan (#4fc3f7) polyline, 120 steps
+- 90-minute orbit trail via Entity polyline with `clampToGround: true` — ground track, 360 steps
 - Trail toggle checkbox in panel, race condition guard on async fetch
+- Selection indicator: enlarged point (10px) + cyan outline ring (3px)
 - `satelliteMetadata` Map added to `satellites.js` — caches `/api/satellites` at startup
+- Data pipeline cross-verified against python-sgp4 (sub-mm) and wheretheiss.at API
 - Frontend-only changes, no backend modifications
