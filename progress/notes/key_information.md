@@ -229,29 +229,41 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 ## Orbit Trail Rendering (Week 4 — Critical Gotcha)
 
-**ECEF orbit trails visibly "bend" because Earth rotates under the satellite.** During one 93-minute LEO orbit, Earth rotates ~23° in longitude. The track API returns positions in ECEF (geodetic lat/lon/alt), so consecutive positions are computed in a rotating frame. This warps what should be a clean orbital ellipse into a helix — visible as sagging/bending diagonal lines on the globe.
+**ECEF orbit trails visibly "bend" because Earth rotates under the satellite.** During one 93-minute LEO orbit, Earth rotates ~23° in longitude. If the track API only returns geodetic positions (lat/lon/alt), each point is in ECEF at its own time — a rotating frame that warps the orbital ellipse into a helix.
 
-**Fix: de-rotate each ECEF position around the Z-axis** to a single reference time (current time), collapsing the helix back into the satellite's instantaneous orbital plane:
+**Solution: return TEME positions from the track API.** TEME is an inertial frame — the orbit traces a clean near-ellipse with no Earth rotation warping. The frontend computes ONE GMST angle for "now" and rotates all TEME points to the current ECEF frame:
 
 ```javascript
-const EARTH_OMEGA = 7.2921159e-5; // rad/s
-const refTime = Date.now();
+// Julian Date from Unix timestamp
+const jdNow = Date.now() / 86400000 + 2440587.5;
+const T = (jdNow - 2451545.0) / 36525.0;
+const gmstSec = 67310.54841
+  + (876600.0 * 3600.0 + 8640184.812866) * T
+  + 0.093104 * T * T
+  - 6.2e-6 * T * T * T;
+const gmst = (gmstSec * Math.PI / 43200.0) % (2.0 * Math.PI);
+const cosG = Math.cos(gmst);
+const sinG = Math.sin(gmst);
 
 data.track.map(pt => {
-  const ecef = Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.alt_km * 1000);
-  const dt = (new Date(pt.timestamp).getTime() - refTime) / 1000;
-  const theta = dt * EARTH_OMEGA;
+  const x = pt.teme_x * 1000; // km → meters
+  const y = pt.teme_y * 1000;
+  const z = pt.teme_z * 1000;
   return new Cesium.Cartesian3(
-    ecef.x * Math.cos(theta) - ecef.y * Math.sin(theta),
-    ecef.x * Math.sin(theta) + ecef.y * Math.cos(theta),
-    ecef.z
+     cosG * x + sinG * y,
+    -sinG * x + cosG * y,
+    z
   );
 });
 ```
 
-**Why this works:** ECEF and ECI share the same Z-axis (Earth's pole). The only difference is Earth's spin angle. By rotating each point's ECEF position forward/backward by the Earth rotation that occurred since the reference time, all points are projected into the same rotational frame — recovering the orbital plane geometry.
+**Why this works:** A single GMST rotation places all TEME points into the same ECEF frame (Earth's current orientation). Since all points share the same rotation angle, no per-point Earth rotation correction is needed — the orbital geometry is preserved exactly as SGP4 computed it.
 
-**Why the trail still won't perfectly close:** J2 perturbation causes RAAN and argument of perigee to precess (~0.01°/orbit), plus orbital eccentricity means the path is an ellipse, not a circle. Both effects are tiny compared to the 23° Earth rotation correction.
+**Previous approach (replaced):** Per-point ECEF de-rotation (each point rotated by `dt × ω_earth` to undo Earth spin). This approximated the fix but introduced ~30 km error at the trail seam due to J2 precession not being accounted for. The TEME approach avoids this by never baking Earth rotation into the positions in the first place.
+
+**Why the trail still won't perfectly close:** J2 perturbation causes RAAN and argument of perigee to precess (~0.3°/orbit, ~30 km at LEO). This is a real orbital effect that SGP4 models — the orbit genuinely doesn't close. The gap is invisible at normal zoom levels.
+
+**GMST formula duplication:** The IAU 1982 GMST formula exists in both `coordinate_transforms.py` (backend) and `info-panel.js` (frontend). Both must use the identical formula. If one is updated, update the other.
 
 **Dual-primitive rendering:** The orbit ring is rendered as two Cesium Primitives with the same positions — one with depth test ON (bright near-side arc, 0.8 alpha) and one with depth test OFF (faint far-side ghost, 0.2 alpha). This shows the full ring while making the front vs back visually distinct.
 
@@ -281,7 +293,7 @@ data.track.map(pt => {
 
 **Orbit trails render at orbital altitude using dual Primitives.** Near-side primitive (depth test ON, bright) shows only the camera-facing arc. Far-side primitive (depth test OFF, faint ghost) shows the full ring. This replaced the original surface projection approach (`clampToGround: true`) which didn't show the 3D orbital geometry. Client-side densification (360 → ~3600 points) eliminates chord artifacts from `arcType: NONE`.
 
-**ECEF orbit trails must be de-rotated to show clean orbital rings.** See "Orbit Trail Rendering" section above for full details. Without the Z-axis de-rotation, Earth's ~23°/orbit rotation warps the ellipse into a visibly bent helix.
+**Track API returns TEME positions for orbit trail rendering.** The `teme_x/y/z` fields in the track response are raw SGP4 output in km (inertial frame). The frontend applies a single GMST rotation to place them in the current ECEF frame. See "Orbit Trail Rendering" section above for the full approach and GMST formula.
 
 **Geodetic altitude varies ~18-19 km per orbit for nearly circular LEO.** Combination of orbital eccentricity (~7-14 km from apogee/perigee) and WGS-84 ellipsoid shape (~12 km, Earth flatter at poles). This is physically correct and verified by checking orbital radius at each track point.
 

@@ -220,6 +220,7 @@ class SatellitePropagator:
             "lat": geo["lat"],
             "lon": geo["lon"],
             "alt": geo["alt"],
+            "pos_teme": list(pos_teme),
             "pos_ecef": geo["pos_ecef"],
             "vel_ecef": geo["vel_ecef"],
             "speed_km_s": speed,

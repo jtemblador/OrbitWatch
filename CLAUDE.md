@@ -52,7 +52,7 @@ FastAPI Backend (Python)
 - **Frontend entry point:** `frontend/index.html`
 - **Frontend JS:** `frontend/js/app.js` (viewer), `satellites.js` (points + labels), `info-panel.js` (click interaction + orbit trail)
 - **Pydantic schemas:** `backend/models/schemas.py` (8 response models)
-- **Tests:** `tests/` (265 tests across 7 test files)
+- **Tests:** `tests/` (279 tests across 7 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -62,9 +62,9 @@ FastAPI Backend (Python)
 ## Current Status
 - **Phase:** Week 4 — Cesium.js Globe (Apr 17–23, 2026)
 - **Timeline:** Mar 20 – May 15, 2026 (8 weeks)
-- **Completed:** Weeks 0–4 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail with ground track projection, selection indicator, cross-browser verified)
+- **Completed:** Weeks 0–4 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, cross-browser verified)
 - **Next steps:** Week 5 (globe polish — time controls, toggle groups)
-- **Tests:** 265 passing across 7 test files (82 API + 183 backend/engine) — frontend JS has no automated tests
+- **Tests:** 279 passing across 7 test files (82 API + 197 backend/engine) — frontend JS has no automated tests
 
 ## Notes for Future Sessions
 - Jose's ML experience is with CatBoost/XGBoost/LightGBM from his NFL prediction project — same pipeline pattern applies here

@@ -264,7 +264,7 @@ class TestSingleSatPropagation(unittest.TestCase):
         result = self.prop.get_position("ISS (ZARYA)", self.now)
         expected_keys = {
             "name", "norad_id", "lat", "lon", "alt",
-            "pos_ecef", "vel_ecef", "speed_km_s",
+            "pos_teme", "pos_ecef", "vel_ecef", "speed_km_s",
             "timestamp", "epoch_age_days",
         }
         self.assertEqual(set(result.keys()), expected_keys)

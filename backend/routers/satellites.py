@@ -159,6 +159,9 @@ async def get_track(
             "lat": float(r["lat"]),
             "lon": float(r["lon"]),
             "alt_km": float(r["alt"]),
+            "teme_x": float(r["pos_teme"][0]),
+            "teme_y": float(r["pos_teme"][1]),
+            "teme_z": float(r["pos_teme"][2]),
             "timestamp": r["timestamp"].isoformat(),
         }
         for r in results

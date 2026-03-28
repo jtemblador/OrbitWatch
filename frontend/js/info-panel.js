@@ -2,7 +2,7 @@
  * OrbitWatch — Satellite info panel + orbit trail.
  *
  * Click a satellite point → bottom-left info panel with metadata + live position.
- * Orbit trail (90-min ground track) auto-renders with solid color; toggle in panel.
+ * Orbit trail (full-period ring at orbital altitude) auto-renders with solid color; toggle in panel.
  *
  * Depends on: viewer, satellites, satelliteMetadata, REFRESH_INTERVAL_MS
  *   (globals from app.js / satellites.js)
@@ -18,6 +18,8 @@ const TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s to keep it aligned w
 // Near-side: depth test ON, bright (0.8 alpha) — only camera-facing arc visible.
 // Far-side: depth test OFF, faint (0.2 alpha) — full ring visible as a ghost.
 // This makes the ring structure clear: bright arc in front, faint arc behind the globe.
+// API returns TEME (inertial) positions — orbit is a clean near-ellipse in TEME.
+// One GMST rotation places all points in the current ECEF frame for Cesium.
 // Client-side densification (360 API pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
 let trailPrimitives = [];
 
@@ -200,7 +202,7 @@ async function fetchAndRenderTrail(noradId) {
     // Use the satellite's actual orbital period so the trail forms one complete loop.
     // Works for LEO (~90 min), MEO (~12 hr), GEO (~1436 min), and everything in between.
     const meta = satelliteMetadata.get(noradId);
-    const durationMin = meta ? Math.ceil(meta.period_min) + 2 : 95; // +2 min overlap to close loop
+    const durationMin = meta ? Math.ceil(meta.period_min) : 93; // one full orbit
     const startTime = new Date(Date.now() - (durationMin / 2) * 60 * 1000).toISOString();
 
     const resp = await fetch(
@@ -211,26 +213,35 @@ async function fetchAndRenderTrail(noradId) {
 
     if (selectedNoradId !== noradId) return; // selection changed during fetch
 
-    // De-rotate ECEF positions to remove Earth rotation effect.
-    // Without this, Earth's ~23°/orbit rotation warps the clean orbital ellipse
-    // into a helix that visibly "bends." By rotating each point's ECEF position
-    // backward/forward to a single reference time, we recover the true orbital
-    // plane — a clean tilted ring that passes through the satellite's current position.
-    const EARTH_OMEGA = 7.2921159e-5; // rad/s (Earth's rotation rate)
-    const refTime = Date.now(); // freeze Earth rotation at "now"
+    // TEME (inertial) positions from API — orbit is a clean near-ellipse.
+    // One GMST rotation places all points in the current ECEF frame for Cesium.
+    // This is the same R3(-GMST) rotation used in backend coordinate_transforms.py,
+    // but applied once at "now" instead of per-point — so the orbital ring stays
+    // fixed in the current Earth orientation (no Earth-rotation warping).
+    const jdNow = Date.now() / 86400000 + 2440587.5; // Unix ms → Julian Date
+    const T = (jdNow - 2451545.0) / 36525.0; // Julian centuries from J2000
+    const gmstSec = 67310.54841
+      + (876600.0 * 3600.0 + 8640184.812866) * T
+      + 0.093104 * T * T
+      - 6.2e-6 * T * T * T;
+    const gmst = (gmstSec * Math.PI / 43200.0) % (2.0 * Math.PI);
+    const cosG = Math.cos(gmst);
+    const sinG = Math.sin(gmst);
 
     let positions = data.track.map(pt => {
-      const ecef = Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.alt_km * 1000);
-      const dt = (new Date(pt.timestamp).getTime() - refTime) / 1000;
-      const theta = dt * EARTH_OMEGA;
-      const cosT = Math.cos(theta);
-      const sinT = Math.sin(theta);
+      // TEME → ECEF: R3(-GMST) rotation, km → meters
+      const x = pt.teme_x * 1000;
+      const y = pt.teme_y * 1000;
+      const z = pt.teme_z * 1000;
       return new Cesium.Cartesian3(
-        ecef.x * cosT - ecef.y * sinT,
-        ecef.x * sinT + ecef.y * cosT,
-        ecef.z
+         cosG * x + sinG * y,
+        -sinG * x + cosG * y,
+        z
       );
     });
+    // NOTE: Trail does NOT perfectly close — J2 precession shifts the orbital
+    // plane ~0.3°/orbit (~30 km). Invisible at normal zoom levels.
+
     // Densify to ~3600 pts so Cartesian chords are <12 km (<1 m sag).
     positions = densifyPositions(positions, 10);
 

@@ -74,6 +74,9 @@ class TrackPoint(BaseModel):
     lat: float
     lon: float
     alt_km: float
+    teme_x: float
+    teme_y: float
+    teme_z: float
     timestamp: str
 
 

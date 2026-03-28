@@ -97,9 +97,13 @@ The original orbit trail was a ground track (Entity polyline with `clampToGround
 
 The track API returns positions in ECEF (geodetic lat/lon/alt). During one 93-minute LEO orbit, Earth rotates ~23° in longitude. This warps the orbital ellipse into a helix in ECEF coordinates, causing visible bending. The bending is physically correct (it IS the satellite's ground track at altitude), but it doesn't look like the clean orbital ring users expect.
 
-### Fix: De-Rotate ECEF Positions
+### Fix v1 (replaced): De-Rotate ECEF Positions
 
-Rotate each ECEF position around the Z-axis by `dt × ω_earth` (where dt = time offset from "now") to collapse the helix into the satellite's instantaneous orbital plane. This is a simple Z-rotation — ECEF and ECI share the same Z-axis, so undoing Earth's spin recovers the inertial orbital geometry.
+Initial fix: rotate each ECEF position around the Z-axis by `dt × ω_earth` to collapse the helix. This worked at normal zoom but left a ~30 km gap at the trail seam (J2 precession not accounted for in per-point de-rotation).
+
+### Fix v2 (current): TEME Positions from API
+
+Better fix: return TEME (inertial) positions from the track API (`teme_x/y/z` fields in km). TEME is the raw SGP4 output — the orbit is a clean near-ellipse with no Earth rotation warping. The frontend computes ONE GMST angle for "now" (IAU 1982 formula, same as backend `coordinate_transforms.py`) and rotates all points to the current ECEF frame with a single R3(-GMST) rotation. This eliminates Earth rotation artifacts entirely. The only remaining gap (~30 km) is from J2 precession — a real orbital effect, invisible at normal zoom.
 
 ### Additional Fixes Applied
 
@@ -119,4 +123,5 @@ Rotate each ECEF position around the Z-axis by `dt × ω_earth` (where dt = time
 | v4 | PathGraphics + SampledPositionProperty | Trail auto-occluded behind globe |
 | v5 | Primitive + client-side densification (360 × 6 = 2160 pts) | Bending — Earth rotation not accounted for |
 | v6 | Dual primitives (near bright + far faint), densify × 10 | Bending persisted |
-| v7 | **De-rotate ECEF + dual primitives + densify × 10** | ✅ Clean orbital ring |
+| v7 | De-rotate ECEF + dual primitives + densify × 10 | ✅ Clean ring, but ~30 km seam gap from J2 |
+| v8 | **TEME from API + single GMST rotation + dual primitives + densify × 10** | ✅ Clean orbital ring (final) |

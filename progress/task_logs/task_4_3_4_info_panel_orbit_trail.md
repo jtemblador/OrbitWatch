@@ -31,8 +31,8 @@ Added a `satelliteMetadata` Map in `satellites.js` — fetches `/api/satellites`
 
 ### Orbit Trail
 
-- **Approach (final):** Fetch 360 track points, de-rotate ECEF positions to remove Earth rotation (~23°/orbit), densify 10x to ~3600 points, render as TWO PolylineGeometry Primitives at orbital altitude (near-side bright + far-side faint ghost).
-- **Earth rotation fix:** Track API returns ECEF positions where Earth rotates under the satellite. This warps the orbital ellipse into a helix, causing visible "bending." Fix: rotate each ECEF position around the Z-axis by `dt × 7.2921159e-5 rad/s` to collapse back to the instantaneous orbital plane.
+- **Approach (final):** Track API returns TEME (inertial) positions (`teme_x/y/z` in km). Frontend computes one GMST angle for "now" and rotates all points to ECEF, then densifies 10x to ~3600 points, renders as TWO PolylineGeometry Primitives at orbital altitude (near-side bright + far-side faint ghost).
+- **Earth rotation fix:** TEME is an inertial frame — orbit is a clean near-ellipse with no Earth rotation warping. A single GMST rotation places all points in the current ECEF frame for Cesium. This replaced an earlier per-point ECEF de-rotation hack that left a ~30 km seam gap from J2 precession.
 - **Dual-primitive rendering:** Near-side (depth test ON, 0.8 alpha, 2.5px) + far-side (depth test OFF, 0.2 alpha, 1.5px). Full ring visible with clear front/back distinction.
 - **Client-side densification:** lerp + normalize-to-radius, 360 → ~3600 points, each chord ~12 km (<1 m sag).
 - **Color:** Solid cyan (`rgba(0.31, 0.76, 0.97)`).
@@ -57,8 +57,9 @@ Added a `satelliteMetadata` Map in `satellites.js` — fetches `/api/satellites`
 | `frontend/js/satellites.js` | MODIFIED | Added `satelliteMetadata` Map + `fetchSatelliteMetadata()` for cached orbital params |
 | `frontend/css/style.css` | MODIFIED | Added info panel styles (bottom-left overlay, dark theme, cyan accent) |
 | `frontend/index.html` | MODIFIED | Added `info-panel.js` script tag (load order: app → satellites → info-panel) |
-
-No backend changes — all API endpoints already existed from Week 3.
+| `backend/core/propagator.py` | MODIFIED | Added `pos_teme` to `_propagate_row()` result dict |
+| `backend/models/schemas.py` | MODIFIED | Added `teme_x/y/z` fields to `TrackPoint` model |
+| `backend/routers/satellites.py` | MODIFIED | Track endpoint includes TEME coordinates in response |
 
 ---
 
@@ -97,7 +98,7 @@ No backend changes — all API endpoints already existed from Week 3.
 
 8. **Script load order matters.** `info-panel.js` depends on `viewer`, `satellites`, `satelliteMetadata`, and `REFRESH_INTERVAL_MS` — all defined in `app.js` and `satellites.js`. Must load in order: app → satellites → info-panel.
 
-9. **ECEF orbit trails bend because Earth rotates ~23° per orbit.** Track API returns geodetic positions in ECEF, where the satellite's path is a helix, not an ellipse. Must de-rotate each position around the Z-axis by `dt × ω_earth` to recover the clean inertial orbital plane. This is the same GMST Z-rotation used in the backend coordinate transforms — but applied in reverse on the frontend.
+9. **Return TEME positions from the API for orbit trail rendering, not just geodetic.** TEME is the raw SGP4 output (inertial frame) — the orbit is a clean near-ellipse. Converting to geodetic (ECEF) per-point bakes in Earth rotation, warping the ellipse into a helix. The original fix (per-point ECEF de-rotation) approximated the inertial geometry but left a ~30 km seam gap from J2 precession. The correct approach: expose TEME positions from the API, do ONE GMST rotation on the frontend. This also unifies visualization data with the ML pipeline — the trail shows exactly what the conjunction scanner will use.
 
 10. **Dual-primitive approach for orbit ring visibility.** A single primitive with depth test OFF shows the full ring but both arcs overlap at the same brightness, creating confusing X-patterns. Two primitives (near-side bright + far-side faint) make the ring structure legible from any camera angle.
 
