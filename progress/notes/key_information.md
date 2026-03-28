@@ -227,6 +227,38 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 ---
 
+## Orbit Trail Rendering (Week 4 — Critical Gotcha)
+
+**ECEF orbit trails visibly "bend" because Earth rotates under the satellite.** During one 93-minute LEO orbit, Earth rotates ~23° in longitude. The track API returns positions in ECEF (geodetic lat/lon/alt), so consecutive positions are computed in a rotating frame. This warps what should be a clean orbital ellipse into a helix — visible as sagging/bending diagonal lines on the globe.
+
+**Fix: de-rotate each ECEF position around the Z-axis** to a single reference time (current time), collapsing the helix back into the satellite's instantaneous orbital plane:
+
+```javascript
+const EARTH_OMEGA = 7.2921159e-5; // rad/s
+const refTime = Date.now();
+
+data.track.map(pt => {
+  const ecef = Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.alt_km * 1000);
+  const dt = (new Date(pt.timestamp).getTime() - refTime) / 1000;
+  const theta = dt * EARTH_OMEGA;
+  return new Cesium.Cartesian3(
+    ecef.x * Math.cos(theta) - ecef.y * Math.sin(theta),
+    ecef.x * Math.sin(theta) + ecef.y * Math.cos(theta),
+    ecef.z
+  );
+});
+```
+
+**Why this works:** ECEF and ECI share the same Z-axis (Earth's pole). The only difference is Earth's spin angle. By rotating each point's ECEF position forward/backward by the Earth rotation that occurred since the reference time, all points are projected into the same rotational frame — recovering the orbital plane geometry.
+
+**Why the trail still won't perfectly close:** J2 perturbation causes RAAN and argument of perigee to precess (~0.01°/orbit), plus orbital eccentricity means the path is an ellipse, not a circle. Both effects are tiny compared to the 23° Earth rotation correction.
+
+**Dual-primitive rendering:** The orbit ring is rendered as two Cesium Primitives with the same positions — one with depth test ON (bright near-side arc, 0.8 alpha) and one with depth test OFF (faint far-side ghost, 0.2 alpha). This shows the full ring while making the front vs back visually distinct.
+
+**Client-side densification:** 360 API track points are densified 10x to ~3600 points via spherical interpolation (lerp + normalize-to-radius). This keeps each Cartesian chord at ~12 km with <1 m sag, eliminating visible straight-line artifacts when using `arcType: NONE`.
+
+---
+
 ## Cesium.js Frontend (Week 4)
 
 **StaticFiles catch-all changes HTTP status codes:** Mounting `StaticFiles(directory="frontend", html=True)` at `/` means undefined routes return 404 from the static mount instead of 405 from FastAPI's router. This affects any test asserting 405 Method Not Allowed. Accept both 404 and 405 in tests.
@@ -247,9 +279,9 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 
 **`ScreenSpaceEventHandler` + `scene.pick()` for satellite click detection.** Returns the `PointPrimitive` with its `id` property (set to `norad_id`). Check `satellites.has(picked.primitive.id)` to confirm it's a satellite and not another primitive.
 
-**`PolylineCollection` cannot render polylines that wrap around the globe at altitude.** It draws straight Cartesian chords with no `arcType` support — chords sag below the actual arc, causing visible gaps on the far side. Use Entity polyline with `arcType: GEODESIC` and `clampToGround: true` for orbit trails. Entity overhead is negligible for a single trail. `PolylineCollection` is still correct for batching thousands of short line segments (not our use case for orbit trails).
+**Orbit trails render at orbital altitude using dual Primitives.** Near-side primitive (depth test ON, bright) shows only the camera-facing arc. Far-side primitive (depth test OFF, faint ghost) shows the full ring. This replaced the original surface projection approach (`clampToGround: true`) which didn't show the 3D orbital geometry. Client-side densification (360 → ~3600 points) eliminates chord artifacts from `arcType: NONE`.
 
-**Render orbit trails as surface ground tracks, not at orbital altitude.** Rendering at altitude causes a perspective "lift" effect near the globe's limb — the 385+ km gap becomes visible edge-on, making the trail appear to peel away from the globe. This is correct 3D perspective, not a data bug. Industry standard (satvis, trackthesky, keeptrack) is to project the trail onto the surface while the satellite dot floats at real altitude.
+**ECEF orbit trails must be de-rotated to show clean orbital rings.** See "Orbit Trail Rendering" section above for full details. Without the Z-axis de-rotation, Earth's ~23°/orbit rotation warps the ellipse into a visibly bent helix.
 
 **Geodetic altitude varies ~18-19 km per orbit for nearly circular LEO.** Combination of orbital eccentricity (~7-14 km from apogee/perigee) and WGS-84 ellipsoid shape (~12 km, Earth flatter at poles). This is physically correct and verified by checking orbital radius at each track point.
 
@@ -346,7 +378,7 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 - Click handler via `ScreenSpaceEventHandler` + `scene.pick()` on satellite points
 - Bottom-left fixed info panel with position data (live) + orbital params (cached at startup)
 - Auto-refresh every 5 seconds while satellite is selected
-- 90-minute orbit trail via Entity polyline with `clampToGround: true` — ground track, 360 steps
+- Orbit trail at orbital altitude: 360 API points → ECEF de-rotation (removes Earth rotation) → densify 10x to ~3600 pts → dual Primitives (near bright + far faint ghost)
 - Trail toggle checkbox in panel, race condition guard on async fetch
 - Selection indicator: enlarged point (10px) + cyan outline ring (3px)
 - `satelliteMetadata` Map added to `satellites.js` — caches `/api/satellites` at startup

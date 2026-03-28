@@ -84,3 +84,39 @@ Full research captured in `progress/week4_plan.md` under "Competitive Research."
 11. **Data pipeline verified correct** — cross-checked ISS position against python-sgp4 reference (sub-millimeter match) and wheretheiss.at public API (speed: 7.657 vs 7.658 km/s). GMST matches Meeus formula exactly.
 
 12. **Selection indicator via PointPrimitive outline** — selected satellite gets enlarged point (6→10px) with 3px cyan `outlineWidth`. Simpler than a separate Entity that would need to track position at orbital altitude.
+
+---
+
+## Week 4.5 — Orbit Trail Fix (Surface → Altitude Ring)
+
+### Problem
+
+The original orbit trail was a ground track (Entity polyline with `clampToGround: true`). Switched to rendering at orbital altitude using `PolylineGeometry` Primitives, but the trails appeared to "bend" — diagonal lines sagging across the globe face instead of forming clean tilted rings.
+
+### Root Cause: Earth Rotation in ECEF
+
+The track API returns positions in ECEF (geodetic lat/lon/alt). During one 93-minute LEO orbit, Earth rotates ~23° in longitude. This warps the orbital ellipse into a helix in ECEF coordinates, causing visible bending. The bending is physically correct (it IS the satellite's ground track at altitude), but it doesn't look like the clean orbital ring users expect.
+
+### Fix: De-Rotate ECEF Positions
+
+Rotate each ECEF position around the Z-axis by `dt × ω_earth` (where dt = time offset from "now") to collapse the helix into the satellite's instantaneous orbital plane. This is a simple Z-rotation — ECEF and ECI share the same Z-axis, so undoing Earth's spin recovers the inertial orbital geometry.
+
+### Additional Fixes Applied
+
+1. **Dual-primitive rendering** — two Primitives with the same orbit path: near-side (depth test ON, 0.8 alpha, 2.5px) and far-side (depth test OFF, 0.2 alpha, 1.5px). Shows the full ring while distinguishing front from back.
+
+2. **Client-side densification** — 360 API points densified 10x to ~3600 points via lerp + normalize-to-radius (approximate SLERP). Each chord is ~12 km with <1 m sag. Eliminates straight-line artifacts from `arcType: NONE`.
+
+3. **Dynamic orbital period** — trail duration matches the satellite's actual period from metadata (not hardcoded 90 min). Works for LEO through GEO.
+
+### Iteration History
+
+| Attempt | Approach | Result |
+|---------|----------|--------|
+| v1 | Entity polyline, `clampToGround: true` | ✅ Worked but surface-only |
+| v2 | PolylineGeometry Primitive at altitude, depth test OFF, 360 pts | Chord artifacts (straight lines cutting through globe) |
+| v3 | Same but 2000 pts | 422 error (API limit is 500 steps) |
+| v4 | PathGraphics + SampledPositionProperty | Trail auto-occluded behind globe |
+| v5 | Primitive + client-side densification (360 × 6 = 2160 pts) | Bending — Earth rotation not accounted for |
+| v6 | Dual primitives (near bright + far faint), densify × 10 | Bending persisted |
+| v7 | **De-rotate ECEF + dual primitives + densify × 10** | ✅ Clean orbital ring |

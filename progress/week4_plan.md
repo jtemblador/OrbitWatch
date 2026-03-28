@@ -104,7 +104,7 @@ Show the orbital path when a satellite is selected.
 - [x] Selecting a different satellite replaces the trail
 - [x] ISS trail wraps around globe at ~51.6° inclination
 
-**Actual:** Entity polyline with `clampToGround: true` (ground track projection), 360 steps over 90 minutes. Toggle checkbox in info panel. Selection indicator: enlarged point + cyan outline ring. Initially tried `PolylineCollection` at orbital altitude — straight Cartesian chords caused gaps on far side of globe + perspective "lift" at the limb. Switched to Entity polyline with surface projection (industry standard). Data pipeline cross-verified against python-sgp4 (sub-mm) and wheretheiss.at API.
+**Actual:** Orbit trail at orbital altitude using dual PolylineGeometry Primitives — near-side (depth test ON, bright) + far-side (depth test OFF, faint ghost). 360 API points de-rotated to remove Earth rotation (~23°/orbit ECEF warping), then densified 10x to ~3600 points for smooth chords. Trail duration matches satellite's actual orbital period. Toggle checkbox in info panel. Selection indicator: enlarged point + cyan outline ring. Went through 7 iterations: Entity surface projection → PolylineCollection (chord gaps) → Primitive at altitude (bending) → PathGraphics (auto-occlusion) → densification (still bending) → dual primitives → **ECEF de-rotation** (final fix). Data pipeline cross-verified against python-sgp4 (sub-mm) and wheretheiss.at API.
 
 ---
 

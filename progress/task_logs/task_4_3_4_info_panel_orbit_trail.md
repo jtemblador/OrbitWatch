@@ -31,12 +31,15 @@ Added a `satelliteMetadata` Map in `satellites.js` — fetches `/api/satellites`
 
 ### Orbit Trail
 
-- **Approach:** Fetch 360-point ground track from `/api/positions/{norad_id}/track?duration_min=90&steps=360`, render as Entity polyline with `clampToGround: true` (ground track projected onto the surface — industry standard for LEO trackers)
-- **Color:** Solid cyan (`#4fc3f7`, 80% opacity) — initially tried Cesium's `Fade` material for a gradient trail but it made the portion behind the satellite invisible. Solid color is simpler and fully visible.
-- **Past + future window:** Trail fetched from `now - 45min` to `now + 45min` so the satellite sits mid-trail. Originally fetched forward-only from "now", which caused the trail to disconnect as the satellite moved ahead of the trail's origin.
-- **Trail refresh:** Re-fetched every 30 seconds to keep the trail aligned with the satellite's moving position.
-- **Toggle:** Checkbox in the info panel controls `show` property on the active Entity
-- **Race condition guard:** `if (selectedNoradId !== noradId) return` after async trail fetch prevents stale trail rendering if selection changes mid-fetch
+- **Approach (final):** Fetch 360 track points, de-rotate ECEF positions to remove Earth rotation (~23°/orbit), densify 10x to ~3600 points, render as TWO PolylineGeometry Primitives at orbital altitude (near-side bright + far-side faint ghost).
+- **Earth rotation fix:** Track API returns ECEF positions where Earth rotates under the satellite. This warps the orbital ellipse into a helix, causing visible "bending." Fix: rotate each ECEF position around the Z-axis by `dt × 7.2921159e-5 rad/s` to collapse back to the instantaneous orbital plane.
+- **Dual-primitive rendering:** Near-side (depth test ON, 0.8 alpha, 2.5px) + far-side (depth test OFF, 0.2 alpha, 1.5px). Full ring visible with clear front/back distinction.
+- **Client-side densification:** lerp + normalize-to-radius, 360 → ~3600 points, each chord ~12 km (<1 m sag).
+- **Color:** Solid cyan (`rgba(0.31, 0.76, 0.97)`).
+- **Past + future window:** Trail centered on "now" using satellite's actual orbital period from metadata. Originally tried forward-only (disconnected), then hardcoded 90 min (incorrect for non-LEO).
+- **Trail refresh:** Re-fetched every 30 seconds to stay aligned.
+- **Toggle:** Checkbox controls `show` on both primitives.
+- **Race condition guard:** `if (selectedNoradId !== noradId) return` after async fetch prevents stale rendering.
 
 ### Selection Indicator
 
@@ -94,6 +97,12 @@ No backend changes — all API endpoints already existed from Week 3.
 
 8. **Script load order matters.** `info-panel.js` depends on `viewer`, `satellites`, `satelliteMetadata`, and `REFRESH_INTERVAL_MS` — all defined in `app.js` and `satellites.js`. Must load in order: app → satellites → info-panel.
 
+9. **ECEF orbit trails bend because Earth rotates ~23° per orbit.** Track API returns geodetic positions in ECEF, where the satellite's path is a helix, not an ellipse. Must de-rotate each position around the Z-axis by `dt × ω_earth` to recover the clean inertial orbital plane. This is the same GMST Z-rotation used in the backend coordinate transforms — but applied in reverse on the frontend.
+
+10. **Dual-primitive approach for orbit ring visibility.** A single primitive with depth test OFF shows the full ring but both arcs overlap at the same brightness, creating confusing X-patterns. Two primitives (near-side bright + far-side faint) make the ring structure legible from any camera angle.
+
+11. **Client-side densification needed for `arcType: NONE`.** Cesium draws straight Cartesian 3D chords between sample points. At 360 points per orbit, each chord is ~120 km — visible as straight lines cutting through the globe. Densifying 10x to ~3600 points (each chord ~12 km, <1 m sag) makes them imperceptible.
+
 ---
 
 ## Function Reference
@@ -104,7 +113,8 @@ No backend changes — all API endpoints already existed from Week 3.
 |----------------|---------|
 | `selectedNoradId` | Currently selected satellite NORAD ID (null = none) |
 | `trailVisible` | Orbit trail visibility state |
-| `trailEntity` | Entity polyline for ground track rendering |
+| `trailPrimitives` | Array of two Primitives (far-side faint + near-side bright) for orbit ring |
+| `densifyPositions(positions, factor)` | Client-side spherical interpolation — lerp + normalize-to-radius between each pair |
 | `selectionIndicator` | NORAD ID of currently highlighted satellite (for style restore) |
 | `SELECTED_STYLE` / `DEFAULT_STYLE` | Point style configs for selection highlight |
 | `selectSatellite(noradId)` | Opens panel, highlights point, fetches position data, renders orbit trail |

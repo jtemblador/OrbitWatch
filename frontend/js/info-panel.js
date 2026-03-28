@@ -14,10 +14,12 @@ let trailVisible = true;
 let lastTrailRefresh = 0;
 const TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s to keep it aligned with satellite
 
-// Orbit trail — Entity polyline projected as ground track (industry standard).
-// Rendering at orbital altitude causes perspective "lift" near the globe's limb;
-// projecting onto the surface matches how satvis, trackthesky, etc. render trails.
-let trailEntity = null;
+// Orbit trail — TWO Primitives with PolylineGeometry at orbital altitude.
+// Near-side: depth test ON, bright (0.8 alpha) — only camera-facing arc visible.
+// Far-side: depth test OFF, faint (0.2 alpha) — full ring visible as a ghost.
+// This makes the ring structure clear: bright arc in front, faint arc behind the globe.
+// Client-side densification (360 API pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
+let trailPrimitives = [];
 
 // Selection indicator — cyan ring around the selected satellite.
 let selectionIndicator = null;
@@ -57,8 +59,8 @@ document.getElementById("info-panel-close").addEventListener("click", deselectSa
 
 document.getElementById("trail-checkbox").addEventListener("change", function () {
   trailVisible = this.checked;
-  if (trailEntity) {
-    trailEntity.show = trailVisible;
+  for (const p of trailPrimitives) {
+    p.show = trailVisible;
   }
 });
 
@@ -159,47 +161,131 @@ async function refreshPanelData(noradId) {
 
 // --- Orbit Trail ---
 
-function clearTrail() {
-  if (trailEntity) {
-    viewer.entities.remove(trailEntity);
-    trailEntity = null;
+// Client-side spherical interpolation: adds intermediate points between each API
+// sample so that Cartesian chords are short enough (<25 km) to appear smooth.
+// Uses lerp + normalize-to-radius (equivalent to SLERP for small angles).
+function densifyPositions(positions, factor) {
+  if (factor <= 1 || positions.length < 2) return positions;
+  const result = [];
+  for (let i = 0; i < positions.length - 1; i++) {
+    result.push(positions[i]);
+    const a = positions[i];
+    const b = positions[i + 1];
+    const rA = Cesium.Cartesian3.magnitude(a);
+    const rB = Cesium.Cartesian3.magnitude(b);
+    for (let j = 1; j < factor; j++) {
+      const t = j / factor;
+      const interp = Cesium.Cartesian3.lerp(a, b, t, new Cesium.Cartesian3());
+      const r = rA + (rB - rA) * t;
+      Cesium.Cartesian3.normalize(interp, interp);
+      Cesium.Cartesian3.multiplyByScalar(interp, r, interp);
+      result.push(interp);
+    }
   }
+  result.push(positions[positions.length - 1]);
+  return result;
+}
+
+function clearTrail() {
+  for (const p of trailPrimitives) {
+    viewer.scene.primitives.remove(p);
+  }
+  trailPrimitives = [];
 }
 
 async function fetchAndRenderTrail(noradId) {
   clearTrail();
 
   try {
-    // Start trail 45 min in the past so the satellite sits mid-trail,
-    // showing both where it's been and where it's going.
-    const startTime = new Date(Date.now() - 45 * 60 * 1000).toISOString();
-    // 360 steps (one every ~15s) eliminates chord sag between points at altitude.
+    // Use the satellite's actual orbital period so the trail forms one complete loop.
+    // Works for LEO (~90 min), MEO (~12 hr), GEO (~1436 min), and everything in between.
+    const meta = satelliteMetadata.get(noradId);
+    const durationMin = meta ? Math.ceil(meta.period_min) + 2 : 95; // +2 min overlap to close loop
+    const startTime = new Date(Date.now() - (durationMin / 2) * 60 * 1000).toISOString();
+
     const resp = await fetch(
-      `/api/positions/${noradId}/track?duration_min=90&steps=360&time=${startTime}`
+      `/api/positions/${noradId}/track?duration_min=${durationMin}&steps=360&time=${startTime}`
     );
     if (!resp.ok) return;
     const data = await resp.json();
 
     if (selectedNoradId !== noradId) return; // selection changed during fetch
 
-    // Ground track: project onto surface (industry standard for LEO trackers).
-    // Rendering at orbital altitude causes perspective "lift" near the globe's limb.
-    const positions = data.track.map(pt =>
-      Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, 0)
-    );
+    // De-rotate ECEF positions to remove Earth rotation effect.
+    // Without this, Earth's ~23°/orbit rotation warps the clean orbital ellipse
+    // into a helix that visibly "bends." By rotating each point's ECEF position
+    // backward/forward to a single reference time, we recover the true orbital
+    // plane — a clean tilted ring that passes through the satellite's current position.
+    const EARTH_OMEGA = 7.2921159e-5; // rad/s (Earth's rotation rate)
+    const refTime = Date.now(); // freeze Earth rotation at "now"
+
+    let positions = data.track.map(pt => {
+      const ecef = Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.alt_km * 1000);
+      const dt = (new Date(pt.timestamp).getTime() - refTime) / 1000;
+      const theta = dt * EARTH_OMEGA;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+      return new Cesium.Cartesian3(
+        ecef.x * cosT - ecef.y * sinT,
+        ecef.x * sinT + ecef.y * cosT,
+        ecef.z
+      );
+    });
+    // Densify to ~3600 pts so Cartesian chords are <12 km (<1 m sag).
+    positions = densifyPositions(positions, 10);
 
     if (positions.length < 2) return;
 
-    trailEntity = viewer.entities.add({
-      polyline: {
+    // Near-side primitive: depth test ON → only camera-facing arc visible, bright
+    const nearInstance = new Cesium.GeometryInstance({
+      geometry: new Cesium.PolylineGeometry({
         positions: positions,
-        width: 2.0,
-        arcType: Cesium.ArcType.GEODESIC, // follow Earth's curvature for surface track
-        material: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
-        clampToGround: true,
-      },
-      show: trailVisible,
+        width: 2.5,
+        arcType: Cesium.ArcType.NONE,
+        vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
+      }),
     });
+
+    // Far-side primitive: depth test OFF → full ring visible, faint ghost
+    const farInstance = new Cesium.GeometryInstance({
+      geometry: new Cesium.PolylineGeometry({
+        positions: positions.slice(), // separate copy for second geometry
+        width: 1.5,
+        arcType: Cesium.ArcType.NONE,
+        vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
+      }),
+    });
+
+    // Add far (faint) first, near (bright) second — rendering order
+    const farPrim = viewer.scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: farInstance,
+      appearance: new Cesium.PolylineMaterialAppearance({
+        material: Cesium.Material.fromType("Color", {
+          color: new Cesium.Color(0.31, 0.76, 0.97, 0.2),
+        }),
+        translucent: true,
+        renderState: {
+          depthTest: { enabled: false },
+          depthMask: false,
+        },
+      }),
+      asynchronous: false,
+      show: trailVisible,
+    }));
+
+    const nearPrim = viewer.scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: nearInstance,
+      appearance: new Cesium.PolylineMaterialAppearance({
+        material: Cesium.Material.fromType("Color", {
+          color: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
+        }),
+        translucent: true,
+      }),
+      asynchronous: false,
+      show: trailVisible,
+    }));
+
+    trailPrimitives = [farPrim, nearPrim];
 
     lastTrailRefresh = performance.now();
   } catch (err) {
