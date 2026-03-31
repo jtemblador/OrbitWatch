@@ -34,3 +34,23 @@
 
 - Type filter checkboxes (code ready in `controls.js`, gated by data)
 - Phase 2 TODO noted in `progress/roadmap.md`
+
+---
+
+## Task 5.2 — Time Controls (Play/Pause/Speed)
+
+### Key Decisions
+
+1. **Drift-free anchor arithmetic** — `baseSimTime + (Date.now() - baseWallTime) * speed` recomputed on every call. Re-anchoring on pause/resume/speed-change prevents accumulation. No `deltaTime` approach that could drift with frame drops.
+
+2. **Speed-adaptive refresh interval** — at 60x with a fixed 5s interval, the satellite lerps 300 simulated seconds in a straight line across a curved orbit (~2,250 km arc). `getRefreshInterval()` returns `max(5000/speed, 500)` so the simulated gap stays small. `setTimeout` loops (not `setInterval`) enable real-time adaptation.
+
+3. **Cached TEME re-rotation for trail alignment** — orbit trail is rendered from TEME positions with a single GMST angle (clean closed ring). At high speed, Earth rotation causes the ring to drift from the satellite. Caching the densified TEME array and re-applying the current GMST every 500ms fixes this purely client-side — no API call, just ~3600 rotations + 2 primitive rebuilds.
+
+4. **Per-point GMST explored and reverted** — rotating each trail point by its own timestamp produced a physically accurate but visually disconnected trail (~23° gap for LEO). User preferred the clean closed ring. ICRF rendering (spinning Earth + inertial ring) noted as future enhancement to get both.
+
+5. **`computeGmst()` extracted as helper** — the IAU 1982 GMST formula was inline in `fetchAndRenderTrail`. Now a standalone function shared between trail rendering and re-rotation. Same formula as `coordinate_transforms.py` backend — must stay in sync.
+
+### Deferred
+
+- **ICRF inertial-frame rendering** — camera locked in inertial space, Earth visually rotates. Would give a static closed orbital ring with the satellite following it perfectly. Requires TEME positions for all rendering, Cesium clock sync, and camera transform. Future task.

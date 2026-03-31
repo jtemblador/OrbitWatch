@@ -324,6 +324,21 @@ The `false` parameter means the callback is NOT constant (positions change every
 
 ---
 
+## Simulated Clock and Speed-Adaptive Refresh
+
+**Simulated time uses drift-free anchor arithmetic:** `baseSimTime + (wallElapsed × speed)`. Must re-anchor (`baseSimTime = getTimeMs(); baseWallTime = Date.now()`) before every state change (pause, resume, speed change) — otherwise the new speed/state applies retroactively to all elapsed time.
+
+**Refresh interval must scale with clock speed.** At 60x, a fixed 5s interval means 300 simulated seconds between fetches. Linear lerp over 300s of curved orbital arc (~2,250 km for LEO) visibly cuts across the orbit. `max(5000/speed, 500)` keeps the simulated gap ≤30s at any speed. Use `setTimeout` loops (not `setInterval`) so the interval adapts when speed changes.
+
+**Static ECEF primitives drift from live positions at high speed.** Orbit trail bakes a GMST angle at render time. As simulated time advances, Earth rotates but the trail doesn't. Fix: cache TEME positions from the last trail fetch and re-rotate with the current GMST on a throttled timer (500ms). Cost: ~3600 rotations + 2 primitive rebuilds — no API call.
+
+**Single-GMST vs per-point GMST trade-off:**
+- Single GMST: all trail points share one rotation angle → clean closed orbital ring, but rotates with Earth as time advances
+- Per-point GMST: each point uses its own timestamp → static trail, satellite follows it, but trail doesn't close (~23° gap for LEO)
+- ICRF rendering (future): camera in inertial frame, Earth rotates → clean ring + satellite follows + no drift. Requires TEME positions for all rendering.
+
+---
+
 ## Display Controls and Visibility State
 
 **`applyVisibilityState()` must be called after every position refresh.** Without this hook, satellites that were hidden via toggles reappear after each 5-second fetch because `updatePositions()` doesn't know about toggle state. The hook in `satellites.js` re-applies current toggle settings after every refresh.
@@ -437,3 +452,15 @@ The `false` parameter means the callback is NOT constant (positions change every
 - `applyVisibilityState()` hook in `satellites.js` maintains toggle state across refreshes
 - Auto-deselect when hiding currently selected satellite via type filter
 - Frontend-only changes, no backend modifications
+
+### Task 5.2 (Time Controls) — DONE
+- `clock.js` IIFE: simulated clock with `getTime()`, `getTimeMs()`, `isPaused()`, `togglePause()`, `setSpeed()`
+- Time bar UI: pause/play, UTC display (250ms tick), speed buttons (1x/10x/60x)
+- All API calls pass `?time=` with simulated time; pause freezes all fetches and lerp
+- Speed-adaptive refresh: `max(5000/speed, 500)` — 500ms at 60x (30s sim gap), 5s at 1x
+- `setTimeout` loops replace `setInterval` for real-time interval adaptation
+- Orbit trail: cached TEME + client-side re-rotation every 500ms at speed > 1
+- `computeGmst()` extracted as shared helper (IAU 1982 formula)
+- Script load order: app → clock → satellites → info-panel → controls
+- Frontend-only changes, no backend modifications
+- Week 5 complete — all tasks done

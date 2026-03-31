@@ -33,9 +33,9 @@
 
 ## Week 5: Cesium.js Globe — Polish (Apr 24 – Apr 30)
 - ~~Orbit trail rendering for selected satellite~~ ✅ (completed Week 4)
-- Nadir line (altitude stalk from ground to satellite)
-- Time controls (play/pause/speed/scrub)
-- Toggle satellite visibility (labels toggle + type filters deferred to Phase 2 — stations group is all "UNKNOWN")
+- Nadir line (altitude stalk from ground to satellite) ✅
+- Time controls (play/pause/speed) ✅ — simulated clock, adaptive refresh, TEME re-rotation
+- Toggle satellite visibility ✅ (labels toggle + type filters deferred to Phase 2 — stations group is all "UNKNOWN")
 
 ## Week 6: Conjunction Detection in C++ (May 1 – May 7)
 - Implement coarse + medium filter pair scanning in C++, expose via pybind11

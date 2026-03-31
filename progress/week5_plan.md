@@ -37,27 +37,22 @@ Show a vertical line from the sub-satellite point on Earth's surface straight up
 
 ---
 
-### 2. Time Controls (Play/Pause/Speed)
+### 2. Time Controls (Play/Pause/Speed) ✅
 
-Let users scrub through time to watch satellites orbit, speed up to see full orbits, or pause to inspect a moment.
-
-**What to build:**
-- UI bar at the bottom of the viewport with: play/pause button, speed selector (1x, 10x, 60x), current UTC time display
-- A simulated clock that advances at the selected speed multiplier
-- All API calls use the simulated time (`?time=` parameter) instead of real UTC
-- When paused, positions freeze; when playing at 1x, matches real-time (current behavior)
-
-**Implementation notes:**
-- Add a `clock.js` module managing simulated time state
-- The existing `?time=` parameter on `/api/positions` and `/api/positions/{norad_id}/track` already supports this — no backend changes needed
-- At 60x speed, 5s refresh interval means each fetch jumps 5 minutes of simulated time — satellite motion will be visible but discrete. Consider reducing refresh interval at high speeds or relying on lerp to smooth the jumps
-- Orbit trail should re-fetch when time jumps significantly (>30s of simulated time per refresh)
+**What was built:**
+- `clock.js` IIFE module with simulated clock: drift-free anchor arithmetic (`baseSimTime + wallElapsed × speed`), re-anchors on pause/resume/speed-change
+- Bottom-center time bar UI: pause/play button, UTC time display (250ms tick), speed buttons (1x/10x/60x) with active highlight
+- All API calls (`/api/positions`, `/api/positions/{id}`, `/api/positions/{id}/track`) pass `?time=` with simulated time
+- Speed-adaptive refresh interval: `max(5000/speed, 500)` — at 60x, fetches every 500ms (30s sim gap) instead of 5s (300s sim gap), keeping lerp accurate on curved orbits
+- Self-scheduling `setTimeout` loops replace `setInterval` for real-time interval adaptation
+- Orbit trail: cached TEME + client-side re-rotation every 500ms at high speed (no API call)
+- Pause freezes all motion, API calls, lerp interpolation, and panel refresh
 
 **Success criteria:**
-- [ ] Play/pause button stops and resumes satellite motion
-- [ ] Speed buttons (1x/10x/60x) accelerate time progression
-- [ ] Current simulated UTC time displayed and updating
-- [ ] Orbit trail stays aligned at all speeds
+- [x] Play/pause button stops and resumes satellite motion
+- [x] Speed buttons (1x/10x/60x) accelerate time progression
+- [x] Current simulated UTC time displayed and updating
+- [x] Orbit trail stays aligned at all speeds
 
 ---
 
@@ -85,9 +80,9 @@ Let users show/hide satellites by category. Phase 1 has only "stations" (~30 obj
 ```
 frontend/js/
 ├── app.js          — no changes
-├── satellites.js   — added applyVisibilityState() hook after position refresh
-├── info-panel.js   — added nadir line (CallbackProperty Entity)
-├── clock.js        — (Task 5.2, not yet started)
+├── clock.js        — NEW: simulated clock module (IIFE) + time bar UI
+├── satellites.js   — ?time= on fetches, pause guards, adaptive refresh interval
+├── info-panel.js   — nadir line, ?time= on fetches, simulated GMST, cached TEME re-rotation
 └── controls.js     — NEW: toggle panel UI + satellite filtering
 ```
 
@@ -116,9 +111,9 @@ frontend/js/
 ## Success Criteria (Definition of Done)
 
 - [x] Nadir line visible from ground to selected satellite
-- [ ] Time controls: play/pause/speed work correctly
-- [ ] Simulated time displayed in UI
+- [x] Time controls: play/pause/speed work correctly
+- [x] Simulated time displayed in UI
 - [x] Satellite visibility toggles work
 - [x] All existing functionality still works (info panel, orbit trail, selection)
 - [x] No console errors
-- [x] 279+ tests passing (no backend changes expected for tasks 1 and 3)
+- [x] 279+ tests passing (no backend changes — frontend only)
