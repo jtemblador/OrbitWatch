@@ -301,6 +301,37 @@ data.track.map(pt => {
 
 ---
 
+## Cesium CallbackProperty for Real-Time Tracking
+
+**Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.
+
+**Pattern (nadir line example):**
+```javascript
+positions: new Cesium.CallbackProperty(() => {
+  const entry = satellites.get(noradId);
+  if (!entry) return [];
+  const satPos = entry.point.position;
+  // ... compute derived positions from satPos ...
+  return [groundPoint, satPos];
+}, false)
+```
+
+The `false` parameter means the callback is NOT constant (positions change every frame). Cesium will re-evaluate it on each render.
+
+**When to use:** Any Entity property that must track a moving satellite smoothly — nadir lines, range rings, connecting lines between objects, etc.
+
+**When NOT to use:** Orbit trails (static geometry, refreshed every 30s) or anything that doesn't need per-frame updates.
+
+---
+
+## Display Controls and Visibility State
+
+**`applyVisibilityState()` must be called after every position refresh.** Without this hook, satellites that were hidden via toggles reappear after each 5-second fetch because `updatePositions()` doesn't know about toggle state. The hook in `satellites.js` re-applies current toggle settings after every refresh.
+
+**Type filters should be gated by data, not by phase number.** Check `satelliteMetadata` for meaningful types at runtime. This avoids hardcoded phase checks and automatically enables filters when new data arrives.
+
+---
+
 ## Task Checklist
 
 ### Task 2.1 (GP Data Fetcher) — DONE
@@ -395,4 +426,14 @@ data.track.map(pt => {
 - Selection indicator: enlarged point (10px) + cyan outline ring (3px)
 - `satelliteMetadata` Map added to `satellites.js` — caches `/api/satellites` at startup
 - Data pipeline cross-verified against python-sgp4 (sub-mm) and wheretheiss.at API
+- Frontend-only changes, no backend modifications
+
+### Tasks 5.1+5.3 (Nadir Line + Display Controls) — DONE
+- Nadir line via CallbackProperty Entity — tracks satellite's interpolated position every render frame
+- Always on when selected (no toggle), cyan theme matching orbit trail
+- Ground point projected via equatorial radius (~7 km error at poles, imperceptible)
+- Display controls panel (top-right): label toggle + type filter checkboxes
+- Type filters gated by data — only shown when meaningful (non-"UNKNOWN") types exist
+- `applyVisibilityState()` hook in `satellites.js` maintains toggle state across refreshes
+- Auto-deselect when hiding currently selected satellite via type filter
 - Frontend-only changes, no backend modifications

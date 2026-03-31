@@ -32,10 +32,10 @@
 - Connect frontend to FastAPI backend
 
 ## Week 5: Cesium.js Globe — Polish (Apr 24 – Apr 30)
-- Orbit trail rendering for selected satellite
-- Ground track line
+- ~~Orbit trail rendering for selected satellite~~ ✅ (completed Week 4)
+- Nadir line (altitude stalk from ground to satellite)
 - Time controls (play/pause/speed/scrub)
-- Toggle constellation groups on/off
+- Toggle satellite visibility (labels toggle + type filters deferred to Phase 2 — stations group is all "UNKNOWN")
 
 ## Week 6: Conjunction Detection in C++ (May 1 – May 7)
 - Implement coarse + medium filter pair scanning in C++, expose via pybind11
@@ -62,6 +62,10 @@
 
 > **⚠ PERF FLAG (before Phase 3 scale-up):** Multiple `iterrows()` calls across the codebase
 > are fine at 30 sats but will be slow at 6,000. All items tracked in `progress/scaling_tracker.md`.
+
+> **📌 Phase 2 TODO:** Enable satellite type filter checkboxes in controls panel. Code is ready
+> (`controls.js` has type filter logic) but hidden because Phase 1 stations are all "UNKNOWN".
+> Phase 2 visual sats will have PAYLOAD, ROCKET BODY, DEBRIS — type filters become useful.
 
 ---
 

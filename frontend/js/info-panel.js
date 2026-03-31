@@ -4,7 +4,7 @@
  * Click a satellite point → bottom-left info panel with metadata + live position.
  * Orbit trail (full-period ring at orbital altitude) auto-renders with solid color; toggle in panel.
  *
- * Depends on: viewer, satellites, satelliteMetadata, REFRESH_INTERVAL_MS
+ * Depends on: viewer, satellites, satelliteMetadata, getRefreshInterval
  *   (globals from app.js / satellites.js)
  */
 
@@ -12,7 +12,12 @@
 let selectedNoradId = null;
 let trailVisible = true;
 let lastTrailRefresh = 0;
-const TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s to keep it aligned with satellite
+const BASE_TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s at 1x
+
+/** Trail refresh interval — scales with speed so trail stays centered at high speeds. */
+function getTrailRefreshInterval() {
+  return Math.max(Math.floor(BASE_TRAIL_REFRESH_MS / simClock.getSpeed()), 5000);
+}
 
 // Orbit trail — TWO Primitives with PolylineGeometry at orbital altitude.
 // Near-side: depth test ON, bright (0.8 alpha) — only camera-facing arc visible.
@@ -22,6 +27,10 @@ const TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s to keep it aligned w
 // One GMST rotation places all points in the current ECEF frame for Cesium.
 // Client-side densification (360 API pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
 let trailPrimitives = [];
+
+// Nadir line — vertical line from sub-satellite ground point to satellite at altitude.
+// Uses a Cesium Entity with CallbackProperty to track the interpolated position every frame.
+let nadirEntity = null;
 
 // Selection indicator — cyan ring around the selected satellite.
 let selectionIndicator = null;
@@ -66,6 +75,7 @@ document.getElementById("trail-checkbox").addEventListener("change", function ()
   }
 });
 
+
 // --- Selection Logic ---
 
 async function selectSatellite(noradId) {
@@ -83,9 +93,10 @@ async function selectSatellite(noradId) {
   // Fetch fresh position + show panel data
   await refreshPanelData(noradId);
 
-  // Fetch and render orbit trail
+  // Fetch and render orbit trail + nadir line
   trailVisible = true;
   document.getElementById("trail-checkbox").checked = true;
+  createNadirLine(noradId);
   await fetchAndRenderTrail(noradId);
 }
 
@@ -93,6 +104,7 @@ function deselectSatellite() {
   selectedNoradId = null;
   panel.style.display = "none";
   clearTrail();
+  clearNadirLine();
   clearSelectionIndicator();
 }
 
@@ -127,7 +139,7 @@ function clearSelectionIndicator() {
 
 async function refreshPanelData(noradId) {
   try {
-    const resp = await fetch(`/api/positions/${noradId}`);
+    const resp = await fetch(`/api/positions/${noradId}?time=${simClock.getTime()}`);
     if (!resp.ok) return;
     const pos = await resp.json();
 
@@ -156,8 +168,41 @@ async function refreshPanelData(noradId) {
     tbody.innerHTML = rows
       .map(([label, value]) => `<tr><td class="info-label">${label}</td><td class="info-value">${value}</td></tr>`)
       .join("");
+
   } catch (err) {
     console.error("Failed to fetch position for panel:", err);
+  }
+}
+
+// --- Nadir Line ---
+// Uses CallbackProperty to read the satellite's current interpolated position
+// every frame, so the line moves smoothly with the point (no 5s lag).
+
+function createNadirLine(noradId) {
+  clearNadirLine();
+  nadirEntity = viewer.entities.add({
+    polyline: {
+      positions: new Cesium.CallbackProperty(() => {
+        const entry = satellites.get(noradId);
+        if (!entry) return [];
+        const satPos = entry.point.position;
+        // Project to surface: normalize to unit vector, scale to Earth radius
+        const surface = new Cesium.Cartesian3();
+        Cesium.Cartesian3.normalize(satPos, surface);
+        Cesium.Cartesian3.multiplyByScalar(surface, Cesium.Ellipsoid.WGS84.maximumRadius, surface);
+        return [surface, satPos];
+      }, false),
+      width: 1.5,
+      material: new Cesium.Color(0.31, 0.76, 0.97, 0.4),
+      arcType: Cesium.ArcType.NONE,
+    },
+  });
+}
+
+function clearNadirLine() {
+  if (nadirEntity) {
+    viewer.entities.remove(nadirEntity);
+    nadirEntity = null;
   }
 }
 
@@ -188,6 +233,17 @@ function densifyPositions(positions, factor) {
   return result;
 }
 
+/** IAU 1982 GMST from Unix milliseconds. Returns angle in radians. */
+function computeGmst(simMs) {
+  const jd = simMs / 86400000 + 2440587.5;
+  const T = (jd - 2451545.0) / 36525.0;
+  const sec = 67310.54841
+    + (876600.0 * 3600.0 + 8640184.812866) * T
+    + 0.093104 * T * T
+    - 6.2e-6 * T * T * T;
+  return (sec * Math.PI / 43200.0) % (2.0 * Math.PI);
+}
+
 function clearTrail() {
   for (const p of trailPrimitives) {
     viewer.scene.primitives.remove(p);
@@ -195,15 +251,70 @@ function clearTrail() {
   trailPrimitives = [];
 }
 
+/** Build near+far trail primitives from ECEF positions array. */
+function buildTrailPrimitives(positions) {
+  clearTrail();
+  if (positions.length < 2) return;
+
+  const nearInstance = new Cesium.GeometryInstance({
+    geometry: new Cesium.PolylineGeometry({
+      positions: positions,
+      width: 2.5,
+      arcType: Cesium.ArcType.NONE,
+      vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
+    }),
+  });
+
+  const farInstance = new Cesium.GeometryInstance({
+    geometry: new Cesium.PolylineGeometry({
+      positions: positions.slice(),
+      width: 1.5,
+      arcType: Cesium.ArcType.NONE,
+      vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
+    }),
+  });
+
+  // Add far (faint) first, near (bright) second — rendering order
+  const farPrim = viewer.scene.primitives.add(new Cesium.Primitive({
+    geometryInstances: farInstance,
+    appearance: new Cesium.PolylineMaterialAppearance({
+      material: Cesium.Material.fromType("Color", {
+        color: new Cesium.Color(0.31, 0.76, 0.97, 0.2),
+      }),
+      translucent: true,
+      renderState: {
+        depthTest: { enabled: false },
+        depthMask: false,
+      },
+    }),
+    asynchronous: false,
+    show: trailVisible,
+  }));
+
+  const nearPrim = viewer.scene.primitives.add(new Cesium.Primitive({
+    geometryInstances: nearInstance,
+    appearance: new Cesium.PolylineMaterialAppearance({
+      material: Cesium.Material.fromType("Color", {
+        color: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
+      }),
+      translucent: true,
+    }),
+    asynchronous: false,
+    show: trailVisible,
+  }));
+
+  trailPrimitives = [farPrim, nearPrim];
+}
+
 async function fetchAndRenderTrail(noradId) {
   clearTrail();
 
   try {
     // Use the satellite's actual orbital period so the trail forms one complete loop.
-    // Works for LEO (~90 min), MEO (~12 hr), GEO (~1436 min), and everything in between.
     const meta = satelliteMetadata.get(noradId);
     const durationMin = meta ? Math.ceil(meta.period_min) : 93; // one full orbit
-    const startTime = new Date(Date.now() - (durationMin / 2) * 60 * 1000).toISOString();
+    const simNowMs = simClock.getTimeMs();
+    const startTime = new Date(simNowMs - (durationMin / 2) * 60 * 1000).toISOString();
 
     const resp = await fetch(
       `/api/positions/${noradId}/track?duration_min=${durationMin}&steps=360&time=${startTime}`
@@ -213,23 +324,16 @@ async function fetchAndRenderTrail(noradId) {
 
     if (selectedNoradId !== noradId) return; // selection changed during fetch
 
-    // TEME (inertial) positions from API — orbit is a clean near-ellipse.
-    // One GMST rotation places all points in the current ECEF frame for Cesium.
-    // This is the same R3(-GMST) rotation used in backend coordinate_transforms.py,
-    // but applied once at "now" instead of per-point — so the orbital ring stays
-    // fixed in the current Earth orientation (no Earth-rotation warping).
-    const jdNow = Date.now() / 86400000 + 2440587.5; // Unix ms → Julian Date
-    const T = (jdNow - 2451545.0) / 36525.0; // Julian centuries from J2000
-    const gmstSec = 67310.54841
-      + (876600.0 * 3600.0 + 8640184.812866) * T
-      + 0.093104 * T * T
-      - 6.2e-6 * T * T * T;
-    const gmst = (gmstSec * Math.PI / 43200.0) % (2.0 * Math.PI);
-    const cosG = Math.cos(gmst);
-    const sinG = Math.sin(gmst);
-
+    // Per-point GMST: each TEME position is rotated to ECEF using its own
+    // timestamp. This produces a static ECEF trail — the satellite naturally
+    // moves along it at any speed, with no client-side re-rotation needed.
+    // Trade-off vs single-GMST: the trail won't form a perfectly closed ring
+    // (Earth rotates ~23° during one LEO orbit), but the satellite tracks it
+    // accurately, which matters more at accelerated time.
     let positions = data.track.map(pt => {
-      // TEME → ECEF: R3(-GMST) rotation, km → meters
+      const gmst = computeGmst(new Date(pt.timestamp).getTime());
+      const cosG = Math.cos(gmst);
+      const sinG = Math.sin(gmst);
       const x = pt.teme_x * 1000;
       const y = pt.teme_y * 1000;
       const z = pt.teme_z * 1000;
@@ -239,65 +343,11 @@ async function fetchAndRenderTrail(noradId) {
         z
       );
     });
-    // NOTE: Trail does NOT perfectly close — J2 precession shifts the orbital
-    // plane ~0.3°/orbit (~30 km). Invisible at normal zoom levels.
 
     // Densify to ~3600 pts so Cartesian chords are <12 km (<1 m sag).
     positions = densifyPositions(positions, 10);
 
-    if (positions.length < 2) return;
-
-    // Near-side primitive: depth test ON → only camera-facing arc visible, bright
-    const nearInstance = new Cesium.GeometryInstance({
-      geometry: new Cesium.PolylineGeometry({
-        positions: positions,
-        width: 2.5,
-        arcType: Cesium.ArcType.NONE,
-        vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
-      }),
-    });
-
-    // Far-side primitive: depth test OFF → full ring visible, faint ghost
-    const farInstance = new Cesium.GeometryInstance({
-      geometry: new Cesium.PolylineGeometry({
-        positions: positions.slice(), // separate copy for second geometry
-        width: 1.5,
-        arcType: Cesium.ArcType.NONE,
-        vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
-      }),
-    });
-
-    // Add far (faint) first, near (bright) second — rendering order
-    const farPrim = viewer.scene.primitives.add(new Cesium.Primitive({
-      geometryInstances: farInstance,
-      appearance: new Cesium.PolylineMaterialAppearance({
-        material: Cesium.Material.fromType("Color", {
-          color: new Cesium.Color(0.31, 0.76, 0.97, 0.2),
-        }),
-        translucent: true,
-        renderState: {
-          depthTest: { enabled: false },
-          depthMask: false,
-        },
-      }),
-      asynchronous: false,
-      show: trailVisible,
-    }));
-
-    const nearPrim = viewer.scene.primitives.add(new Cesium.Primitive({
-      geometryInstances: nearInstance,
-      appearance: new Cesium.PolylineMaterialAppearance({
-        material: Cesium.Material.fromType("Color", {
-          color: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
-        }),
-        translucent: true,
-      }),
-      asynchronous: false,
-      show: trailVisible,
-    }));
-
-    trailPrimitives = [farPrim, nearPrim];
-
+    buildTrailPrimitives(positions);
     lastTrailRefresh = performance.now();
   } catch (err) {
     console.error("Failed to fetch orbit trail:", err);
@@ -305,14 +355,18 @@ async function fetchAndRenderTrail(noradId) {
 }
 
 // --- Auto-refresh panel data + trail ---
-setInterval(async () => {
-  if (selectedNoradId !== null) {
-    await refreshPanelData(selectedNoradId);
+// Self-scheduling loop — adapts interval to clock speed (mirrors satellites.js pattern).
+(function schedulePanelRefresh() {
+  setTimeout(async () => {
+    if (selectedNoradId !== null && !simClock.isPaused()) {
+      await refreshPanelData(selectedNoradId);
 
-    // Re-fetch trail every 30s so it stays anchored to the satellite's current position
-    const now = performance.now();
-    if (trailVisible && now - lastTrailRefresh > TRAIL_REFRESH_MS) {
-      await fetchAndRenderTrail(selectedNoradId);
+      // Re-fetch trail at speed-scaled interval so it stays centered at high speeds
+      const now = performance.now();
+      if (trailVisible && now - lastTrailRefresh > getTrailRefreshInterval()) {
+        await fetchAndRenderTrail(selectedNoradId);
+      }
     }
-  }
-}, REFRESH_INTERVAL_MS);
+    schedulePanelRefresh();
+  }, getRefreshInterval());
+})();

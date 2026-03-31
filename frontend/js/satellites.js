@@ -1,15 +1,26 @@
 /**
  * OrbitWatch — Satellite point rendering with smooth interpolation.
  *
- * Fetches positions from /api/positions every 5 seconds and smoothly
- * interpolates between known positions using preRender callbacks.
+ * Fetches positions from /api/positions at a speed-adaptive interval
+ * (5s at 1x, 500ms at 10x/60x) and smoothly interpolates between
+ * known positions using preRender callbacks.
  * Points + name labels rendered via GPU-batched collections.
  *
- * Depends on: viewer (global, from app.js)
+ * Depends on: viewer (from app.js), simClock (from clock.js)
  */
 
-const REFRESH_INTERVAL_MS = 5000;
-const LERP_FRAME_MS = 50; // ~20fps interpolation — saves CPU at scale, bump later if needed
+const BASE_REFRESH_MS = 5000;
+const MIN_REFRESH_MS = 500; // floor at 500ms to avoid hammering backend at high speeds
+const LERP_FRAME_MS = 50;  // ~20fps interpolation — saves CPU at scale, bump later if needed
+
+/**
+ * Effective refresh interval — scales inversely with clock speed so the
+ * simulated time gap between fetches stays small enough for accurate lerp.
+ * At 1x: 5000ms (5s sim gap). At 10x: 500ms (5s sim gap). At 60x: 500ms (30s sim gap).
+ */
+function getRefreshInterval() {
+  return Math.max(Math.floor(BASE_REFRESH_MS / simClock.getSpeed()), MIN_REFRESH_MS);
+}
 
 // GPU-batched collections — single draw call each, scales to Phase 3 (6K sats).
 const pointCollection = viewer.scene.primitives.add(
@@ -48,7 +59,7 @@ const scratchCartesian = new Cesium.Cartesian3();
  */
 async function fetchPositions() {
   try {
-    const resp = await fetch("/api/positions");
+    const resp = await fetch(`/api/positions?time=${simClock.getTime()}`);
     if (!resp.ok) {
       console.error("Failed to fetch positions:", resp.status);
       return null;
@@ -127,15 +138,17 @@ function updatePositions(positions) {
  */
 function onPreRender() {
   if (satellites.size === 0) return;
+  if (simClock.isPaused()) return; // freeze positions while paused
 
   // Throttle: skip frame if less than LERP_FRAME_MS since last update
   const now = performance.now();
   if (now - lastLerpTime < LERP_FRAME_MS) return;
   lastLerpTime = now;
 
-  // Advance lerp factor based on elapsed time since last fetch
+  // Advance lerp factor based on elapsed time since last fetch.
+  // Denominator must match actual refresh interval so lerp reaches 1.0 just as next fetch arrives.
   const elapsed = now - lastFetchTime;
-  lerpFactor = Math.min(elapsed / REFRESH_INTERVAL_MS, 1.0);
+  lerpFactor = Math.min(elapsed / getRefreshInterval(), 1.0);
 
   for (const entry of satellites.values()) {
     Cesium.Cartesian3.lerp(entry.start, entry.target, lerpFactor, scratchCartesian);
@@ -151,11 +164,14 @@ viewer.scene.preRender.addEventListener(onPreRender);
  */
 async function refreshSatellites() {
   if (fetchInFlight) return;
+  if (simClock.isPaused()) return; // no fetch while paused — positions are frozen
   fetchInFlight = true;
   try {
     const positions = await fetchPositions();
     if (positions) {
       updatePositions(positions);
+      // Re-apply display toggles (controls.js) so hidden types stay hidden after refresh
+      if (typeof applyVisibilityState === "function") applyVisibilityState();
     }
   } finally {
     fetchInFlight = false;
@@ -190,4 +206,11 @@ async function fetchSatelliteMetadata() {
 // --- Startup ---
 fetchSatelliteMetadata();
 refreshSatellites();
-setInterval(refreshSatellites, REFRESH_INTERVAL_MS);
+
+// Self-scheduling loop — re-evaluates interval each cycle so it adapts to speed changes.
+(function scheduleRefresh() {
+  setTimeout(async () => {
+    await refreshSatellites();
+    scheduleRefresh();
+  }, getRefreshInterval());
+})();

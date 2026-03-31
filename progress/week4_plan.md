@@ -214,11 +214,11 @@ Surveyed 9 satellite visualization sites to inform architecture decisions.
 
 ## Success Criteria (Definition of Done)
 
-- [ ] 3D globe renders with Cesium Ion terrain/imagery
-- [ ] ~30 satellite points visible at correct positions
-- [ ] Points move in real-time (auto-refresh)
-- [ ] Click satellite → info popup with name, altitude, speed, position
-- [ ] Selected satellite shows ~90-minute orbit trail
-- [ ] Served by FastAPI (`uvicorn backend.main:app`)
-- [ ] No console errors, clean layout
-- [ ] Ready for Week 5 polish (time controls, toggle groups)
+- [x] 3D globe renders with Cesium Ion terrain/imagery
+- [x] ~30 satellite points visible at correct positions
+- [x] Points move in real-time (auto-refresh)
+- [x] Click satellite → info popup with name, altitude, speed, position
+- [x] Selected satellite shows ~90-minute orbit trail
+- [x] Served by FastAPI (`uvicorn backend.main:app`)
+- [x] No console errors, clean layout
+- [x] Ready for Week 5 polish (time controls, toggle groups)

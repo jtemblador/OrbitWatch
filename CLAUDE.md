@@ -50,7 +50,7 @@ FastAPI Backend (Python)
 - **API routes:** `backend/routers/satellites.py`
 - **Core pipeline:** `backend/core/propagator.py`, `tle_fetcher.py`, `coordinate_transforms.py`
 - **Frontend entry point:** `frontend/index.html`
-- **Frontend JS:** `frontend/js/app.js` (viewer), `satellites.js` (points + labels), `info-panel.js` (click interaction + orbit trail)
+- **Frontend JS:** `frontend/js/app.js` (viewer), `satellites.js` (points + labels), `info-panel.js` (click interaction + orbit trail + nadir line), `controls.js` (display toggles)
 - **Pydantic schemas:** `backend/models/schemas.py` (8 response models)
 - **Tests:** `tests/` (279 tests across 7 test files)
 
@@ -60,10 +60,10 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Week 4 — Cesium.js Globe (Apr 17–23, 2026)
+- **Phase:** Week 5 — Globe Polish (Apr 24–30, 2026)
 - **Timeline:** Mar 20 – May 15, 2026 (8 weeks)
-- **Completed:** Weeks 0–4 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, cross-browser verified)
-- **Next steps:** Week 5 (globe polish — time controls, toggle groups)
+- **Completed:** Weeks 0–4 + Tasks 5.1, 5.3 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, nadir line with real-time tracking, display controls panel with label toggle)
+- **Next steps:** Task 5.2 (time controls — play/pause/speed)
 - **Tests:** 279 passing across 7 test files (82 API + 197 backend/engine) — frontend JS has no automated tests
 
 ## Notes for Future Sessions
