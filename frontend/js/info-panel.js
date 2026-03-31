@@ -104,6 +104,7 @@ function deselectSatellite() {
   selectedNoradId = null;
   panel.style.display = "none";
   clearTrail();
+  cachedDenseTEME = null;
   clearNadirLine();
   clearSelectionIndicator();
 }
@@ -244,6 +245,12 @@ function computeGmst(simMs) {
   return (sec * Math.PI / 43200.0) % (2.0 * Math.PI);
 }
 
+// Cache for client-side trail re-rotation — avoids API call when only Earth has rotated.
+// Stores ~3600 densified TEME Cartesian3 (meters). Set by fetchAndRenderTrail,
+// cleared on deselect or new selection.
+let cachedDenseTEME = null;
+let lastTrailRotation = 0;
+
 function clearTrail() {
   for (const p of trailPrimitives) {
     viewer.scene.primitives.remove(p);
@@ -306,8 +313,32 @@ function buildTrailPrimitives(positions) {
   trailPrimitives = [farPrim, nearPrim];
 }
 
+/**
+ * Rotate cached dense TEME positions to current ECEF and rebuild trail primitives.
+ * Pure client-side — no API call. Cost: ~3600 rotations + 2 primitive rebuilds.
+ */
+function renderTrailFromCache() {
+  if (!cachedDenseTEME || cachedDenseTEME.length < 2) return;
+
+  const gmst = computeGmst(simClock.getTimeMs());
+  const cosG = Math.cos(gmst);
+  const sinG = Math.sin(gmst);
+
+  const ecef = cachedDenseTEME.map(pt =>
+    new Cesium.Cartesian3(
+       cosG * pt.x + sinG * pt.y,
+      -sinG * pt.x + cosG * pt.y,
+      pt.z
+    )
+  );
+
+  buildTrailPrimitives(ecef);
+  lastTrailRotation = performance.now();
+}
+
 async function fetchAndRenderTrail(noradId) {
   clearTrail();
+  cachedDenseTEME = null;
 
   try {
     // Use the satellite's actual orbital period so the trail forms one complete loop.
@@ -324,35 +355,31 @@ async function fetchAndRenderTrail(noradId) {
 
     if (selectedNoradId !== noradId) return; // selection changed during fetch
 
-    // Per-point GMST: each TEME position is rotated to ECEF using its own
-    // timestamp. This produces a static ECEF trail — the satellite naturally
-    // moves along it at any speed, with no client-side re-rotation needed.
-    // Trade-off vs single-GMST: the trail won't form a perfectly closed ring
-    // (Earth rotates ~23° during one LEO orbit), but the satellite tracks it
-    // accurately, which matters more at accelerated time.
-    let positions = data.track.map(pt => {
-      const gmst = computeGmst(new Date(pt.timestamp).getTime());
-      const cosG = Math.cos(gmst);
-      const sinG = Math.sin(gmst);
-      const x = pt.teme_x * 1000;
-      const y = pt.teme_y * 1000;
-      const z = pt.teme_z * 1000;
-      return new Cesium.Cartesian3(
-         cosG * x + sinG * y,
-        -sinG * x + cosG * y,
-        z
-      );
-    });
+    // Single-GMST rotation: all TEME points rotated by the same angle so the
+    // trail forms a clean closed orbital ring. Re-rotation via renderTrailFromCache()
+    // keeps it aligned with the satellite at accelerated speeds.
+    const rawTEME = data.track.map(pt =>
+      new Cesium.Cartesian3(pt.teme_x * 1000, pt.teme_y * 1000, pt.teme_z * 1000)
+    );
+    cachedDenseTEME = densifyPositions(rawTEME, 10);
 
-    // Densify to ~3600 pts so Cartesian chords are <12 km (<1 m sag).
-    positions = densifyPositions(positions, 10);
-
-    buildTrailPrimitives(positions);
+    renderTrailFromCache();
     lastTrailRefresh = performance.now();
   } catch (err) {
     console.error("Failed to fetch orbit trail:", err);
   }
 }
+
+// Re-rotate trail at high speeds so it stays aligned with the satellite point.
+// At speed > 1, Earth rotation causes visible drift — this re-applies the current
+// GMST angle to cached TEME data (no API call, ~3600 rotations + 2 primitive rebuilds).
+viewer.scene.preRender.addEventListener(() => {
+  if (simClock.getSpeed() <= 1 || simClock.isPaused()) return;
+  if (!cachedDenseTEME || !trailVisible) return;
+  const now = performance.now();
+  if (now - lastTrailRotation < 500) return;
+  renderTrailFromCache();
+});
 
 // --- Auto-refresh panel data + trail ---
 // Self-scheduling loop — adapts interval to clock speed (mirrors satellites.js pattern).
