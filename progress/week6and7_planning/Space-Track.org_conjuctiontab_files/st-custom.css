@@ -1,0 +1,1229 @@
+@media (max-width: 1023px) {
+  .container {
+    width: 100%;
+  }
+
+  .discussion-container {
+    float: none;
+    clear: both;
+  }
+
+  .discussion-history {
+    max-height: 300px;
+  }
+
+  .anchor {
+    padding-top: 15px;
+    margin-top: -15px;
+  }
+
+  div.appiButtonDiv {
+    margin-bottom: 20px;
+  }
+
+  button.btnAddAPPIOnly {}
+
+  button.btnAddAPPIOnly>span.icon:after {
+    font-family: "Glyphicons Halflings";
+    content: "\e094";
+    /* Down arrow */
+  }
+
+  button.btnMoveFullyFiltered {
+    margin-left: 10px;
+  }
+
+  button.btnMoveFullyFiltered>span.icon:before {
+    font-family: "Glyphicons Halflings";
+    content: "\e093";
+    /* Up arrow */
+    float: right;
+  }
+}
+
+@media (min-width: 1024px) {
+  .container {
+    width: 92%;
+  }
+
+  #emitterForm fieldset.adjust-margins div.row {
+    margin-left: -30px;
+    margin-right: 0;
+  }
+
+  .discussion-container {
+    float: right;
+  }
+
+  .discussion-history {
+    max-height: 648px;
+  }
+
+  .anchor {
+    padding-top: 100px;
+    margin-top: -100px;
+  }
+
+  div.appiButtonDiv {
+    padding-top: 150px;
+  }
+
+  button.btnAddAPPIOnly {
+    min-width: 100px;
+    width: 100px;
+    margin-bottom: 10px;
+  }
+
+  button.btnAddAPPIOnly>span.icon:after {
+    font-family: "Glyphicons Halflings";
+    content: "\e092";
+    /* Right arrow */
+  }
+
+  span.appiButtonSpacer:before {
+    content: "\A";
+    /* Wrap element to next line */
+    white-space: pre;
+  }
+
+  button.btnMoveFullyFiltered {
+    min-width: 100px;
+    width: 100px;
+  }
+
+  button.btnMoveFullyFiltered>span.icon:before {
+    font-family: "Glyphicons Halflings";
+    content: "\e091";
+    /* Left arrow */
+  }
+}
+
+/* Set when the navbar collapses */
+@media (max-width: 767px) {
+  .navbar-toggle {
+    display: block;
+  }
+
+  .navbar-collapse.collapse {
+    display: none !important;
+  }
+
+  #verticalNav {
+    margin-top: 50px;
+  }
+
+  .navbar-text {
+    float: none;
+    margin: 15px 0;
+  }
+
+  /* since 3.1.0 */
+  .navbar-collapse2.collapse.in {
+    display: block !important;
+  }
+
+  .collapsing {
+    overflow: hidden !important;
+  }
+
+  #top-navbar {
+    width: 100%;
+    padding: 0;
+  }
+
+  #top-navbar-right {
+    display: none !important;
+  }
+
+  #top-navbar-2 {
+    width: 100%;
+  }
+
+  #top-navbar-2 .container {
+    height: 50px;
+    max-height: 50px;
+  }
+
+  #top-navbar-logo {
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+
+  #verticalNav li>a {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .navbar-domain {
+    position: fixed;
+    top: 45px;
+    left: 10%;
+  }
+
+  #top-navbar .popover {
+    min-width: 99%;
+    max-width: 99%;
+    width: 99%;
+  }
+
+  #top-navbar .popover h4,
+  #top-navbar .popover h3 {
+    font-size: small;
+  }
+}
+
+@media (min-width: 768px) {
+  #top-navbar {
+    width: 100%;
+    padding: 0;
+  }
+
+  .navbar-collapse2 {
+    display: none !important;
+  }
+
+  #top-navbar-2 {
+    width: 100%;
+    padding: 0 0 0 5%;
+  }
+
+  .navbar-domain {
+    position: fixed;
+    top: 3px;
+    left: 45%;
+  }
+
+  #top-navbar .popover {
+    min-width: 40%;
+    max-width: 40%;
+    width: 40%;
+  }
+}
+
+#top-navbar {
+  height: 30px;
+  max-height: 30px;
+}
+
+.navbar-brand {
+  padding: 0 10px 0 0;
+  margin-right: 10px;
+  height: 25px;
+}
+
+#top-navbar-logo .popover {
+  min-width: auto;
+  max-width: none;
+  width: auto;
+}
+
+.navbar-left>img {
+  height: 100%;
+  width: auto;
+  float: left;
+  margin: 0 auto;
+}
+
+#top-navbar-right {
+  height: 30px;
+  max-height: 30px;
+}
+
+#nav-uname {
+  font-family: Arial, sans-serif;
+  height: 30px;
+  padding: 5px 15px 5px 15px;
+}
+
+@media (min-width: 768px) {
+
+  .navbar>.container .navbar-brand,
+  .navbar>.container-fluid .navbar-brand {
+    margin-left: 0;
+  }
+
+  .navbar-right {
+    margin-right: 0;
+  }
+
+  .nav-tabs>li {
+    width: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .nav-tabs>li {
+    width: 100%;
+  }
+}
+
+/* To load the amazing star/space font pirulen*/
+@font-face {
+  font-family: PIRULEN;
+  src: url(" ../fonts/pirulen.ttf") format("truetype");
+}
+
+body {
+  padding-top: 120px;
+  /* For Navbar */
+  padding-bottom: 50px;
+  /* For Footer */
+  background-size: cover;
+}
+
+footer.footer {
+  padding: 15px 15px 0 15px;
+  font-size: smaller;
+}
+
+.navbar {
+  font-family: PIRULEN, verdana, helvetica, sans-serif;
+  font-size: 1.2em;
+}
+
+ul.nav li.dropdown:hover ul.dropdown-menu {
+  display: block;
+}
+
+h3.space-font {
+  font-family: PIRULEN, Verdana, Helvetica, sans-serif;
+  font-size: medium;
+  margin-bottom: 0;
+}
+
+.tab-pane header h3 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  font-size: 1em;
+}
+
+header h1,
+header h2,
+header h3,
+.panel-title {
+  font-family: PIRULEN, verdana, helvetica, sans-serif;
+}
+
+header h1 {
+  font-size: 1.3em;
+  margin-left: 2px;
+  margin-bottom: 7px;
+  margin-top: 5px;
+}
+
+header h2 {
+  font-size: medium;
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+header h5 {
+  font-weight: bold;
+  font-size: 1em;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* Make the navbar brand hover pretty */
+.navbar-brand {
+  padding-right: 0;
+  padding-left: 0;
+  -webkit-transition: all 0.1s ease-out;
+  -moz-transition: all 0.1s ease-out;
+  -o-transition: all 0.1s ease-out;
+  transition: all 0.1s ease-out;
+}
+
+.navbar-fixed-top .brand:hover {
+  font-weight: bold;
+  color: rgba(255, 255, 255, 0.99);
+  text-shadow: 0 0 10px #bcbcff;
+}
+
+#nav-username {
+  width: 100%;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+/* query builder generated url */
+.apiURL {
+  cursor: default;
+  text-shadow: none;
+}
+
+input[type="checkbox"].form-control {
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+  margin-bottom: 3px;
+}
+
+span.form-control {
+  white-space: normal;
+}
+
+#queryBuilderAddBtn {
+  margin-top: 22px;
+  margin-bottom: 0;
+}
+
+.glyphicon.white {
+  color: #fff;
+}
+
+#recent .legend {
+  margin-top: 30px;
+}
+
+#recent .legend dt {
+  width: 50px;
+}
+
+#recent .legend dd {
+  margin-left: 80px;
+}
+
+#ssrParts div.row,
+#tleSearchFields div.row {
+  padding-left: 10px;
+}
+
+.left-spacer-xs {
+  margin-left: 5px;
+}
+
+.bottom-spacer-xs {
+  margin-bottom: 5px;
+}
+
+.bottom-spacer-sm {
+  margin-bottom: 10px;
+}
+
+.bottom-spacer-md {
+  margin-bottom: 20px;
+}
+
+.bottom-spacer-lg {
+  margin-bottom: 30px;
+}
+
+.top-spacer-xs {
+  margin-top: 5px;
+}
+
+.top-spacer-sm {
+  margin-top: 10px;
+}
+
+.top-spacer-md {
+  margin-top: 20px;
+}
+
+.top-spacer-lg {
+  margin-top: 30px;
+}
+
+.no-right-border {
+  border-right: 0 !important;
+}
+
+.no-left-border {
+  border-left: 0 !important;
+}
+
+pre {
+  background-color: #dddddd;
+}
+
+pre.tle {
+  font-family: monospace;
+}
+
+.monospace {
+  font-family: "Lucida Console", Monaco, monospace;
+}
+
+.center {
+  float: none;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.centered {
+  text-align: center;
+}
+
+.left {
+  text-align: left;
+}
+
+table>thead>tr {
+  font-size: 15px;
+}
+
+table.directory th {
+  vertical-align: middle;
+}
+
+/*** DataTables ***/
+.dataTables_wrapper {
+  margin: 0 auto;
+}
+
+.dataTables_wrapper thead>tr {}
+
+/* datatable footer search fields */
+.dataTables_wrapper th input[type="search"] {
+  /** without this, datatable autoWidth calculation is wrong and fails **/
+  width: 100%;
+  color: #272b30;
+}
+
+.dataTables_wrapper input:enabled {}
+
+table.dataTable {
+  width: 100%;
+}
+
+table.table-bordered.dataTable tbody td {
+  vertical-align: middle;
+}
+
+/*** Spacing Styles ***/
+.pad-left-6 {
+  padding-left: 6px;
+}
+
+.pad-left-sm {
+  padding-left: 10px;
+}
+
+.pad-top-sm {
+  padding-top: 10px;
+}
+
+.pad-top-15 {
+  padding-top: 15px;
+}
+
+.pad-right-15 {
+  padding-right: 15px;
+}
+
+.pad-right-sm {
+  padding-right: 10px;
+}
+
+.pad-bottom-15 {
+  padding-bottom: 15px;
+}
+
+.pad-left-15 {
+  padding-left: 15px;
+}
+
+.pad-left-20 {
+  padding-left: 20px;
+}
+
+.pad-top-30 {
+  padding-top: 30px;
+}
+
+.margin-top-10 {
+  margin-top: 10px;
+}
+
+.margin-top-15 {
+  margin-top: 15px;
+}
+
+.margin-top-30 {
+  margin-top: 30px;
+}
+
+.margin-left-10 {
+  margin-left: 10px;
+}
+
+.margin-left-15 {
+  margin-left: 15px;
+}
+
+.margin-left-30 {
+  margin-left: 30px;
+}
+
+.margin-right-10 {
+  margin-right: 10px;
+}
+
+.margin-right-15 {
+  margin-right: 15px;
+}
+
+.margin-right-30 {
+  margin-right: 30px;
+}
+
+.margin-bottom-10 {
+  margin-bottom: 10px;
+}
+
+.margin-bottom-15 {
+  margin-bottom: 15px;
+}
+
+.margin-bottom-30 {
+  margin-bottom: 30px;
+}
+
+.bold {
+  font-weight: bold;
+}
+
+hr {
+  height: 1px;
+}
+
+hr.narrow {
+  margin-top: 5px;
+  margin-bottom: 5px;
+}
+
+.panel-st>.panel-heading {
+  font-weight: bold;
+}
+
+.panel-st-primary>.panel-heading {
+  font-family: PIRULEN, verdana, helvetica, sans-serif;
+  font-size: medium;
+  text-transform: uppercase;
+}
+
+.panel-st-primary>.panel-heading::after {
+  /* content: ':'; */
+}
+
+.panel-st-secondary>.panel-heading {
+  font-family: verdana, helvetica, sans-serif;
+  font-size: 1em;
+  font-weight: bold;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.panel-st-help>.panel-heading {
+  font-size: 1.6em;
+}
+
+.panel-st-help>.panel-heading.sub-header {
+  font-size: 1.3em;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.st-http-method-tag {
+  padding: 2px 8px;
+}
+
+/* TODO: consolidate above */
+@media (max-width: 768px) {
+  .panel-transparent>.panel-body {
+    padding: 10px 2px 10px 2px;
+  }
+
+  .emitter-info-comments-container .inputGroupContainer,
+  .pulsed-comments-container .inputGroupContainer,
+  .beam-type-comments-container .inputGroupContainer {
+    padding: 0;
+  }
+}
+
+@media (min-width: 769px) {
+  .panel-transparent>.panel-body {
+    padding: 15px 7px 15px 7px;
+  }
+
+  .emitter-info-comments-container,
+  .pulsed-comments-container {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .emitter-info-comments-container .inputGroupContainer,
+  .pulsed-comments-container .inputGroupContainer,
+  .beam-type-comments-container .inputGroupContainer {
+    padding-left: 10px;
+  }
+}
+
+.help {
+  cursor: help;
+}
+
+#help-legend dt {
+  margin-top: 1em;
+}
+
+#legend dt::after {
+  content: ":";
+}
+
+#help-legend dd {
+  text-indent: 10px;
+}
+
+/* fix for weird layout issue where first div has extra margin */
+#odr_basicServices {
+  margin-left: -15px;
+  margin-top: -15px;
+}
+
+/*** Ops Panel - Reports Tab ***/
+.ops-report-rollup {
+  font-weight: bold;
+  text-align: center;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+/*** Ops Panel - Expiration Tab ***/
+.ops-expiration-expired {
+  color: #272b30;
+  background-color: #da4f49;
+  font-weight: bold;
+}
+
+.ops-expiration-warning {
+  color: #272b30;
+  background-color: #ff9900;
+  font-weight: bold;
+}
+
+#ops-expiration-legend ul>li {
+  margin-top: 5px;
+}
+
+#ops-expiration-legend li>span {
+  padding: 3px 5px 3px 5px;
+}
+
+ul#latest_tle li {
+  white-space: pre-wrap;
+}
+
+ul#latest_tle li:nth-child(even) {
+  background-color: inherit;
+}
+
+ul#latest_tle li:nth-child(odd) {
+  background-color: #f9f9f9;
+}
+
+.control-label,
+.form-group label {
+  background-color: transparent;
+}
+
+.font-size-14 {
+  font-size: 14px;
+}
+
+.font-size-16 {
+  font-size: 16px;
+}
+
+.font-size-18 {
+  font-size: 18px;
+}
+
+.adminAlert {
+  color: #da4f49 !important;
+}
+
+.social-media-icon {
+  height: 23px;
+  width: 23px;
+  margin-right: 5px;
+}
+
+.subscribed-header {
+  background-color: #3f7b56;
+  color: white;
+  font-weight: bold;
+  border-top-left-radius: 0.25em;
+  border-top-right-radius: 0.25em;
+  padding: 2px 2px 2px 10px;
+  margin-top: 5px;
+}
+
+.unsubscribed-header {
+  background-color: #3f5c7b;
+  color: white;
+  font-weight: bold;
+  border-top-left-radius: 0.25em;
+  border-top-right-radius: 0.25em;
+  padding: 2px 2px 2px 15px;
+}
+
+/*** Buttons ***/
+.btn {
+  text-transform: uppercase;
+}
+
+@media (min-width: 1068px) {
+  .btn-query-builder {
+    margin-top: 22px !important;
+    margin-left: -10px;
+  }
+}
+
+@media (max-width: 1067px) {
+  .btn-query-builder {
+    margin-top: 0;
+    margin-left: 0;
+  }
+}
+
+@media (min-width: 991px) {
+  .btn-st-align {
+    margin-top: 25px !important;
+  }
+}
+
+@media (max-width: 990px) {
+  .btn-st-align {
+    margin-top: 5px;
+  }
+}
+
+.btn-space {
+  margin: 0 5px;
+}
+
+.btn-space:first-child {
+  margin-left: 15px;
+}
+
+/*** Bootstrap Modal - center vertically ***/
+.modal {
+  text-align: center;
+}
+
+@media screen and (min-width: 768px) {
+  .modal:before {
+    display: inline-block;
+    vertical-align: middle;
+    content: " ";
+    height: 100%;
+  }
+}
+
+.modal-dialog {
+  display: inline-block;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.modal-header-alert {
+  background-color: #da4f49 !important;
+  font-weight: bold !important;
+}
+
+.modal-instructions {
+  margin: 0 5px 5px 5px;
+  padding: 10px 5px 0 5px;
+}
+
+.tab-info {
+  pointer-events: none;
+  cursor: default;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/*** LCH stuff ***/
+.lch-start-here {
+  width: 50%;
+  min-width: 375px;
+  margin-left: 15px;
+}
+
+@media screen and (min-width: 1024px) {
+  .lch-contact-img {
+    position: fixed;
+    top: 85px;
+    right: 7%;
+  }
+
+  .tab-alert {
+    width: 50% !important;
+  }
+}
+
+@media screen and (max-width: 1023px) {
+  .lch-contact-img {
+    position: inherit;
+    width: 100%;
+    max-width: 404px;
+  }
+
+  .tab-alert {
+    width: 100%;
+  }
+}
+
+/*** Files Panel -> Download -> delete file ***/
+.file-delete {
+  margin-top: 10px;
+}
+
+/*** Fixes for Announcement form ***/
+#createAnnouncementForm .has-feedback .form-control-feedback {
+  top: 22px;
+  right: 10px;
+}
+
+.vertical-center {
+  min-height: 100%;
+  /* Fallback for browsers do NOT support vh unit */
+  min-height: 100vh;
+  /* These two lines are counted as one :-)       */
+
+  display: flex;
+  align-items: center;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.pointer {
+  cursor: pointer;
+}
+
+#filesToUploadCount {
+  cursor: pointer;
+}
+
+/* Icon when the collapsible content is shown */
+#filesToUploadCount:before {
+  font-family: "Glyphicons Halflings";
+  content: "\e114  ";
+  /* glyphicon-chevron-down */
+  white-space: nowrap;
+}
+
+/* Icon when the collapsible content is hidden */
+#filesToUploadCount.collapsed:before {
+  content: "\e080  ";
+  /* glyphicon-chevron-right */
+}
+
+/* Colon when the collapsible content is shown */
+#filesToUploadCount:after {
+  content: ":";
+}
+
+/* No Colon when the collapsible content is hidden */
+#filesToUploadCount.collapsed:after {
+  content: "";
+}
+
+.push {
+  clear: both;
+  height: 60px;
+}
+
+.modal-xl {
+  width: 90%;
+  max-width: 1200px;
+}
+
+.panel-st.shrink {
+  width: 100%;
+  -webkit-transition: width 0.2s ease-in-out;
+  /* For Safari 3.1 to 6.0 */
+  transition: width 0.2s ease-in-out;
+}
+
+.panel-st.shrink.shrunk {
+  width: 150px;
+  -webkit-transition: width 0.2s ease-in-out;
+  /* For Safari 3.1 to 6.0 */
+  transition: width 0.2s ease-in-out;
+}
+
+.panel-st.shrink .panel-heading {
+  cursor: pointer;
+  width: 100%;
+  -webkit-transition: width 0.2s;
+  /* For Safari 3.1 to 6.0 */
+  transition: width 0.2s;
+}
+
+.panel-st.shrink .panel-heading.collapsed {
+  width: 150px;
+  -webkit-transition: width 0.2s;
+  /* For Safari 3.1 to 6.0 */
+  transition: width 0.2s;
+}
+
+.panel-st.shrink .panel-heading:after {
+  /* symbol for "opening" panels */
+  font-family: "Glyphicons Halflings";
+  /* essential for enabling glyphicon */
+  content: "\e114";
+  /* taken from bootstrap.css */
+  float: right;
+}
+
+.panel-st.shrink .panel-heading.collapsed:after {
+  /* symbol for "collapsed" panels */
+  content: "\e080";
+  /* taken from bootstrap.css */
+}
+
+fieldset.regular-border legend {
+  z-index: 1;
+}
+
+.btn-fieldset-instructions {
+  z-index: 2;
+  position: absolute;
+  top: -4px;
+  right: 15px;
+  padding-top: 3px;
+  padding-bottom: 1px;
+}
+
+/* FireFox-specific hack */
+@-moz-document url-prefix() {
+  .btn-fieldset-instructions {
+    top: -37px;
+  }
+}
+
+fieldset.regular-border,
+fieldset.regular-border legend {
+  position: relative;
+}
+
+fieldset.regular-border div.fieldset-instructions {
+  position: relative;
+  top: -30px;
+  margin-left: -19px;
+  margin-right: -19px;
+}
+
+legend.legend-sm {
+  font-size: smaller;
+}
+
+#createSystemForm .inputGroupContainer {
+  margin-left: 15px;
+}
+
+td.details-control {
+  /* symbol for "opening" panels */
+  font-family: "Glyphicons Halflings";
+  /* essential for enabling glyphicon */
+  content: "\e114";
+  /* taken from bootstrap.css */
+  cursor: pointer;
+}
+
+tr.shown td.details-control {
+  /* symbol for "collapsed" panels */
+  content: "\e080";
+  /* taken from bootstrap.css */
+}
+
+div.slider {
+  display: none;
+}
+
+table.dataTable tbody td.no-padding {
+  padding: 0;
+}
+
+.text-icon {
+  text-align: center;
+  font-size: larger;
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+/* This is used to keep the "Select Option" option in a select list from being selectable */
+option[value=""][disabled] {
+  display: none;
+}
+
+/*** LCH Discussion Styles ***/
+.discussion-container .form-control {
+  border-bottom-right-radius: 0 !important;
+  border-top-right-radius: 0 !important;
+}
+
+.discussion-comment {
+  color: #cccccc;
+}
+
+.discussion-history {
+  min-height: 10px;
+  overflow-y: auto;
+}
+
+.discussion-history hr {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+.comment-user {
+  font-weight: bold;
+}
+
+.required-highlight {
+  font-weight: bold;
+}
+
+input.div-point {
+  width: 70% !important;
+}
+
+select.div-point {
+  width: 30% !important;
+  min-width: 50px !important;
+}
+
+.emitter-form {
+  max-height: 800px;
+  overflow-y: auto;
+}
+
+.badge-st {
+  padding: 5px 9px;
+  border-radius: 3px;
+}
+
+/*
+Bootstrap 3 has an issue when validation elements are the last in an input-group
+In order to fix this, we have to force rounded corners here, and add the
+square-right class to any elements that actually have another element after them
+*/
+.input-group input:not(:first-child):not(.square-right),
+.input-group select:not(:first-child):not(.square-right),
+.input-group textarea:not(:first-child):not(.square-right) {
+  border-bottom-left-radius: 0;
+  border-top-left-radius: 0;
+  border-bottom-right-radius: 4px !important;
+  border-top-right-radius: 4px !important;
+}
+
+.square-right {
+  border-bottom-right-radius: 0 !important;
+  border-top-right-radius: 0 !important;
+}
+
+.has-feedback .form-control {
+  padding-right: 36px;
+}
+
+select~.form-control-feedback {
+  margin-right: 10px;
+}
+
+select[multiple]~.form-control-feedback {
+  margin-right: 0;
+}
+
+a.disabled:hover,
+input.disabled:hover,
+textarea.disabled:hover {
+  cursor: not-allowed;
+}
+
+th.dt-center,
+td.dt-center {
+  text-align: center;
+}
+
+#createFavoritesList span.input-group-addon {
+  min-width: 100px;
+}
+
+/*** Announcements styles ***/
+#announcementText {
+  padding-right: 30px;
+}
+
+#announcementTextDiv .form-control-feedback {
+  width: 45px;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+#fileTransferDatatableBtnBar {
+  margin-left: 15px;
+}
+
+/*** Combined Ops page ***/
+#copsTabContent div.toggle-trigger-heading {
+  padding: 0 15px 0 15px;
+}
+
+#copsTabContent div.toggle-trigger-div {
+  padding: 10px 0 10px 15px;
+}
+
+#copsTabContent div.panel-heading div.no-toggle-trigger-div {
+  padding: 10px 15px 10px 0;
+  min-width: 106px;
+  width: 106px;
+  white-space: nowrap;
+}
+
+/*** Launch Library Component ***/
+.launch-rocket-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #eee;
+  text-transform: uppercase;
+}
+
+.launch-time {
+  color: #24b47e;
+  align-items: center;
+}
+
+.st-copy-link {
+  display: flex;
+  align-items: baseline;
+}
+
+.st-glyphicon-link {
+  cursor: pointer;
+}
+
+/*** External Links Component ***/
+.external-link-component ul.list-group {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(6, 1fr);
+  grid-column-gap: 1em;
+  grid-auto-flow: column;
+}
+
+/*** Handle button Spacing ***/
+.st-btn-bar-spaced {
+  display: -webkit-flex;
+  display: flex;
+  -webkit-justify-content: space-between;
+  justify-content: space-between;
+}
