@@ -66,9 +66,16 @@ would also break the real app's data fetching.
   default, a few explicit integration tests run on purpose.)
 
 **Success criteria:**
-- [ ] Full suite runs with **no network access** and does **not** modify `stations.parquet`
-- [ ] `TestDataRefresh` is deterministic across repeated runs
-- [ ] Refresh behavior still covered (status `fetched`/`rate_limited`, counts, schema, fetch_time)
+- [x] Full suite runs with **no network access** and does **not** modify `stations.parquet` (hash identical before/after)
+- [x] `TestRefresh` is deterministic across repeated runs (279 passed, 1 skipped × 3 runs)
+- [x] Refresh behavior still covered (status `fetched`/`rate_limited` paths, counts, schema, fetch_time)
+
+**Actual:** `TestRefresh` already had a sibling `TestRefreshMocked` (covers the "fetched"/502 paths).
+Added a module-level `_offline_fetch_patch()` helper + a `setUp` on `TestRefresh` that patches
+`fetcher.fetch` to return cached data unchanged → deterministic "rate_limited", no network, no
+parquet write. Fixed one stray unmocked call in `test_refresh_matches_model`. Added opt-in
+`TestRefreshLive` (gated by `RUN_NETWORK_TESTS`) so the real fetch can still be exercised on purpose.
+Test-only change — no production code touched.
 
 ---
 

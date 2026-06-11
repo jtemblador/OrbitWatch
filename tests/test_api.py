@@ -14,6 +14,7 @@ Validates:
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 # Ensure orbitcore .so is found before the source directory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
@@ -41,6 +42,23 @@ LEO_PERIOD_MIN, LEO_PERIOD_MAX = 88, 100  # minutes
 
 def teardown_module():
     _client_ctx.__exit__(None, None, None)
+
+
+def _offline_fetch_patch():
+    """Patcher that makes POST /api/refresh run offline.
+
+    Returns the existing cached data unchanged, so the endpoint sees a matching
+    fetch_time and reports "rate_limited" — without contacting CelesTrak or
+    rewriting stations.parquet. Keeps the refresh tests fast, deterministic, and
+    network-free; the "fetched" path is exercised separately in TestRefreshMocked.
+
+    Usage:
+        p = _offline_fetch_patch(); p.start(); self.addCleanup(p.stop)   # in setUp
+        with _offline_fetch_patch(): ...                                 # one-off
+    """
+    fetcher = app.state.propagator.fetcher
+    cached = fetcher.load_cached(app.state.propagator.group)
+    return patch.object(fetcher, "fetch", return_value=cached)
 
 
 # ===========================================================================
@@ -398,7 +416,19 @@ class TestGroundTrack(unittest.TestCase):
 # ===========================================================================
 
 class TestRefresh(unittest.TestCase):
-    """POST /api/refresh — TLE data refresh from CelesTrak."""
+    """POST /api/refresh — endpoint contract with the network mocked.
+
+    These tests run offline: the fetcher is patched to return the cached data
+    unchanged, so the endpoint reports "rate_limited" and never contacts
+    CelesTrak or rewrites stations.parquet. They verify the response shape and
+    the rate-limited path. The "fetched" path lives in TestRefreshMocked; a real
+    end-to-end fetch lives in TestRefreshLive (opt-in via RUN_NETWORK_TESTS).
+    """
+
+    def setUp(self):
+        p = _offline_fetch_patch()
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_refresh_returns_200(self):
         resp = client.post("/api/refresh")
@@ -548,6 +578,29 @@ class TestRefreshMocked(unittest.TestCase):
         self.assertEqual(resp.status_code, 502)
 
 
+@unittest.skipUnless(
+    os.getenv("RUN_NETWORK_TESTS"),
+    "live CelesTrak fetch — set RUN_NETWORK_TESTS=1 to run (hits the network, "
+    "may rewrite stations.parquet)",
+)
+class TestRefreshLive(unittest.TestCase):
+    """Opt-in end-to-end refresh against the real CelesTrak API.
+
+    Skipped by default so the normal suite stays offline/deterministic. Run on
+    purpose to verify the genuine fetch path:  RUN_NETWORK_TESTS=1 pytest ...
+    """
+
+    def test_real_refresh_returns_valid_response(self):
+        from backend.models.schemas import RefreshResponse
+
+        resp = client.post("/api/refresh")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        RefreshResponse(**data)  # schema valid
+        self.assertIn(data["status"], ("fetched", "rate_limited"))
+        self.assertGreater(data["satellite_count"], 0)
+
+
 # ===========================================================================
 # 7. Pydantic Response Models & OpenAPI (Task 3.5)
 # ===========================================================================
@@ -655,7 +708,8 @@ class TestResponseValidation(unittest.TestCase):
 
     def test_refresh_matches_model(self):
         from backend.models.schemas import RefreshResponse
-        data = client.post("/api/refresh").json()
+        with _offline_fetch_patch():  # offline — see _offline_fetch_patch
+            data = client.post("/api/refresh").json()
         RefreshResponse(**data)  # Raises ValidationError if mismatch
 
 
