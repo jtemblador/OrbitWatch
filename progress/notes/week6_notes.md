@@ -81,3 +81,23 @@ Full write-up: `progress/task_logs/task_6_0_mock_refresh_fetcher.md`. Summary:
 - **Result:** 280 passing, 1 skipped, stable ×3; `stations.parquet` md5 byte-identical before/after.
 - Phases run: plan (`@1plan`) → build (`@2build`) → review+test (`@3review`/`@4test`) → document (`@5document`).
 - Commits: `1ae0cb2` (build), `c0fb5b8` (review+test).
+
+---
+
+## Task 6.1 — C++ Batch SGP4 (DONE, Jun 11)
+
+Full write-up: `progress/task_logs/task_6_1_batch_sgp4.md`. Summary:
+
+- **Built:** `orbitcore.propagate_batch(satrecs, tsince_list)` → list of TEME `(pos, vel)` tuples
+  with `None` sentinels for per-sat failures (decayed orbits don't kill the batch). Items passed by
+  reference; `tsince` is per-sat (epochs differ — caller maps UTC → per-sat tsince).
+- **Review caught a segfault:** pybind11 converts `None` → `nullptr` on *pointer* casts without
+  throwing; dereferencing crashed the process. Fixed with a nullptr check → indexed `TypeError`;
+  permanent regression test added.
+- **Honest perf finding:** batch is only **~1.05×** the Python loop (sgp4 compute dominates;
+  Python tuple building remains per-sat). The order-of-magnitude win belongs to 6.3's all-C++
+  medium-filter loop. Perf test asserts "not slower" + records the ratio (no flaky 5%-margin race).
+- **Validation:** bit-identical to single `sgp4()` calls (LEO/MEO/HEO, incl. backward); sub-meter
+  vs python-sgp4; error-reset semantics proven (SGP4.cpp:1779 clears `error` per call).
+- 13 new tests → **293 passing, 1 skipped**. `get_all_positions()` wiring deferred to Phase 7.
+- Commit: `5f0c184` (code+tests). Gotcha: `backend/*.so` is now gitignored (build artifact).

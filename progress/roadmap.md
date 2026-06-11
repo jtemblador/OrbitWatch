@@ -77,7 +77,7 @@ match) is proven early — and the project stays demoable the whole way.
 Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code lives here.
 
 - [x] **6.0 Mock the refresh fetcher** (test hygiene, done first) — `TestRefresh` no longer hits live CelesTrak / rewrites `stations.parquet`; suite runs offline + deterministic. 280 passing. See `task_logs/task_6_0_mock_refresh_fetcher.md`.
-- [ ] **6.1 C++ batch SGP4** — propagate many satellites across many timesteps in one call (replaces the Python-loop-over-C++ that bottlenecks at scale). The performance foundation everything rides on.
+- [x] **6.1 C++ batch SGP4** — `orbitcore.propagate_batch(satrecs, tsince_list)` with per-sat `None` sentinels (one decayed sat can't kill a screen). Bit-identical to single calls; 13 tests; 293 passing. **Measured honestly: only ~1.05× vs the Python loop** — sgp4 compute dominates, so the real perf win moves to 6.3's all-C++ medium filter. See `task_logs/task_6_1_batch_sgp4.md`.
 - [ ] **6.2 C++ coarse filter** — eliminate pairs whose orbits can never get close, using each object's apoapsis/periapsis altitude band. Cheap; kills the vast majority of pairs.
 - [ ] **6.3 C++ medium filter** — for surviving pairs, step through time (~60 s steps over 24–72 h) and flag windows where the TEME distance drops below a threshold. This is the O(N²) hot loop — belongs in C++.
 - [ ] **6.4 pybind11 bindings** — expose batch SGP4 + coarse + medium filters to Python.
@@ -142,9 +142,12 @@ Turn it into something a recruiter can run and watch.
 
 ## Notes & Flags
 
-> **Perf is now a feature, not a flag.** The old "Python loop over C++ SGP4 bottlenecks at 6,000
-> sats" warning is resolved *by design* in Phase 6.1 — batch SGP4 in C++ is the foundation of the
-> all-pairs scan, and its speed is part of the story we tell.
+> **Perf is now a feature, not a flag — with a measured caveat (6.1).** Benchmarking showed the
+> Python-loop-over-C++-sgp4 overhead is only ~5% (sgp4 compute dominates; Python tuple building
+> remains per-sat), so `propagate_batch` alone doesn't buy big speedups at the Python boundary.
+> The order-of-magnitude win is keeping the **entire pairs×timesteps scan inside C++** (6.3 medium
+> filter) where positions never become Python objects. That's the perf story we tell — backed by
+> measurement, which is itself part of the story.
 
 > **C++ where it's hot, Python where it's not.** The medium filter (O(N²) over all pairs × timesteps)
 > is C++; the fine filter runs on only a few survivors and already calls the C++ propagator for each

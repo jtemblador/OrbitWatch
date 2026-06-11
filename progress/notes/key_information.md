@@ -79,6 +79,42 @@ Key functions exposed to Python:
 
 All bug fixes in the code are marked with the comment keyword **`sgp4fix`** — search for it to see every correction vs original STR#3.
 
+**⚠️ `SGP4.cpp` is invisible to plain `grep`:** the file contains a stray binary byte (plus CRLF
+line endings), so `grep` silently treats it as binary → zero matches even for text that's there.
+Use **`grep -a`**. (Cost ~10 min of "where is the error handling?!" confusion in Task 6.1.)
+
+**`sgp4()` clears `satrec.error` at the start of every call** (SGP4.cpp:1779) — a failed
+propagation (decay, bad elements) does NOT poison later calls on the same Satrec. Load-bearing for
+batch sentinel semantics.
+
+---
+
+## Batch Propagation — `orbitcore.propagate_batch` (Task 6.1)
+
+```python
+results = orbitcore.propagate_batch(satrecs, tsince_list)
+# -> list[ ((x,y,z),(vx,vy,vz)) | None ]   TEME, km / km·s
+```
+
+- `tsince_list` is **per-satellite** minutes from each sat's own epoch (epochs differ!):
+  `tsince_k = (jd_target − (jdsatepoch_k + jdsatepochF_k)) × 1440`
+- `None` at an index = that satellite failed (e.g. decayed); neighbors unaffected; the failed
+  Satrec is reusable at other times (error flag resets per call).
+- Items are passed **by reference** — caller's Satrecs mutate (`t`, `error`), same as single `sgp4()`.
+- Errors at the boundary: length mismatch → `ValueError`; non-Satrec item → `TypeError` naming the index.
+
+**⚠️ pybind11 None→nullptr gotcha:** `obj.cast<T*>()` converts `None` to `nullptr` WITHOUT
+throwing (reference casts throw `cast_error` instead). Any pointer-cast in bindings must
+nullptr-check or it segfaults. Caught + regression-tested in Task 6.1.
+
+**Perf reality (measured, min-of-3):** batch ≈ **1.05×** a Python loop over `orbitcore.sgp4()`
+(2.08 vs 2.20 ms / 1,000 props) — sgp4 compute dominates and Python tuple construction remains
+per-sat. Python-facing batching is NOT where the scale win is; keep hot loops (conjunction medium
+filter) entirely inside C++. Future levers if Python-facing throughput matters: NumPy array
+output + GIL release.
+
+---
+
 ---
 
 ## Python sgp4 Library (Already Installed)
