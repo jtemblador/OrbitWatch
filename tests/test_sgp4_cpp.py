@@ -987,3 +987,204 @@ class TestCoarseFilter:
         dt = time.perf_counter() - t0
         assert pairs == []
         assert dt < 1.0, f"O(N^2) scan took {dt:.2f}s at n={n}"
+
+
+# ===================================================================
+# 12. Medium conjunction filter — medium_filter() (Task 6.3)
+# ===================================================================
+
+def _make_iss_variant(dmo_deg=0.0, dnodeo_deg=0.0, bstar=None):
+    """ISS elements with optional mean-anomaly / RAAN offsets (degrees).
+
+    dmo shifts the satellite along its orbit; dnodeo=180 flips the orbital
+    plane so the two orbits cross at the relative nodes — a head-on
+    encounter geometry with v_rel ~ 12 km/s.
+    """
+    from sgp4.api import Satrec as PySatrec, WGS72
+    p = PySatrec.twoline2rv(ISS_TLE["line1"], ISS_TLE["line2"], WGS72)
+    return orbitcore.sgp4init(
+        orbitcore.GravConst.WGS72, "a", "25544",
+        p.jdsatepoch + p.jdsatepochF - 2433281.5,
+        p.bstar if bstar is None else bstar,
+        p.ndot, p.nddot, p.ecco, p.argpo, p.inclo,
+        (p.mo + math.radians(dmo_deg)) % (2 * math.pi),
+        p.no_kozai,
+        (p.nodeo + math.radians(dnodeo_deg)) % (2 * math.pi),
+    )
+
+
+def _iss_epoch_jd():
+    from sgp4.api import Satrec as PySatrec, WGS72
+    p = PySatrec.twoline2rv(ISS_TLE["line1"], ISS_TLE["line2"], WGS72)
+    return p.jdsatepoch + p.jdsatepochF
+
+
+class TestMediumFilter:
+    """medium_filter(): time-stepped pair screening with the velocity-aware
+    no-skip bound. The fast-crosser fixture (found by offline brute-force
+    search, then hardcoded) has true miss ~8 km at v_rel ~12 km/s with
+    sampled 60 s distances of ~520/200 km — a plain d<threshold check
+    misses it entirely; the interval bound must not."""
+
+    # Fixture: ISS vs (MA+180.2 deg, RAAN+180 deg) clone.
+    # Brute-force ground truth: d_min ~ 8.1 km at tsince ~ 122.717 min.
+    CROSSER_DMO = 180.2
+    CROSSER_TCA_MIN = 122.717
+
+    def test_exposed(self):
+        assert hasattr(orbitcore, "medium_filter")
+
+    def test_identical_pair_single_window_d_zero(self):
+        """Same TLE twice: d = 0 throughout -> exactly ONE window (merge +
+        end-of-scan flush both work), distance exactly 0."""
+        jd0 = _iss_epoch_jd()
+        out = orbitcore.medium_filter(
+            [_make_iss_variant(), _make_iss_variant()],
+            [(0, 1)], jd0, jd0 + 0.2, 60.0, 50.0)
+        assert len(out) == 1
+        i, j, jd, d = out[0]
+        assert (i, j) == (0, 1)
+        assert d == 0.0
+        assert jd0 <= jd <= jd0 + 0.2
+
+    def test_fast_crosser_detected_at_60s_steps(self):
+        """THE design-proving test. Sampled distances next to TCA are ~520
+        and ~200 km (>> 50 km threshold) — naive sampling misses the real
+        8 km conjunction; the velocity-aware bound flags it and the window
+        brackets the true TCA within one step."""
+        jd0 = _iss_epoch_jd()
+        a = _make_iss_variant()
+        b = _make_iss_variant(dmo_deg=self.CROSSER_DMO, dnodeo_deg=180.0)
+
+        # Document the naive-sampling hole with the actual numbers:
+        (ra, _) = orbitcore.sgp4(_make_iss_variant(), 122.0)
+        (rb, _) = orbitcore.sgp4(
+            _make_iss_variant(dmo_deg=self.CROSSER_DMO, dnodeo_deg=180.0), 122.0)
+        d_sampled = math.dist(ra, rb)
+        assert d_sampled > 400, "fixture drifted — regenerate ground truth"
+
+        out = orbitcore.medium_filter(
+            [a, b], [(0, 1)], jd0, jd0 + 0.25, 60.0, 50.0)
+        flagged_min = [(jd - jd0) * 1440.0 for _, _, jd, _ in out]
+        assert any(abs(t - self.CROSSER_TCA_MIN) <= 1.0 for t in flagged_min), (
+            f"true TCA {self.CROSSER_TCA_MIN} min not bracketed; "
+            f"flags at {flagged_min}")
+
+    def test_window_brackets_brute_force_minimum(self):
+        """Independent ground truth: 1 s brute-force sampling around the
+        encounter; the flagged step must be within one 60 s step of it."""
+        jd0 = _iss_epoch_jd()
+        a = _make_iss_variant()
+        b = _make_iss_variant(dmo_deg=self.CROSSER_DMO, dnodeo_deg=180.0)
+        # brute force 118..128 min at 1 s resolution via batch propagation
+        times = [118.0 + i / 60.0 for i in range(600)]
+        ta = orbitcore.propagate_batch([a] * len(times), times)
+        tb = orbitcore.propagate_batch([b] * len(times), times)
+        dists = [math.dist(ta[k][0], tb[k][0]) for k in range(len(times))]
+        k_min = dists.index(min(dists))
+        t_true = times[k_min]
+        assert dists[k_min] < 50.0  # genuinely sub-threshold
+
+        out = orbitcore.medium_filter(
+            [a, b], [(0, 1)], jd0, jd0 + 0.25, 60.0, 50.0)
+        near = [(jd - jd0) * 1440.0 for _, _, jd, _ in out
+                if abs((jd - jd0) * 1440.0 - t_true) <= 1.0]
+        assert near, f"no flagged step within 1 step of true min {t_true:.2f}"
+
+    def test_crossing_pair_repeating_windows(self):
+        """Crossing orbits re-encounter at every node pass: expect several
+        distinct windows across 6 h (measured 8 with this fixture)."""
+        jd0 = _iss_epoch_jd()
+        out = orbitcore.medium_filter(
+            [_make_iss_variant(),
+             _make_iss_variant(dmo_deg=self.CROSSER_DMO, dnodeo_deg=180.0)],
+            [(0, 1)], jd0, jd0 + 0.25, 60.0, 50.0)
+        assert 5 <= len(out) <= 11
+        jds = [jd for _, _, jd, _ in out]
+        assert len(set(jds)) == len(jds)  # distinct windows
+
+    def test_co_orbital_far_pair_stays_quiet(self):
+        """~940 km along-track separation, v_rel ~ 0: the adaptive bound
+        applies no inflation -> NOT flagged at 50 km threshold (a fixed
+        gross threshold of ~530 km would spam-flag this)."""
+        jd0 = _iss_epoch_jd()
+        out = orbitcore.medium_filter(
+            [_make_iss_variant(), _make_iss_variant(dmo_deg=8.0)],
+            [(0, 1)], jd0, jd0 + 0.25, 60.0, 50.0)
+        assert out == []
+
+    def test_co_orbital_close_pair_flagged(self):
+        """~35 km along-track separation < 50 km threshold -> one
+        continuous window."""
+        jd0 = _iss_epoch_jd()
+        out = orbitcore.medium_filter(
+            [_make_iss_variant(), _make_iss_variant(dmo_deg=0.3)],
+            [(0, 1)], jd0, jd0 + 0.1, 60.0, 50.0)
+        assert len(out) == 1
+        assert out[0][3] < 50.0
+
+    def test_decayed_sat_isolated(self):
+        """A decaying satellite (huge bstar, placed far away) produces no
+        flags and no crash; an unrelated close pair still flags."""
+        jd0 = _iss_epoch_jd()
+        good_a = _make_iss_variant()
+        good_b = _make_iss_variant()
+        decayer = _make_iss_variant(dmo_deg=90.0, bstar=0.1)
+        out = orbitcore.medium_filter(
+            [good_a, good_b, decayer],
+            [(0, 1), (0, 2)], jd0, jd0 + 0.5, 60.0, 50.0)
+        assert any((i, j) == (0, 1) for i, j, _, _ in out)
+        assert not any((i, j) == (0, 2) for i, j, _, _ in out)
+
+    def test_pair_order_passes_through(self):
+        jd0 = _iss_epoch_jd()
+        out = orbitcore.medium_filter(
+            [_make_iss_variant(), _make_iss_variant()],
+            [(1, 0)], jd0, jd0 + 0.05, 60.0, 50.0)
+        assert out[0][:2] == (1, 0)
+
+    def test_empty_pairs(self):
+        jd0 = _iss_epoch_jd()
+        assert orbitcore.medium_filter(
+            [_make_iss_variant()], [], jd0, jd0 + 0.1, 60.0, 50.0) == []
+
+    def test_boundary_validation(self):
+        """Every invalid input fails loudly with the right exception."""
+        jd0 = _iss_epoch_jd()
+        a, b = _make_iss_variant(), _make_iss_variant()
+        cases = [
+            (([a, b], [(0, 1)], jd0, jd0 - 1.0, 60.0, 50.0), ValueError),   # end <= start
+            (([a, b], [(0, 1)], jd0, jd0 + 1.0, 0.0, 50.0), ValueError),    # step <= 0
+            (([a, b], [(0, 1)], jd0, jd0 + 1.0, 60.0, -1.0), ValueError),   # threshold <= 0
+            (([a, b], [(0, 1)], jd0, jd0 + 30 / 86400, 60.0, 50.0), ValueError),  # window < step
+            (([a, b], [(0, 0)], jd0, jd0 + 1.0, 60.0, 50.0), ValueError),   # i == j
+            (([a, b], [(0, 7)], jd0, jd0 + 1.0, 60.0, 50.0), ValueError),   # out of range
+            (([a, b], [(-1, 1)], jd0, jd0 + 1.0, 60.0, 50.0), ValueError),  # negative
+            (([a, None], [(0, 1)], jd0, jd0 + 1.0, 60.0, 50.0), TypeError), # None satrec
+            (([a, b], ["xy"], jd0, jd0 + 1.0, 60.0, 50.0), TypeError),      # bad pair item
+        ]
+        for args, exc in cases:
+            try:
+                orbitcore.medium_filter(*args)
+                assert False, f"should have raised {exc.__name__}: {args[1]}"
+            except exc:
+                pass
+
+    def test_performance_vertical_slice_scale(self):
+        """Phase 6 scale: 300-sat co-orbital ring, ALL 44,850 pairs (worst
+        case: everything coarse-survives), 24 h at 60 s. Time-major loop
+        keeps this seconds, not hours (pair-major would be ~4 min here and
+        ~6 h at Phase 7)."""
+        import time
+        jd0 = _iss_epoch_jd()
+        n = 300
+        sats = [_make_iss_variant(dmo_deg=360.0 * i / n) for i in range(n)]
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        t0 = time.perf_counter()
+        out = orbitcore.medium_filter(sats, pairs, jd0, jd0 + 1.0, 60.0, 5.0)
+        dt = time.perf_counter() - t0
+        print(f"\n  300 sats / {len(pairs):,} pairs / 24h@60s: {dt:.2f}s, "
+              f"{len(out)} windows")
+        assert dt < 15.0, f"medium filter too slow: {dt:.1f}s"
+        # ring neighbors are ~140 km apart; threshold 5 km -> no flags
+        assert out == []

@@ -15,6 +15,8 @@
 #include <tuple>
 #include <string>
 #include <stdexcept>
+#include <cmath>
+#include <limits>
 #include "SGP4.h"
 #include "hello.h"
 
@@ -313,6 +315,278 @@ pad_km:       safety margin >= 0. Covers SGP4 element drift and the gap
 Returns: list of (i, j) index pairs with i < j, in row-major order.
          NaN bands match nothing.
 Raises: ValueError on length mismatch or negative pad_km.
+)doc"
+    );
+
+    // --- medium_filter: time-stepped pair distance screening (stage 2) ---
+    m.def("medium_filter",
+        [](py::sequence satrecs, py::sequence pairs,
+           double jd_start, double jd_end,
+           double step_sec, double threshold_km) -> py::list
+        {
+            // ---- boundary validation ----
+            if (!(jd_end > jd_start)) {
+                throw py::value_error(
+                    "medium_filter: jd_end must be > jd_start");
+            }
+            if (!(step_sec > 0.0)) {
+                throw py::value_error(
+                    "medium_filter: step_sec must be > 0, got "
+                    + std::to_string(step_sec));
+            }
+            if (!(threshold_km > 0.0)) {
+                throw py::value_error(
+                    "medium_filter: threshold_km must be > 0, got "
+                    + std::to_string(threshold_km));
+            }
+
+            // ---- extract satrec pointers once (None -> nullptr: check!) ----
+            const size_t n = py::len(satrecs);
+            std::vector<elsetrec*> sats(n);
+            for (size_t i = 0; i < n; ++i) {
+                py::object item = satrecs[i];
+                elsetrec* p = nullptr;
+                try { p = item.cast<elsetrec*>(); }
+                catch (const py::cast_error&) { p = nullptr; }
+                if (p == nullptr) {
+                    throw py::type_error(
+                        "medium_filter: satrecs item " + std::to_string(i)
+                        + " is not a Satrec");
+                }
+                sats[i] = p;
+            }
+
+            // ---- extract + validate pairs ----
+            const size_t npairs = py::len(pairs);
+            std::vector<std::pair<size_t, size_t>> P(npairs);
+            for (size_t k = 0; k < npairs; ++k) {
+                py::object item = pairs[k];
+                std::pair<long long, long long> pr;
+                try { pr = item.cast<std::pair<long long, long long>>(); }
+                catch (const py::cast_error&) {
+                    throw py::type_error(
+                        "medium_filter: pairs item " + std::to_string(k)
+                        + " is not an (i, j) index pair");
+                }
+                if (pr.first < 0 || pr.second < 0 ||
+                    (size_t)pr.first >= n || (size_t)pr.second >= n ||
+                    pr.first == pr.second) {
+                    throw py::value_error(
+                        "medium_filter: pairs item " + std::to_string(k)
+                        + " (" + std::to_string(pr.first) + ", "
+                        + std::to_string(pr.second)
+                        + ") out of range for " + std::to_string(n)
+                        + " satellites or i == j");
+                }
+                P[k] = {(size_t)pr.first, (size_t)pr.second};
+            }
+
+            // ---- precompute: epochs, used-satellite mask ----
+            std::vector<double> jd_epoch(n);
+            for (size_t i = 0; i < n; ++i) {
+                jd_epoch[i] = sats[i]->jdsatepoch + sats[i]->jdsatepochF;
+            }
+            std::vector<char> used(n, 0);
+            for (const auto& pr : P) { used[pr.first] = 1; used[pr.second] = 1; }
+
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            const double dt_day = step_sec / 86400.0;
+            const long nsteps =
+                (long)std::floor((jd_end - jd_start) / dt_day + 1e-9) + 1;
+            if (nsteps < 2) {
+                // One sample = zero intervals = nothing can ever flag.
+                // Fail loudly instead of silently returning [].
+                throw py::value_error(
+                    "medium_filter: scan window ("
+                    + std::to_string((jd_end - jd_start) * 86400.0)
+                    + " s) is shorter than step_sec ("
+                    + std::to_string(step_sec) + " s)");
+            }
+
+            // Gravity-gradient curvature allowance for the linear motion
+            // bound: relative accel <= ~2.6e-3 km/s^2 within flagged ranges,
+            // deviation over a half-step ~ 0.5*a*(dt/2)^2.
+            const double curv_margin_km = 3.3e-4 * step_sec * step_sec;
+
+            // Squared-distance pre-check: no two Earth-bound objects close
+            // faster than ~22 km/s (two perigee-speed orbits head-on); 25
+            // gives margin. Pairs farther than this gross radius cannot flag,
+            // and are rejected with ZERO sqrts (~96% of pair-steps in a dense
+            // shell). The precise per-pair v_rel bound decides the rest.
+            const double VMAX_REL = 25.0;  // km/s, universal bound
+            const double gross_km =
+                threshold_km + VMAX_REL * (step_sec * 0.5) + curv_margin_km;
+            const double gross2 = gross_km * gross_km;
+
+            struct Result { size_t i, j; double jd, d; };
+            std::vector<Result> results;
+
+            {
+                // Hot loop touches no Python objects -> release the GIL so a
+                // multi-second screen doesn't freeze the FastAPI process.
+                py::gil_scoped_release release;
+
+                // Per-step state buffers (prev / curr position + velocity)
+                std::vector<double> cx(n), cy(n), cz(n), cvx(n), cvy(n), cvz(n);
+                std::vector<double> pxv(n), pyv(n), pzv(n), pvx(n), pvy(n), pvz(n);
+                std::vector<char> ok_curr(n, 0), ok_prev(n, 0);
+
+                // Per-pair window state (distances kept SQUARED until needed)
+                std::vector<double> prev_d2(npairs, nan);
+                std::vector<double> best_d(npairs,
+                    std::numeric_limits<double>::infinity());
+                std::vector<double> best_jd(npairs, 0.0);
+                std::vector<char> open_win(npairs, 0);
+
+                double jd_prev = 0.0;
+                for (long kstep = 0; kstep < nsteps; ++kstep) {
+                    const double jd_t = jd_start + (double)kstep * dt_day;
+
+                    // Propagate every satellite that appears in a pair, once.
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!used[i]) continue;
+                        const double tsince = (jd_t - jd_epoch[i]) * 1440.0;
+                        double r[3], v[3];
+                        bool ok = SGP4Funcs::sgp4(*sats[i], tsince, r, v);
+                        if (ok && sats[i]->error == 0) {
+                            cx[i] = r[0]; cy[i] = r[1]; cz[i] = r[2];
+                            cvx[i] = v[0]; cvy[i] = v[1]; cvz[i] = v[2];
+                            ok_curr[i] = 1;
+                        } else {
+                            cx[i] = nan; cy[i] = nan; cz[i] = nan;
+                            cvx[i] = nan; cvy[i] = nan; cvz[i] = nan;
+                            ok_curr[i] = 0;
+                        }
+                    }
+
+                    for (size_t k = 0; k < npairs; ++k) {
+                        const size_t i = P[k].first, j = P[k].second;
+                        double curr_d2 = nan;
+                        if (ok_curr[i] && ok_curr[j]) {
+                            const double dx = cx[i] - cx[j];
+                            const double dy = cy[i] - cy[j];
+                            const double dz = cz[i] - cz[j];
+                            curr_d2 = dx*dx + dy*dy + dz*dz;
+                        }
+
+                        bool flagged = false;
+                        if (kstep > 0 && !std::isnan(prev_d2[k])
+                                      && !std::isnan(curr_d2)) {
+                            const double dlo2 =
+                                prev_d2[k] < curr_d2 ? prev_d2[k] : curr_d2;
+                            // Universal pre-check (squared, zero sqrts):
+                            // beyond the gross radius no bound pair can
+                            // close to the threshold within one step.
+                            if (dlo2 < gross2) {
+                                // Precise per-pair bound. Relative speed at
+                                // both endpoints; the larger bounds |d'(t)|.
+                                const double rvc = std::sqrt(
+                                    (cvx[i]-cvx[j])*(cvx[i]-cvx[j]) +
+                                    (cvy[i]-cvy[j])*(cvy[i]-cvy[j]) +
+                                    (cvz[i]-cvz[j])*(cvz[i]-cvz[j]));
+                                const double rvp = std::sqrt(
+                                    (pvx[i]-pvx[j])*(pvx[i]-pvx[j]) +
+                                    (pvy[i]-pvy[j])*(pvy[i]-pvy[j]) +
+                                    (pvz[i]-pvz[j])*(pvz[i]-pvz[j]));
+                                const double vhat = rvc > rvp ? rvc : rvp;
+                                const double d_lo = std::sqrt(dlo2);
+                                // Lower bound on the true minimum inside
+                                // [t_prev, t_curr]: any interior instant is
+                                // within dt/2 of an endpoint, and |d'(t)| <=
+                                // vhat (+ curvature allowance).
+                                const double lb = d_lo
+                                    - vhat * (step_sec * 0.5)
+                                    - curv_margin_km;
+                                flagged = lb < threshold_km;
+                            }
+                        }
+
+                        if (flagged) {
+                            // Track the better sampled endpoint of the window.
+                            double cand_d, cand_jd;
+                            if (curr_d2 < prev_d2[k]) {
+                                cand_d = std::sqrt(curr_d2); cand_jd = jd_t;
+                            } else {
+                                cand_d = std::sqrt(prev_d2[k]); cand_jd = jd_prev;
+                            }
+                            if (!open_win[k]) {
+                                open_win[k] = 1;
+                                best_d[k] = cand_d;
+                                best_jd[k] = cand_jd;
+                            } else if (cand_d < best_d[k]) {
+                                best_d[k] = cand_d;
+                                best_jd[k] = cand_jd;
+                            }
+                        } else if (open_win[k]) {
+                            results.push_back(
+                                {i, j, best_jd[k], best_d[k]});
+                            open_win[k] = 0;
+                            best_d[k] =
+                                std::numeric_limits<double>::infinity();
+                        }
+
+                        prev_d2[k] = curr_d2;
+                    }
+
+                    std::swap(cx, pxv); std::swap(cy, pyv); std::swap(cz, pzv);
+                    std::swap(cvx, pvx); std::swap(cvy, pvy); std::swap(cvz, pvz);
+                    std::swap(ok_curr, ok_prev);
+                    jd_prev = jd_t;
+                }
+
+                // Flush windows still open at the end of the scan.
+                for (size_t k = 0; k < npairs; ++k) {
+                    if (open_win[k]) {
+                        results.push_back(
+                            {P[k].first, P[k].second, best_jd[k], best_d[k]});
+                    }
+                }
+            } // GIL reacquired here
+
+            py::list out;
+            for (const auto& r : results) {
+                out.append(py::make_tuple(r.i, r.j, r.jd, r.d));
+            }
+            return out;
+        },
+        py::arg("satrecs"),
+        py::arg("pairs"),
+        py::arg("jd_start"),
+        py::arg("jd_end"),
+        py::arg("step_sec"),
+        py::arg("threshold_km"),
+        R"doc(
+Medium conjunction filter: time-stepped TEME distance screening of
+candidate pairs (stage 2 of the cascade, after coarse_filter).
+
+Time-major scan: at each step every satellite appearing in a pair is
+propagated ONCE (positions cached), then all pair distances are evaluated
+from the cache — N*steps SGP4 calls instead of pairs*steps*2.
+
+Detection criterion (no skipped approaches): an interval [t_k, t_k+1] is
+flagged when  min(d_k, d_k+1) - v_rel_max*(dt/2) - curvature_margin <
+threshold_km, where v_rel_max is the pair's larger endpoint relative
+speed. A fast-crossing pair (~15 km/s) whose sampled distances sit far
+above the threshold is still caught; co-orbital neighbors (v_rel ~ 0)
+are not spuriously flagged.
+
+satrecs:      sequence of Satrec (passed by reference; t/error mutate).
+pairs:        sequence of (i, j) index pairs into satrecs (e.g. from
+              coarse_filter). Indices validated; i != j required.
+jd_start/end: scan window as absolute Julian Dates (UTC), end > start.
+step_sec:     time step in seconds (> 0).
+threshold_km: flag distance in km (> 0). The fine filter refines.
+
+Returns: list of (i, j, jd, distance_km) — one row per contiguous
+         flagged window per pair (consecutive flagged intervals merge).
+         jd/distance are the window's best SAMPLED point; the true
+         minimum lies within +-1 step (fine-filter bracket). A pair can
+         appear multiple times (repeating encounter geometry). A
+         satellite that fails to propagate (decayed) contributes no
+         flags and closes any open window; other pairs are unaffected.
+Raises: ValueError (bad window/step/threshold/pair indices),
+        TypeError (non-Satrec or non-pair items, named by index).
+The GIL is released during the scan.
 )doc"
     );
 
