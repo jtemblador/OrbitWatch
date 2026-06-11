@@ -115,6 +115,28 @@ output + GIL release.
 
 ---
 
+## Coarse Conjunction Filter — `orbitcore.coarse_filter` (Task 6.2)
+
+```python
+pairs = orbitcore.coarse_filter(periapsis_km, apoapsis_km, pad_km)
+# -> list[(i, j)]  i<j, row-major. Touching bands pair; gap <= pad_km pairs.
+```
+
+- Bands come from `Satrec.alta/altp × Satrec.radiusearthkm` **or** the parquet
+  `apoapsis`/`periapsis` columns — verified consistent to ~0.5 km (different Earth-radius
+  constants; pad absorbs it).
+- NaN bands match nothing (IEEE); length mismatch / negative pad → `ValueError`.
+
+**⚠️ pybind11 boundary-conversion cost (measured at 6,000 sats):** the O(N²) scan is **40 ms**,
+but returning 5.4M survivor pairs costs **~2 s** (378 ns/pair tuple conversion). Rule: don't
+materialize huge C++ result sets as Python objects if they're headed back into C++ — the medium
+filter (6.3) should run the coarse cut internally at scale.
+
+**Catalog-shape caveat:** "coarse filter kills most pairs" holds for mixed-altitude catalogs
+(LEO→GEO), NOT within a single constellation shell (one shared band → ~100% survival).
+
+---
+
 ---
 
 ## Python sgp4 Library (Already Installed)

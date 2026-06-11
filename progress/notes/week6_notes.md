@@ -101,3 +101,21 @@ Full write-up: `progress/task_logs/task_6_1_batch_sgp4.md`. Summary:
   vs python-sgp4; error-reset semantics proven (SGP4.cpp:1779 clears `error` per call).
 - 13 new tests → **293 passing, 1 skipped**. `get_all_positions()` wiring deferred to Phase 7.
 - Commit: `5f0c184` (code+tests). Gotcha: `backend/*.so` is now gitignored (build artifact).
+
+---
+
+## Task 6.2 — C++ Coarse Filter (DONE, Jun 11)
+
+Full write-up: `progress/task_logs/task_6_2_coarse_filter.md`. Summary:
+
+- **Built:** `orbitcore.coarse_filter(periapsis_km, apoapsis_km, pad_km)` → `(i,j)` pairs whose
+  altitude bands overlap (touching counts; gap ≤ pad bridges). Plain arrays in — screener derives
+  bands from `alta/altp × Re` or parquet columns (agree to ~0.5 km).
+- **Perf finding with 6.3 consequence:** O(N²) scan is only **40 ms at 6,000 sats**, but a dense
+  catalog returning 5.4M pairs spends **~2 s converting tuples to Python** (378 ns/pair). The
+  survivors feed straight back into C++ in 6.3 → don't round-trip them through Python at scale;
+  6.3 should run the coarse cut internally (decide in its plan phase).
+- **Honest expectation:** within one Starlink shell, ~100% of pairs survive coarse filtering (one
+  shared band) — the filter pays off across mixed catalogs (Phase 7 "active", LEO→GEO).
+- 16 tests incl. property-check vs brute force + real-parquet integration → **309 passing**.
+- Commit: `e6cfda9`.

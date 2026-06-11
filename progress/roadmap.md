@@ -78,7 +78,7 @@ Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code 
 
 - [x] **6.0 Mock the refresh fetcher** (test hygiene, done first) — `TestRefresh` no longer hits live CelesTrak / rewrites `stations.parquet`; suite runs offline + deterministic. 280 passing. See `task_logs/task_6_0_mock_refresh_fetcher.md`.
 - [x] **6.1 C++ batch SGP4** — `orbitcore.propagate_batch(satrecs, tsince_list)` with per-sat `None` sentinels (one decayed sat can't kill a screen). Bit-identical to single calls; 13 tests; 293 passing. **Measured honestly: only ~1.05× vs the Python loop** — sgp4 compute dominates, so the real perf win moves to 6.3's all-C++ medium filter. See `task_logs/task_6_1_batch_sgp4.md`.
-- [ ] **6.2 C++ coarse filter** — eliminate pairs whose orbits can never get close, using each object's apoapsis/periapsis altitude band. Cheap; kills the vast majority of pairs.
+- [x] **6.2 C++ coarse filter** — `coarse_filter(periapsis_km, apoapsis_km, pad_km)` → `(i,j)` pairs with overlapping altitude bands. Scan = 40 ms at 6,000 sats; measured gotcha: millions of survivor pairs cost ~2 s in C++→Python conversion → 6.3 should keep the coarse cut internal at scale. 16 tests; 309 passing. See `task_logs/task_6_2_coarse_filter.md`.
 - [ ] **6.3 C++ medium filter** — for surviving pairs, step through time (~60 s steps over 24–72 h) and flag windows where the TEME distance drops below a threshold. This is the O(N²) hot loop — belongs in C++.
 - [ ] **6.4 pybind11 bindings** — expose batch SGP4 + coarse + medium filters to Python.
 - [ ] **6.5 RTN coordinate transform** — convert a pair's relative position from TEME XYZ to Radial / In-Track / Cross-Track (the frame every real conjunction report uses). ~20 lines, large credibility payoff.

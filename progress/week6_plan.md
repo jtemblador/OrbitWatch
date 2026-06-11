@@ -125,9 +125,16 @@ This is the cheap filter that kills the vast majority of the N² pairs before an
   `alta * radiusearthkm`).
 
 **Success criteria:**
-- [ ] Two satellites with disjoint altitude bands (e.g. ISS @420 km vs a GEO sat) are *not* paired
-- [ ] Two co-altitude satellites *are* paired
-- [ ] On the ~300-sat set, the surviving pair count is a small fraction of N(N−1)/2 (log the %)
+- [x] Two satellites with disjoint altitude bands are *not* paired (ISS↔GPS; also the subtle case: Molniya's 500 km perigee sits 76 km above ISS apogee → no pair at pad=0, pairs at pad≥76)
+- [x] Two co-altitude satellites *are* paired (+ property check vs independent brute-force impl + real stations parquet)
+- [x] Survivor count measured on real data (25 stations, pad=50: strict subset of all pairs). **Note:** within a single Starlink shell (the 6.9 dataset) survival is ~100% by design — coarse filtering pays off across a *mixed* catalog, not within one shell.
+
+**Actual:** `coarse_filter(periapsis_km, apoapsis_km, pad_km)` in `bindings.cpp` — plain double
+arrays (unit-agnostic; screener derives bands from `alta/altp × Re` or parquet columns, verified
+consistent). Naive O(N²): **scan = 40 ms at 6,000 sats**; but a dense catalog yielding 5.4M
+survivor pairs costs **~2 s in C++→Python tuple conversion** (378 ns/pair). ⚠ **6.3 design
+consequence:** survivor pairs shouldn't round-trip through Python at scale — medium filter should
+run the coarse cut internally (or accept the one-time cost). 16 tests; 309 passing.
 
 ---
 
