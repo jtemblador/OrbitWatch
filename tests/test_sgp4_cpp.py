@@ -690,3 +690,170 @@ class TestEdgeCases:
             pos, vel = orbitcore.sgp4(satrec, float(t))
             assert all(math.isfinite(x) for x in pos)
             assert all(math.isfinite(v) for v in vel)
+
+
+# ===================================================================
+# 10. Batch propagation — propagate_batch() (Task 6.1)
+# ===================================================================
+class TestPropagateBatch:
+    """propagate_batch(): many satellites in one Python→C++ crossing.
+
+    Correctness anchor: results must be BIT-IDENTICAL to individual
+    orbitcore.sgp4() calls (same code path, no tolerance). The existing
+    TestCrossValidation / TestValladoVerification suites validate sgp4()
+    itself, so identity here transitively cross-validates the batch.
+    """
+
+    def test_exposed(self):
+        assert hasattr(orbitcore, "propagate_batch")
+
+    def test_matches_single_calls_exactly(self):
+        """Bit-identical to single sgp4() across orbit types and times
+        (incl. backward propagation)."""
+        for tle in (ISS_TLE, GPS_TLE, MOLNIYA_TLE):
+            for t in (0.0, 60.0, 360.0, -30.0):
+                sat_single, _ = _init_from_tle(**tle)
+                sat_batch, _ = _init_from_tle(**tle)
+                expected = orbitcore.sgp4(sat_single, t)
+                got = orbitcore.propagate_batch([sat_batch], [t])
+                assert got[0] == expected
+
+    def test_mixed_satellites_one_call(self):
+        """LEO + MEO + HEO with different tsince values in a single batch."""
+        tsinces = [10.0, 120.0, 720.0]
+        sats, expected = [], []
+        for tle, t in zip((ISS_TLE, GPS_TLE, MOLNIYA_TLE), tsinces):
+            s_batch, _ = _init_from_tle(**tle)
+            s_single, _ = _init_from_tle(**tle)
+            sats.append(s_batch)
+            expected.append(orbitcore.sgp4(s_single, t))
+        assert orbitcore.propagate_batch(sats, tsinces) == expected
+
+    def test_result_shape_and_sanity(self):
+        """((x,y,z),(vx,vy,vz)) floats, finite, ISS radius in LEO range."""
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        (pos, vel), = orbitcore.propagate_batch([satrec], [60.0])
+        assert len(pos) == 3 and len(vel) == 3
+        assert all(math.isfinite(x) for x in pos + vel)
+        radius = math.sqrt(sum(x ** 2 for x in pos))
+        assert 6500 < radius < 7000  # ISS: ~6780 km from geocenter
+        speed = math.sqrt(sum(v ** 2 for v in vel))
+        assert 7.0 < speed < 8.0  # LEO orbital speed km/s
+
+    def test_empty_inputs(self):
+        assert orbitcore.propagate_batch([], []) == []
+
+    def test_accepts_tuple_inputs(self):
+        """py::sequence input — tuples work as well as lists; int tsince ok."""
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        ref, _ = _init_from_tle(**ISS_TLE)
+        got = orbitcore.propagate_batch((satrec,), (60,))
+        assert got[0] == orbitcore.sgp4(ref, 60.0)
+
+    def test_length_mismatch_raises_valueerror(self):
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        try:
+            orbitcore.propagate_batch([satrec], [1.0, 2.0])
+            assert False, "should have raised ValueError"
+        except ValueError as e:
+            assert "1 vs 2" in str(e)
+
+    def test_non_satrec_item_raises_typeerror_with_index(self):
+        """Bad items (wrong type, None) raise TypeError naming the index —
+        None is the regression case: pybind11 casts None to nullptr on
+        pointer casts, which segfaulted an early implementation."""
+        good, _ = _init_from_tle(**ISS_TLE)
+        for bad in ("not a satrec", None, 42):
+            try:
+                orbitcore.propagate_batch([good, bad], [0.0, 0.0])
+                assert False, f"should have raised TypeError for {bad!r}"
+            except TypeError as e:
+                assert "item 1" in str(e)
+
+    def test_failed_sat_yields_none_others_unaffected(self):
+        """A decaying satellite returns None at its index; neighbors still
+        propagate. One bad sat must not kill the batch."""
+        good_a, pysat = _init_from_tle(**ISS_TLE)
+        good_b, _ = _init_from_tle(**ISS_TLE)
+        # Same elements but absurd drag — decays within days, error != 0
+        epoch = pysat.jdsatepoch + pysat.jdsatepochF - 2433281.5
+        decayer = orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "a", "99999", epoch,
+            0.1,  # bstar ~350x ISS — guarantees decay
+            pysat.ndot, pysat.nddot, pysat.ecco, pysat.argpo,
+            pysat.inclo, pysat.mo, pysat.no_kozai, pysat.nodeo,
+        )
+        t_far = 30.0 * 1440.0  # 30 days
+        out = orbitcore.propagate_batch(
+            [good_a, decayer, good_b], [t_far, t_far, 60.0])
+        assert out[0] is not None
+        assert out[1] is None
+        assert decayer.error != 0
+        assert out[2] is not None
+
+    def test_failed_sat_reusable_at_other_times(self):
+        """sgp4() clears the error flag per call (SGP4.cpp:1779) — a failed
+        satellite must succeed again at a valid time."""
+        _, pysat = _init_from_tle(**ISS_TLE)
+        epoch = pysat.jdsatepoch + pysat.jdsatepochF - 2433281.5
+        decayer = orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "a", "99999", epoch,
+            0.1, pysat.ndot, pysat.nddot, pysat.ecco, pysat.argpo,
+            pysat.inclo, pysat.mo, pysat.no_kozai, pysat.nodeo,
+        )
+        assert orbitcore.propagate_batch([decayer], [30.0 * 1440.0]) == [None]
+        again = orbitcore.propagate_batch([decayer], [0.0])
+        assert again[0] is not None
+        assert decayer.error == 0
+
+    def test_mutates_satrec_like_single_call(self):
+        """Items are passed by reference (not copied): satrec.t updates,
+        matching the single-call binding's semantics."""
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        orbitcore.propagate_batch([satrec], [42.0])
+        assert satrec.t == 42.0
+
+    def test_cross_validation_vs_python_sgp4(self):
+        """Direct check against the python-sgp4 library (Brandon Rhodes):
+        ISS at epoch+60min, sub-meter agreement."""
+        satrec, pysat = _init_from_tle(**ISS_TLE)
+        (pos, _), = orbitcore.propagate_batch([satrec], [60.0])
+        e, py_r, _ = pysat.sgp4(pysat.jdsatepoch,
+                                pysat.jdsatepochF + 60.0 / 1440.0)
+        assert e == 0
+        dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(pos, py_r)))
+        assert dist < 0.001  # km — sub-meter
+
+    def test_batch_faster_than_python_loop(self):
+        """The point of the batch call: one boundary crossing beats N.
+        min-of-3 timings at N=1000 to keep this robust on a loaded machine."""
+        import time
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        n = 1000
+        tsinces = [float(i) * 0.1 for i in range(n)]
+        sats = [satrec] * n  # same satrec is fine — each call restarts from epoch
+
+        def best_of(fn, runs=3):
+            times = []
+            for _ in range(runs):
+                t0 = time.perf_counter()
+                result = fn()
+                times.append(time.perf_counter() - t0)
+            return min(times), result
+
+        t_loop, loop_result = best_of(
+            lambda: [orbitcore.sgp4(satrec, t) for t in tsinces])
+        t_batch, batch_result = best_of(
+            lambda: orbitcore.propagate_batch(sats, tsinces))
+
+        assert batch_result == loop_result  # free correctness check
+        print(f"\n  batch {t_batch*1e3:.2f} ms vs loop {t_loop*1e3:.2f} ms "
+              f"({t_loop/t_batch:.2f}x) for {n} propagations")
+        # Measured speedup is modest (~1.05x): sgp4() compute dominates and
+        # the batch still builds Python tuples per sat. The order-of-magnitude
+        # win is the all-C++ medium filter (6.3). Asserting a strict win on a
+        # ~5% margin would be a flaky timing race (week-3 lesson) — enforce
+        # "not meaningfully slower" and record the ratio above.
+        assert t_batch < t_loop * 1.10, (
+            f"batch ({t_batch:.4f}s) should not be slower than the "
+            f"Python loop ({t_loop:.4f}s)")

@@ -6,7 +6,7 @@
  *   - Satrec class (elsetrec struct with key fields)
  *   - sgp4init() — initialize satellite record from OMM elements
  *   - sgp4() — propagate to time T, returns (pos, vel) tuples
- *   - propagate() — convenience wrapper returning ((x,y,z), (vx,vy,vz))
+ *   - propagate_batch() — propagate many satellites in one call (None on per-sat error)
  *   - jday() — calendar date to Julian Date
  */
 
@@ -184,6 +184,76 @@ Propagate satellite to time tsince (minutes from epoch).
 Returns: ((x, y, z), (vx, vy, vz)) in TEME frame.
          Position in km, velocity in km/s.
 Raises: RuntimeError if propagation fails (e.g., decayed orbit).
+)doc"
+    );
+
+    // --- propagate_batch: propagate many satellites in one call ---
+    m.def("propagate_batch",
+        [](py::sequence satrecs, const std::vector<double>& tsince_list) -> py::list
+        {
+            if (py::len(satrecs) != tsince_list.size()) {
+                throw py::value_error(
+                    "propagate_batch: satrecs and tsince_list lengths differ ("
+                    + std::to_string(py::len(satrecs)) + " vs "
+                    + std::to_string(tsince_list.size()) + ")"
+                );
+            }
+
+            py::list results;
+            for (size_t i = 0; i < tsince_list.size(); ++i) {
+                // Cast to reference, not copy — mutates the caller's Satrec
+                // (t, error) exactly like the single-satellite sgp4() binding.
+                py::object item = satrecs[i];
+                elsetrec* satrec_ptr = nullptr;
+                try {
+                    // Pointer cast: pybind11 converts None to nullptr (a
+                    // reference cast would throw) — so check both paths.
+                    satrec_ptr = item.cast<elsetrec*>();
+                } catch (const py::cast_error&) {
+                    satrec_ptr = nullptr;
+                }
+                if (satrec_ptr == nullptr) {
+                    throw py::type_error(
+                        "propagate_batch: item " + std::to_string(i)
+                        + " is not a Satrec"
+                    );
+                }
+                elsetrec& satrec = *satrec_ptr;
+
+                double r[3], v[3];
+                bool ok = SGP4Funcs::sgp4(satrec, tsince_list[i], r, v);
+
+                if (!ok || satrec.error != 0) {
+                    // Sentinel instead of throwing: one decayed/bad satellite
+                    // must not kill the batch. sgp4() clears satrec.error at
+                    // the start of every call, so a failed satellite remains
+                    // usable at other propagation times.
+                    results.append(py::none());
+                } else {
+                    results.append(py::make_tuple(
+                        py::make_tuple(r[0], r[1], r[2]),
+                        py::make_tuple(v[0], v[1], v[2])
+                    ));
+                }
+            }
+            return results;
+        },
+        py::arg("satrecs"),
+        py::arg("tsince_list"),
+        R"doc(
+Propagate many satellites in a single call (one Python->C++ crossing).
+
+satrecs:     sequence of Satrec objects (each initialized via sgp4init).
+tsince_list: minutes from EACH satellite's own epoch, one entry per
+             satellite. Epochs differ per satellite — to evaluate all at
+             the same UTC instant, compute per-satellite
+             tsince = (jd_target - (jdsatepoch + jdsatepochF)) * 1440.
+
+Returns: list with one entry per satellite:
+         ((x, y, z), (vx, vy, vz)) in TEME (km, km/s), or
+         None if propagation failed for that satellite (e.g. decayed
+         orbit). A failure does not affect other entries.
+Raises: ValueError if the input lengths differ.
 )doc"
     );
 
