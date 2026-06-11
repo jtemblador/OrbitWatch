@@ -257,6 +257,65 @@ Raises: ValueError if the input lengths differ.
 )doc"
     );
 
+    // --- coarse_filter: altitude-band pair screening (conjunction stage 1) ---
+    m.def("coarse_filter",
+        [](const std::vector<double>& periapsis_km,
+           const std::vector<double>& apoapsis_km,
+           double pad_km) -> std::vector<std::pair<size_t, size_t>>
+        {
+            if (periapsis_km.size() != apoapsis_km.size()) {
+                throw py::value_error(
+                    "coarse_filter: periapsis_km and apoapsis_km lengths differ ("
+                    + std::to_string(periapsis_km.size()) + " vs "
+                    + std::to_string(apoapsis_km.size()) + ")"
+                );
+            }
+            if (pad_km < 0.0) {
+                throw py::value_error(
+                    "coarse_filter: pad_km must be >= 0, got "
+                    + std::to_string(pad_km)
+                );
+            }
+
+            const size_t n = periapsis_km.size();
+            std::vector<std::pair<size_t, size_t>> pairs;
+            // Naive O(N^2) interval-overlap scan: ~18M double compares at
+            // 6,000 sats = tens of ms. Sort-and-sweep O(N log N + K) is the
+            // upgrade path if Phase 4 (10k+ objects) ever needs it.
+            for (size_t i = 0; i < n; ++i) {
+                for (size_t j = i + 1; j < n; ++j) {
+                    // Bands overlap (touching counts) once padded by pad_km.
+                    // NaN inputs compare false -> a NaN-band sat pairs with
+                    // nothing rather than poisoning the scan.
+                    if (periapsis_km[i] <= apoapsis_km[j] + pad_km &&
+                        periapsis_km[j] <= apoapsis_km[i] + pad_km) {
+                        pairs.emplace_back(i, j);
+                    }
+                }
+            }
+            return pairs;
+        },
+        py::arg("periapsis_km"),
+        py::arg("apoapsis_km"),
+        py::arg("pad_km"),
+        R"doc(
+Coarse conjunction filter: keep satellite pairs whose orbital altitude
+bands [periapsis - pad, apoapsis + pad] overlap. Two objects whose bands
+never intersect can never come close — rejected without any propagation.
+
+periapsis_km: per-satellite perigee altitude in km (e.g. Satrec.altp *
+              Satrec.radiusearthkm, or the GP-derived 'periapsis' column).
+apoapsis_km:  per-satellite apogee altitude in km, same indexing.
+pad_km:       safety margin >= 0. Covers SGP4 element drift and the gap
+              up to the medium-filter distance threshold. Two bands
+              separated by a gap <= pad_km still count as overlapping.
+
+Returns: list of (i, j) index pairs with i < j, in row-major order.
+         NaN bands match nothing.
+Raises: ValueError on length mismatch or negative pad_km.
+)doc"
+    );
+
     // --- jday: calendar date to Julian Date ---
     m.def("jday",
         [](int year, int mon, int day, int hr, int minute, double sec)

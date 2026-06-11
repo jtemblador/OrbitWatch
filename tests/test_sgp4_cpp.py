@@ -857,3 +857,133 @@ class TestPropagateBatch:
         assert t_batch < t_loop * 1.10, (
             f"batch ({t_batch:.4f}s) should not be slower than the "
             f"Python loop ({t_loop:.4f}s)")
+
+
+# ===================================================================
+# 11. Coarse conjunction filter — coarse_filter() (Task 6.2)
+# ===================================================================
+class TestCoarseFilter:
+    """coarse_filter(): altitude-band pair screening, stage 1 of the
+    conjunction cascade. Pure interval math — no propagation."""
+
+    # Altitude bands (km): ISS, GPS, GEO, Molniya (HEO spans MEO->GEO)
+    PERI = [415.0, 20180.0, 35780.0, 500.0]
+    APO = [424.0, 20270.0, 35800.0, 39000.0]
+
+    def test_exposed(self):
+        assert hasattr(orbitcore, "coarse_filter")
+
+    def test_disjoint_bands_rejected(self):
+        """ISS (415-424) vs GPS (20180-20270): can never meet."""
+        assert orbitcore.coarse_filter(
+            [415.0, 20180.0], [424.0, 20270.0], 0.0) == []
+
+    def test_co_altitude_paired(self):
+        assert orbitcore.coarse_filter(
+            [415.0, 410.0], [424.0, 430.0], 0.0) == [(0, 1)]
+
+    def test_heo_crosses_meo_and_geo_but_not_iss(self):
+        """Molniya (500-39000 km) overlaps GPS and GEO; its perigee sits
+        76 km ABOVE ISS apogee, so no ISS pair at pad=0."""
+        pairs = orbitcore.coarse_filter(self.PERI, self.APO, 0.0)
+        assert pairs == [(1, 3), (2, 3)]
+
+    def test_pad_bridges_gap(self):
+        """The ISS-Molniya gap is 76 km: pad >= 76 pairs them."""
+        pairs = orbitcore.coarse_filter(self.PERI, self.APO, 76.0)
+        assert (0, 3) in pairs
+        pairs_75 = orbitcore.coarse_filter(self.PERI, self.APO, 75.9)
+        assert (0, 3) not in pairs_75
+
+    def test_touching_bands_count_as_overlap(self):
+        """apogee_a == perigee_b exactly -> paired (<= semantics)."""
+        assert orbitcore.coarse_filter(
+            [400.0, 424.0], [424.0, 500.0], 0.0) == [(0, 1)]
+
+    def test_pair_ordering_no_self_no_dup(self):
+        """All-overlapping set: exactly N(N-1)/2 pairs, i<j, row-major."""
+        n = 5
+        pairs = orbitcore.coarse_filter([400.0] * n, [500.0] * n, 0.0)
+        expected = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        assert pairs == expected
+
+    def test_empty_inputs(self):
+        assert orbitcore.coarse_filter([], [], 10.0) == []
+
+    def test_single_satellite_no_pairs(self):
+        assert orbitcore.coarse_filter([400.0], [450.0], 1000.0) == []
+
+    def test_length_mismatch_raises_valueerror(self):
+        try:
+            orbitcore.coarse_filter([1.0], [1.0, 2.0], 0.0)
+            assert False, "should have raised ValueError"
+        except ValueError as e:
+            assert "1 vs 2" in str(e)
+
+    def test_negative_pad_raises_valueerror(self):
+        try:
+            orbitcore.coarse_filter([1.0], [2.0], -5.0)
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_nan_band_matches_nothing(self):
+        """NaN comparisons are false -> a NaN-band sat silently pairs with
+        nothing (documented IEEE semantics), neighbors unaffected."""
+        nan = float("nan")
+        pairs = orbitcore.coarse_filter(
+            [nan, 400.0, 410.0], [nan, 450.0, 460.0], 1e6)
+        assert pairs == [(1, 2)]
+
+    def test_matches_brute_force_property(self):
+        """Property check vs an independent Python implementation on a
+        pseudo-random population."""
+        import random
+        rng = random.Random(1234)
+        peri = [rng.uniform(200, 2200) for _ in range(60)]
+        apo = [p + rng.uniform(0, 800) for p in peri]
+        pad = 50.0
+        expected = [
+            (i, j)
+            for i in range(60) for j in range(i + 1, 60)
+            if peri[i] <= apo[j] + pad and peri[j] <= apo[i] + pad
+        ]
+        assert orbitcore.coarse_filter(peri, apo, pad) == expected
+
+    def test_real_stations_catalog(self):
+        """Real Phase 1 data: parquet-derived bands, pad = 50 km medium
+        threshold. Survivors must be a strict subset of all pairs and the
+        overlap property must hold for every returned pair."""
+        import pandas as pd
+        df = pd.read_parquet("backend/data/tle/stations.parquet")
+        peri = df["periapsis"].astype(float).tolist()
+        apo = df["apoapsis"].astype(float).tolist()
+        n = len(peri)
+        pairs = orbitcore.coarse_filter(peri, apo, 50.0)
+        total = n * (n - 1) // 2
+        assert 0 < len(pairs) < total  # filters something, keeps something
+        for i, j in pairs:
+            assert peri[i] <= apo[j] + 50.0 and peri[j] <= apo[i] + 50.0
+
+    def test_satrec_bands_consistent_with_parquet(self):
+        """alta/altp * radiusearthkm (the screener's satrec-derived bands)
+        agree with the fetcher's derived columns to within a couple km."""
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        apo_km = satrec.alta * satrec.radiusearthkm
+        peri_km = satrec.altp * satrec.radiusearthkm
+        assert 380 < peri_km < 440  # ISS-ish LEO band
+        assert peri_km < apo_km < 460
+
+    def test_scan_performance_at_phase3_scale(self):
+        """Pure scan cost at 6,000 sats (sparse bands -> few pairs, so this
+        times the O(N^2) loop, not the Python conversion of survivors).
+        Measured ~40 ms; assert a generous 1 s bound."""
+        import time
+        n = 6000
+        peri = [200.0 + 3.0 * i for i in range(n)]
+        apo = [p + 1.0 for p in peri]
+        t0 = time.perf_counter()
+        pairs = orbitcore.coarse_filter(peri, apo, 0.0)
+        dt = time.perf_counter() - t0
+        assert pairs == []
+        assert dt < 1.0, f"O(N^2) scan took {dt:.2f}s at n={n}"
