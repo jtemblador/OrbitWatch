@@ -60,19 +60,22 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Week 5 complete — Globe Polish (Apr 24–30, 2026)
-- **Timeline:** Mar 20 – May 15, 2026 (8 weeks)
+- **Phase:** Final Sprint underway — Phase 6 (Conjunction Screening), starting task 6.0
+- **Timeline:** Mar 20 – Jul 10, 2026 (Weeks 0–5 ✅; Final Sprint = Phases 6–9, Jun 12 – Jul 10)
 - **Completed:** Weeks 0–5 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, nadir line with real-time tracking, display controls panel with label toggle, simulated clock with play/pause/speed + adaptive refresh + TEME trail re-rotation)
-- **Next steps:** Week 6 — Conjunction Detection in C++
-- **Tests:** 279 passing across 7 test files (82 API + 197 backend/engine) — frontend JS has no automated tests
+- **Next steps:** Phase 6.0 (mock refresh fetcher — test hygiene), then 6.1 (C++ batch SGP4). Full breakdown in `progress/week6_plan.md`.
+- **Tests:** 279 passing across 7 test files (82 API + 197 backend/engine), stable baseline — frontend JS has no automated tests
+- **Pivot (finalized Jun 11):** Dropped ML risk classifier (full CDM data requires an SSA Sharing Agreement — operators only; without it ML can't beat a threshold). Headline is now **conjunction screening validated against CelesTrak SOCRATES**. Scope narrowed further: **no Pc computation** (needs covariance we don't have) — this is an honest *geometric screener on SGP4*, not operational collision avoidance. Confirmed direction against Jose's targeted aerospace roles (all want C++/GNC/test-rigor, none want ML). See roadmap.
 
 ## Notes for Future Sessions
-- Jose's ML experience is with CatBoost/XGBoost/LightGBM from his NFL prediction project — same pipeline pattern applies here
+- Jose's ML experience is with CatBoost/XGBoost/LightGBM from his NFL prediction project — applies if ML is reintroduced with proper data access
 - He's now comfortable with FastAPI, C++/pybind11, and SPICE — first time was this project. Still new to Cesium.js (Week 4)
-- The project should be demoable and portfolio-ready by May 15
+- The project should be demoable and portfolio-ready by Jul 10
 - Keep the code modular and well-structured — this will be shown to employers
 - C++ and SPICE were chosen specifically to appeal to aerospace employers (SpaceX, K2 Space, Aerospace Corp, etc.)
-- Orekit is used for cross-validation of conjunction results, not as the primary engine
+- **No Pc computation** — deliberately out of scope (needs covariance data we don't have). Output is geometric: TCA, miss distance, relative speed, RTN components. Honest "screening, not collision avoidance" framing.
+- Validation: CelesTrak SOCRATES is the primary anchor (open/no-auth, SGP4-based → same-method). Space-Track `cdm_public` is an optional Phase 8 stretch (SP-based cross-method check, detection-only). Orekit dropped.
+- Stale ML references still in PROJECT_PLAN.md / requirements.txt / week0 docs / 1plan.md — scheduled for Phase 9.3 cleanup, not yet done.
 - Data is fetched as OMM/JSON from CelesTrak (not legacy TLE format) — future-proofs against the NORAD 5-digit catalog number cap (~July 2026)
 - SPICE does NOT know the TEME frame — we handle TEME→ECEF via GMST Z-rotation, then SPICE for geodetic only
 - Phase 3 scaling items tracked in `progress/scaling_tracker.md` (C++ batch SGP4, background refresh, etc.)

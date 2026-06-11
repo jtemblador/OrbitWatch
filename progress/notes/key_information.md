@@ -59,6 +59,7 @@ SGP4 (TEME) → GMST Z-rotation → ECEF → SPICE recgeo → geodetic
 | **Revisiting STR#3 paper** | `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753-Rev3.pdf` | Bug fixes, corrections, technical details |
 | **STR#3 summary** | `misc/Revisiting Spacetrack Report #3/AIAA-2006-6753-summary.pdf` | Change notes per language, build instructions |
 | **SPICE kernels** | `backend/data/spice_kernels/` | naif0012.tls, pck00011.tpc, earth_latest_high_prec.bpc |
+| **SFS Handbook (Spaceflight Safety)** | `progress/week6and7_planning/SFS_Handbook_For_Operators_V1.7.pdf` + copy in `misc/` | Source of RTN screening volumes (Phase 7) + Pc method (de-scoped) — 18/19 SDS operator doc |
 
 ---
 
@@ -201,7 +202,47 @@ GET https://celestrak.org/NORAD/elements/sup-gp.php?EPOCH=>now-1&FORMAT=json
 GET https://celestrak.org/NORAD/elements/sup-gp.php?CATNR=25544&FORMAT=TLE
 ```
 
-No authentication needed for CelesTrak. Space-Track requires login (for CDM conjunction data in later weeks).
+No authentication needed for CelesTrak. Space-Track requires login (optional `cdm_public` cross-check in Phase 8).
+
+---
+
+## Conjunction Data Sources — SOCRATES + Space-Track (Phase 8)
+
+**SOCRATES-Plus (CelesTrak) — PRIMARY validation source. Open access, NO account.**
+
+- Computed with **SGP4 — the same propagator we use** → apples-to-apples, not a method mismatch.
+- Current run: ~14,000 primaries × ~29,600 secondaries → 108,000+ conjunctions, refreshed ~2×/day.
+- **Query endpoint** (returns the table):
+  ```
+  https://celestrak.org/SOCRATES-Plus/table-socrates.php?CATNR=25544,&ORDER=MINRANGE&MAX=25
+  https://celestrak.org/SOCRATES-Plus/table-socrates.php?NAME=starlink,flock&ORDER=MAXPROB&MAX=500
+  ```
+  Params: `NAME` or `CATNR` (1–2 objects, comma-separated), `ORDER` ∈ {MINRANGE, MAXPROB, TCA, RELSPEED, SSC}, `MAX` ≤ 1000.
+- **Raw CSV** of each full run is also downloadable. 11 columns:
+  `NORAD_CAT_ID_1, OBJECT_NAME_1, DSE_1, NORAD_CAT_ID_2, OBJECT_NAME_2, DSE_2, TCA, TCA_RANGE, TCA_RELATIVE_SPEED, MAX_PROB, DILUTION`
+- **We use:** both NORAD IDs, `TCA`, `TCA_RANGE` (miss distance km), `TCA_RELATIVE_SPEED`.
+  **We ignore:** `MAX_PROB`, `DILUTION` (Pc/covariance — deliberately out of scope).
+- **Storage:** mirror `tle_fetcher.py` — fetch on demand, Parquet cache, ~6–12 h TTL, atomic write,
+  serve cache between refreshes. Do NOT fetch per-request (SOCRATES only updates ~2×/day).
+
+**⚠️ Epoch-matching gotcha (critical for fair comparison):** SOCRATES screens *near-future*
+windows from a specific TLE epoch. If we screen the same objects using TLEs from a *different*
+epoch, the TCA and miss distance will disagree from epoch drift alone — not from any real method
+difference. So Phase 8 must screen with GP data from the same time SOCRATES used.
+
+**Space-Track `cdm_public` — OPTIONAL stretch (Phase 8.6). Account required (Jose has one).**
+
+- Real operational CDMs from the 18/19 SDS **SP (Special Perturbations)** pipeline — *higher
+  fidelity than SGP4*, emergency/high-Pc events only.
+- Fields: `CDM_ID, CREATED, TCA, MIN_RNG, PC, SAT_1_ID, SAT_1_NAME, SAT1_OBJECT_TYPE, SAT1_RCS,
+  SAT_1_EXCL_VOL, SAT_2_ID, …` (mirrored for SAT_2).
+- **Value:** a *cross-method* check (their SP vs our SGP4). If we also flag a `cdm_public` event,
+  that's a strong "we catch real threats" story. **Detection-only — we do NOT use the `PC` field.**
+- Also the better source for full-catalog/debris TLEs later (Phase 4 territory).
+
+**Method provenance:** Our screening geometry (asymmetric RTN screening volumes) comes from the
+**Spaceflight Safety Handbook for Operators** (a.k.a. SFS Handbook), the 18/19 SDS operator doc —
+on disk (see Resources table). Summary in `progress/week6and7_planning/sfs_handbook_summary.md`.
 
 ---
 
@@ -224,6 +265,29 @@ No authentication needed for CelesTrak. Space-Track requires login (for CDM conj
 **`get_all_positions()` returns `(results, errors)` tuple:** Changed from returning just a list. Callers must unpack: `results, errors = propagator.get_all_positions(utc_dt)`.
 
 **Fetch/serve separation:** GET endpoints always serve from local Parquet cache. Only `POST /api/refresh` triggers a CelesTrak fetch. No client request in the GET path ever directly contacts CelesTrak. Phase 3 will move the fetch to a background task (202 Accepted) + scheduled auto-refresh.
+
+---
+
+## Testing Gotchas (Catalog Coupling)
+
+**`TestDataRefresh` (test_api.py) hits LIVE CelesTrak and overwrites the real `stations.parquet`.**
+The refresh tests call `POST /api/refresh` unmocked, so every full-suite run does a real network
+fetch and mutates production data. Consequences: suite is non-deterministic (live data varies),
+network-dependent, and risks CelesTrak rate-limiting/IP-block on repeated runs (100 MB/day, no-retry
+policy). **Fix tracked as Phase 6.0** — mock the fetcher; optionally keep one env-gated live test.
+
+**Tests must be robust to live-catalog churn.** The CelesTrak "stations" group changes membership
+and freshness over time, and includes inactive debris/rocket bodies with older epochs. Two tests
+were authored against a March snapshot and broke against the live June catalog:
+- Cross-validation (`test_all_stations_match_python_sgp4`) propagated to a hardcoded past date;
+  back-propagating a decayed object (`ISS OBJECT XY`) throws SGP4 error 6. → **Skip objects that
+  fail to propagate** (a decayed object has no position to cross-validate); assert ≥1 validated.
+- Epoch freshness (`test_epoch_age_is_reasonable`) required *every* object < 30 days. → Assert the
+  *freshest* object is recent (proves the cache is live) and allow marginally future-dated epochs.
+
+**Lesson:** don't hardcode dates or assume specific catalog contents in tests that run against live
+data. Assert on invariants (implementation agreement, cache freshness), not on which objects happen
+to be present today.
 
 ---
 

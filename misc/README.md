@@ -101,6 +101,22 @@ getgravconst(whichconst, tumin, mus, radiusearthkm, xke, j2, j3, j4, j3oj2)
 
 ---
 
+## SFS_Handbook_For_Operators_V1.7.pdf — Spaceflight Safety Handbook (18/19 SDS)
+
+**What it is:** The US Space Force's *Spaceflight Safety Handbook for Operators* (V1.7), from the
+18th/19th Space Defense Squadron — the operator-facing reference for how the organization that runs
+Space-Track actually does conjunction screening and assessment.
+
+**Use for OrbitWatch:**
+- **RTN screening volumes (Phase 7)** — asymmetric per-orbit-regime boxes (e.g. LEO 1: R = 0.4 km,
+  T = 44 km, N = 51 km). Source for our screening geometry.
+- Pc / collision-probability method (Annex A) — *documented but de-scoped*; we do not compute Pc.
+
+**Summary on disk:** `progress/week6and7_planning/sfs_handbook_summary.md`. The same PDF also lives in
+`progress/week6and7_planning/`; copied here so all external reference docs sit together.
+
+---
+
 ## Key Rules for Using These Materials
 
 1. **TLEs MUST use SGP4** — mean elements are fitted using SGP4's specific mathematical model. Any other propagator produces worse results, even "more accurate" numerical integrators.
@@ -118,7 +134,7 @@ getgravconst(whichconst, tumin, mus, radiusearthkm, xke, j2, j3, j4, j3oj2)
 | CelesTrak GP Data API | `celestrak.org/NORAD/elements/gp.php` | JSON/OMM satellite data (what GPFetcher uses) |
 | CelesTrak SATCAT API | `celestrak.org/satcat/records.php` | Satellite catalog: RCS, object type, status, launch info |
 | CelesTrak Advanced Queries | `celestrak.org/NORAD/elements/sup-gp.php` | Filtered queries by period, inclination, object type, etc. |
-| Space-Track.org | `space-track.org` | CDM (Conjunction Data Messages) for ML training data |
+| Space-Track.org | `space-track.org` | `cdm_public` CDMs — optional Phase 8 cross-check (detection-only, not Pc); full-catalog/debris TLEs later |
 | STR#3 FAQ | `celestrak.org/publications/AIAA/2006-6753/faq.php` | Implementation questions, coordinate frame notes |
 
 ### SATCAT API (Useful for Later Phases)
