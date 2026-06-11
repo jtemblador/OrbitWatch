@@ -76,6 +76,7 @@ match) is proven early — and the project stays demoable the whole way.
 ## Phase 6: Vertical Slice — Pipeline End-to-End (Jun 12 – Jun 20)
 Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code lives here.
 
+- [x] **6.0 Mock the refresh fetcher** (test hygiene, done first) — `TestRefresh` no longer hits live CelesTrak / rewrites `stations.parquet`; suite runs offline + deterministic. 280 passing. See `task_logs/task_6_0_mock_refresh_fetcher.md`.
 - [ ] **6.1 C++ batch SGP4** — propagate many satellites across many timesteps in one call (replaces the Python-loop-over-C++ that bottlenecks at scale). The performance foundation everything rides on.
 - [ ] **6.2 C++ coarse filter** — eliminate pairs whose orbits can never get close, using each object's apoapsis/periapsis altitude band. Cheap; kills the vast majority of pairs.
 - [ ] **6.3 C++ medium filter** — for surviving pairs, step through time (~60 s steps over 24–72 h) and flag windows where the TEME distance drops below a threshold. This is the O(N²) hot loop — belongs in C++.

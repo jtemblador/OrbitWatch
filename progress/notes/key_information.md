@@ -270,11 +270,13 @@ on disk (see Resources table). Summary in `progress/week6and7_planning/sfs_handb
 
 ## Testing Gotchas (Catalog Coupling)
 
-**`TestDataRefresh` (test_api.py) hits LIVE CelesTrak and overwrites the real `stations.parquet`.**
-The refresh tests call `POST /api/refresh` unmocked, so every full-suite run does a real network
-fetch and mutates production data. Consequences: suite is non-deterministic (live data varies),
-network-dependent, and risks CelesTrak rate-limiting/IP-block on repeated runs (100 MB/day, no-retry
-policy). **Fix tracked as Phase 6.0** — mock the fetcher; optionally keep one env-gated live test.
+**[FIXED in Phase 6.0]** `TestRefresh` (test_api.py) used to hit LIVE CelesTrak and overwrite the
+real `stations.parquet` — the refresh tests called `POST /api/refresh` unmocked, so every full-suite
+run did a real network fetch and mutated production data (non-deterministic, network-dependent, risked
+CelesTrak rate-limiting/IP-block). **Fix:** `_offline_fetch_patch()` + a `setUp` mock make the suite
+run offline/deterministic; `test_refresh_makes_no_network_call` enforces the invariant; opt-in
+`TestRefreshLive` (env `RUN_NETWORK_TESTS`) keeps a real end-to-end check. Suite no longer touches the
+network or rewrites the Parquet (md5 verified unchanged). See `task_logs/task_6_0_mock_refresh_fetcher.md`.
 
 **Tests must be robust to live-catalog churn.** The CelesTrak "stations" group changes membership
 and freshness over time, and includes inactive debris/rocket bodies with older epochs. Two tests

@@ -66,3 +66,18 @@ runs offline and deterministic, optionally keeping one env-gated live integratio
 - **Stale ML references** in `PROJECT_PLAN.md`, `requirements.txt` (`xgboost`),
   `progress/week0_setup.md`, `progress/notes/week0_notes.md`, and the `1plan.md` instruction file →
   scheduled for **Phase 9.3** cleanup. Not touched now to keep this checkpoint focused.
+
+---
+
+## Task 6.0 — Mock the Refresh Fetcher (DONE, Jun 11)
+
+Full write-up: `progress/task_logs/task_6_0_mock_refresh_fetcher.md`. Summary:
+
+- **Problem:** `TestRefresh` called `POST /api/refresh` unmocked → live CelesTrak hit + `stations.parquet`
+  overwrite on every full-suite run (when cache >2 h stale). Source of the earlier flaky epoch test.
+- **Fix (test-only):** `_offline_fetch_patch()` + `setUp` patch `fetcher.fetch` to return cached data
+  unchanged → deterministic `rate_limited`, no network, no Parquet write. Added
+  `test_refresh_makes_no_network_call` (invariant guard) and opt-in `TestRefreshLive` (`RUN_NETWORK_TESTS`).
+- **Result:** 280 passing, 1 skipped, stable ×3; `stations.parquet` md5 byte-identical before/after.
+- Phases run: plan (`@1plan`) → build (`@2build`) → review+test (`@3review`/`@4test`) → document (`@5document`).
+- Commits: `1ae0cb2` (build), `c0fb5b8` (review+test).
