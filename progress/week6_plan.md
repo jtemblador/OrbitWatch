@@ -77,6 +77,12 @@ parquet write. Fixed one stray unmocked call in `test_refresh_matches_model`. Ad
 `TestRefreshLive` (gated by `RUN_NETWORK_TESTS`) so the real fetch can still be exercised on purpose.
 Test-only change — no production code touched.
 
+**Review + test pass:** added `test_refresh_makes_no_network_call` — asserts `_download` is never
+reached during a refresh, enforcing the offline invariant at the network boundary (catches a future
+regression that removes the mock whenever the cache is stale). Verified: 280 passed, 1 skipped;
+`stations.parquet` md5 byte-identical before/after a full run. Left pre-existing redundant local
+`patch` imports in `TestRefreshMocked` untouched (outside 6.0 scope, harmless).
+
 ---
 
 ### 1. (6.1) C++ Batch SGP4

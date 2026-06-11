@@ -434,6 +434,17 @@ class TestRefresh(unittest.TestCase):
         resp = client.post("/api/refresh")
         self.assertEqual(resp.status_code, 200)
 
+    def test_refresh_makes_no_network_call(self):
+        """Enforce the offline invariant: a refresh must not reach the network
+        boundary (_download). With the setUp mock in place this always holds; if
+        that mock were ever removed, this still fails whenever the cache is stale
+        (>2h) — i.e. exactly the case where a real refresh would hit CelesTrak."""
+        fetcher = app.state.propagator.fetcher
+        with patch.object(fetcher, "_download") as mock_download:
+            resp = client.post("/api/refresh")
+        self.assertEqual(resp.status_code, 200)
+        mock_download.assert_not_called()
+
     def test_refresh_has_required_keys(self):
         resp = client.post("/api/refresh")
         data = resp.json()
