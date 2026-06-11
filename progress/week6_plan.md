@@ -153,9 +153,18 @@ windows where the two satellites actually come close. This is the **O(pairs × t
   approaches for the fine filter, not pinpoint them.
 
 **Success criteria:**
-- [ ] For a known close pair, the flagged window brackets the true closest moment
-- [ ] Distance is computed in TEME (both sats at the same absolute time)
-- [ ] Step size + threshold are chosen so no sub-threshold approach is skipped between steps (see Things to Watch)
+- [x] For a known close pair, the flagged window brackets the true closest moment (verified against independent 1 s brute-force ground truth)
+- [x] Distance is computed in TEME (both sats at the same absolute time; per-sat tsince handled internally from each satrec's epoch)
+- [x] No skipped sub-threshold approaches — **velocity-aware interval bound** `min(d_k,d_k+1) − v̂_rel·Δt/2 − margin < threshold`. Proven on the fast-crosser fixture: true miss 8 km at v_rel 12 km/s, sampled 60 s distances 521/200 km — naive `d<50` misses it, the bound flags it.
+
+**Actual:** **Time-major scan** (each sat propagated once per step, pair distances from cache) —
+the 6-hours-vs-30-seconds decision: 300 sats / 44,850 pairs / 24 h @ 60 s = **0.68 s**; Phase-7
+dense extrapolates to ~70 s. Squared-distance pre-check vs a universal 25 km/s closing-speed
+bound rejects ~96% of pair-steps with zero sqrts (2.7× speedup, semantics-identical). GIL released
+during the scan (hot loop touches no Python objects). Sub-step scan windows raise instead of
+silently returning []. One row per merged window; crossing pairs repeat per node pass (fixture: 8
+windows / 6 h). Decayed sats isolated via NaN. 12 tests; 321 passing. **6.4 (bindings) completed
+by construction** — all three functions bound inline with docstrings during 6.1–6.3.
 
 ---
 
@@ -169,8 +178,11 @@ Expose the three new C++ functions to Python.
 - Rebuild and verify import from `backend/`.
 
 **Success criteria:**
-- [ ] `import orbitcore; orbitcore.coarse_filter`, `.medium_filter`, `.propagate_batch` all callable
-- [ ] Docstrings present (`help(orbitcore.medium_filter)`)
+- [x] `import orbitcore; orbitcore.coarse_filter`, `.medium_filter`, `.propagate_batch` all callable
+- [x] Docstrings present (`help(orbitcore.medium_filter)`)
+
+**Actual:** completed by construction — each function was bound (arg names + full docstring,
+matching existing style) as part of its own task (6.1/6.2/6.3); rebuild + `.so` copy each time.
 
 ---
 

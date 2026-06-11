@@ -137,6 +137,33 @@ filter (6.3) should run the coarse cut internally at scale.
 
 ---
 
+## Medium Conjunction Filter — `orbitcore.medium_filter` (Task 6.3)
+
+```python
+rows = orbitcore.medium_filter(satrecs, pairs, jd_start, jd_end, step_sec, threshold_km)
+# -> list[(i, j, jd, distance_km)]  one row per close-approach window per pair
+```
+
+- **Time-major scan**: each sat propagated once per step (positions/velocities cached), pair
+  distances from cache. 300 sats / 44,850 pairs / 24 h @ 60 s = **0.68 s**. Phase-7 dense ≈ 70 s.
+- **Per-sat epoch handled internally** — pass absolute JDs; tsince computed per satrec. The
+  per-sat-epoch gotcha lives in ONE place.
+- Row jd/d = best **sampled** point of the window; true min within ±1 step (fine-filter bracket).
+  Crossing pairs repeat (one row per node-pass encounter). GIL released during the scan.
+
+**⚠️ THE detection trap (why naive time-stepping is wrong):** a crossing pair at v_rel ~12–15 km/s
+can have a true miss of 8 km yet sample at **520/200 km** on a 60 s grid — plain `d < threshold`
+silently misses the most dangerous conjunctions. medium_filter flags interval [t_k, t_k+1] when
+`min(d_k, d_k+1) − v̂_rel·(Δt/2) − 3.3e−4·Δt² < threshold` (v̂ from endpoint velocities; margin =
+gravity-gradient curvature). Adaptive: co-orbital neighbors (v_rel≈0) aren't spam-flagged.
+Anything replacing/porting this filter must preserve an equivalent no-skip bound.
+
+**Fixture for crossing encounters** (used in tests, found by brute-force search): ISS TLE vs clone
+with **MA +180.2°, RAAN +180°** → true miss 8.0 km at tsince 122.717 min, v_rel 12.0 km/s; 8
+windows per 6 h. Search trick: `propagate_batch([sat]*K, times)` = full track in one call.
+
+---
+
 ---
 
 ## Python sgp4 Library (Already Installed)

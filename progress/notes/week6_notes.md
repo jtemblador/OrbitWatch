@@ -119,3 +119,24 @@ Full write-up: `progress/task_logs/task_6_2_coarse_filter.md`. Summary:
   shared band) — the filter pays off across mixed catalogs (Phase 7 "active", LEO→GEO).
 - 16 tests incl. property-check vs brute force + real-parquet integration → **309 passing**.
 - Commit: `e6cfda9`.
+
+---
+
+## Task 6.3 — C++ Medium Filter (DONE, Jun 11) — 6.4 done by construction
+
+Full write-up: `progress/task_logs/task_6_3_medium_filter.md`. Summary:
+
+- **Built:** `orbitcore.medium_filter(satrecs, pairs, jd_start, jd_end, step_sec, threshold_km)` →
+  one `(i, j, jd, d)` row per close-approach window. Per-sat epoch→tsince handled internally; GIL
+  released during the scan.
+- **Decision 1 — time-major loop:** propagate each sat once per step, evaluate pairs from cache.
+  300 sats / 44,850 pairs / 24 h @ 60 s = **0.68 s** (pair-major would be ~4 min here, ~6 h at
+  Phase 7).
+- **Decision 2 — velocity-aware no-skip bound:** `min(d_k,d_k+1) − v̂·Δt/2 − margin < threshold`.
+  Fixture proof: true miss **8 km** at v_rel **12 km/s** sampled as **521/200 km** on the 60 s
+  grid — naive thresholding misses it, the bound flags it, window brackets true TCA ±1 step
+  (verified vs independent 1 s brute force).
+- **Review fixes:** squared-distance pre-check vs universal 25 km/s bound (~96% of pair-steps,
+  zero sqrts → 2.7× speedup, semantics-identical); sub-step scan window raises instead of silent [].
+- 12 tests → **321 passing**. Commits: `ade01ca` (code).
+- **6.4 closed:** all three C++ functions were bound inline with docstrings during their tasks.
