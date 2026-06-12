@@ -178,3 +178,15 @@ Full write-up: `progress/task_logs/task_6_6_fine_filter.md`. Summary:
 - 9 tests in new `tests/test_conjunctions.py` → **338 passing**.
 - **Pipeline status: all four computational stages done and interoperating**
   (coarse → medium → fine → RTN). Next: 6.7 screener + endpoint.
+
+### ⚠️ Open observation — one unreproduced flake (Jun 11)
+
+One full-suite run during 6.6 documentation showed `1 failed, 337 passed` — but the failure name
+was lost (output piped through `tail -1`). Not reproduced in 10 subsequent full runs + 10× stress
+runs of the timing-sensitive tests (`test_batch_faster_than_python_loop`,
+`test_performance_vertical_slice_scale`). The `.pytest_cache/lastfailed` entry
+(`test_leo_altitude_bounds`) is stale — that test no longer exists; pytest preserves unknown
+entries forever, so it's not evidence. **Suspects:** a timing-margin test losing a race on a
+momentarily loaded machine. **If it recurs:** capture the name (`pytest -q | grep FAILED`, not
+`tail -1`) and check the timing tests' margins first. **Lesson:** never pipe test output through
+`tail -1` during verification — keep failure names.
