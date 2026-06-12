@@ -549,19 +549,22 @@ class TestRefreshMocked(unittest.TestCase):
         mock_reload.assert_called_once()
 
     def test_rate_limited_skips_reload(self):
-        """On 'rate_limited' status, reload_data() must NOT be called."""
+        """On 'rate_limited' status, reload_data() must NOT be called.
+
+        The fetch is mocked offline too (6.0 escape caught in 6.5: this was
+        the one refresh call site without it — with a >2h-stale cache it hit
+        live CelesTrak for 24s and rewrote stations.parquet mid-suite)."""
         from unittest.mock import patch
 
         propagator = app.state.propagator
 
-        with patch.object(propagator, "reload_data") as mock_reload:
-            # Two rapid calls — second is rate_limited
+        with _offline_fetch_patch(), \
+             patch.object(propagator, "reload_data") as mock_reload:
+            # Both calls see an unchanged fetch_time -> rate_limited
             client.post("/api/refresh")
             client.post("/api/refresh")
 
-        # reload may have been called on first call (if fetched), but
-        # we just verify it wasn't called more than once
-        self.assertLessEqual(mock_reload.call_count, 1)
+        mock_reload.assert_not_called()
 
     def test_502_on_fetch_failure(self):
         """If fetcher.fetch() raises RuntimeError, endpoint returns 502."""

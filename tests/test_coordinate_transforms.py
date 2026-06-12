@@ -342,3 +342,127 @@ if __name__ == "__main__":
     print(f"  Results: {passed}/{total} passed, {failed} failed")
     print(f"{'='*60}")
     sys.exit(1 if failed else 0)
+
+
+class TestTemeToRtn:
+    """teme_to_rtn() — relative position in the primary's RTN frame
+    (Task 6.5). Conventions: R̂ radial outward, T̂ in-track (~velocity),
+    N̂ cross-track (orbit normal); right-handed R̂×T̂=N̂ (Vallado RSW,
+    same frame real CDMs use)."""
+
+    def test_hand_computed_exact(self):
+        """r along +X, v along +Y -> R̂=X̂, T̂=Ŷ, N̂=Ẑ: offset (1,2,3)
+        maps to RTN (1,2,3) exactly."""
+        from core.coordinate_transforms import teme_to_rtn
+        r, t, n = teme_to_rtn((7000.0, 0.0, 0.0), (0.0, 7.5, 0.0),
+                              (7001.0, 2.0, 3.0))
+        assert abs(r - 1.0) < 1e-12
+        assert abs(t - 2.0) < 1e-12
+        assert abs(n - 3.0) < 1e-12
+
+    def test_orthonormality_invariant(self):
+        """R² + T² + N² must equal |Δr|² (frame is orthonormal) for an
+        arbitrary skewed state."""
+        from core.coordinate_transforms import teme_to_rtn
+        rp = (4584.7, -1592.9, -4765.1)
+        vp = (4.53, 5.93, 2.38)
+        rs = (4590.0, -1580.0, -4770.0)
+        r, t, n = teme_to_rtn(rp, vp, rs)
+        d2 = sum((a - b) ** 2 for a, b in zip(rs, rp))
+        assert abs((r * r + t * t + n * n) - d2) < 1e-9
+
+    def test_pure_radial_offset(self):
+        """Secondary scaled along the primary's position vector -> all R,
+        zero T and N."""
+        from core.coordinate_transforms import teme_to_rtn
+        rp = (4584.7, -1592.9, -4765.1)
+        vp = (4.53, 5.93, 2.38)
+        rs = tuple(x * 1.001 for x in rp)
+        r, t, n = teme_to_rtn(rp, vp, rs)
+        assert r > 0  # outward
+        assert abs(t) < 1e-9 and abs(n) < 1e-9
+
+    def test_along_velocity_offset_is_mostly_in_track(self):
+        """Offset along v̂: for a near-circular orbit T dominates (v̂ has
+        a small radial component for e != 0, so not exactly pure T)."""
+        from core.coordinate_transforms import teme_to_rtn
+        rp = (7000.0, 100.0, -50.0)
+        vp = (0.1, 7.4, 1.2)
+        vmag = math.sqrt(sum(x * x for x in vp))
+        rs = tuple(p + 5.0 * v / vmag for p, v in zip(rp, vp))
+        r, t, n = teme_to_rtn(rp, vp, rs)
+        assert abs(t) > 4.9          # ~all of the 5 km offset
+        assert abs(r) < 1.0 and abs(n) < 1e-9
+
+    def test_real_iss_along_track_pair(self):
+        """Real SGP4 states: ISS vs a small mean-anomaly-offset clone is an
+        along-track separation -> |T| dominates |R| and |N|."""
+        from core.coordinate_transforms import teme_to_rtn
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+        import orbitcore
+        from sgp4.api import Satrec as PySatrec, WGS72
+        l1 = "1 25544U 98067A   24056.27396747  .00015798  00000+0  28508-3 0  9991"
+        l2 = "2 25544  51.6415  32.0835 0004287  51.5994  12.5648 15.49571617441044"
+        p = PySatrec.twoline2rv(l1, l2, WGS72)
+        epoch = p.jdsatepoch + p.jdsatepochF - 2433281.5
+
+        def make(dmo_rad):
+            return orbitcore.sgp4init(
+                orbitcore.GravConst.WGS72, "a", "25544", epoch,
+                p.bstar, p.ndot, p.nddot, p.ecco, p.argpo, p.inclo,
+                (p.mo + dmo_rad) % (2 * math.pi), p.no_kozai, p.nodeo)
+
+        (rp, vp) = orbitcore.sgp4(make(0.0), 30.0)
+        (rs, _) = orbitcore.sgp4(make(math.radians(0.5)), 30.0)
+        r, t, n = teme_to_rtn(rp, vp, rs)
+        miss = math.dist(rp, rs)
+        assert abs(t) > 0.9 * miss   # along-track dominates
+        assert abs(t) > 10 * abs(r) and abs(t) > 10 * abs(n)
+        # invariant on real data too
+        assert abs((r * r + t * t + n * n) - miss ** 2) < 1e-6
+
+    def test_matches_independent_numpy_implementation(self):
+        """Cross-check against a from-scratch numpy implementation on
+        pseudo-random states."""
+        from core.coordinate_transforms import teme_to_rtn
+        import random
+        import numpy as np
+        rng = random.Random(99)
+        for _ in range(50):
+            rp = np.array([rng.uniform(-8000, 8000) for _ in range(3)])
+            vp = np.array([rng.uniform(-8, 8) for _ in range(3)])
+            rs = rp + np.array([rng.uniform(-100, 100) for _ in range(3)])
+            if np.linalg.norm(np.cross(rp, vp)) < 1.0:
+                continue  # skip near-degenerate draws
+            r_hat = rp / np.linalg.norm(rp)
+            n_hat = np.cross(rp, vp) / np.linalg.norm(np.cross(rp, vp))
+            t_hat = np.cross(n_hat, r_hat)
+            d = rs - rp
+            expected = (float(d @ r_hat), float(d @ t_hat), float(d @ n_hat))
+            got = teme_to_rtn(tuple(rp), tuple(vp), tuple(rs))
+            for g, e in zip(got, expected):
+                assert abs(g - e) < 1e-9
+
+    def test_retrograde_orbit_flips_cross_track(self):
+        """Reversing the velocity flips N̂ (orbit normal) -> N changes
+        sign, R unchanged."""
+        from core.coordinate_transforms import teme_to_rtn
+        rp, vp = (7000.0, 0.0, 0.0), (0.0, 7.5, 0.0)
+        rs = (7001.0, 0.0, 3.0)
+        r1, t1, n1 = teme_to_rtn(rp, vp, rs)
+        r2, t2, n2 = teme_to_rtn(rp, (0.0, -7.5, 0.0), rs)
+        assert abs(r1 - r2) < 1e-12
+        assert abs(n1 + n2) < 1e-12  # sign flip
+
+    def test_degenerate_states_raise(self):
+        from core.coordinate_transforms import teme_to_rtn
+        try:
+            teme_to_rtn((7000.0, 0.0, 0.0), (7.5, 0.0, 0.0), (1.0, 1.0, 1.0))
+            assert False, "parallel r,v should raise"
+        except ValueError:
+            pass
+        try:
+            teme_to_rtn((0.0, 0.0, 0.0), (0.0, 7.5, 0.0), (1.0, 1.0, 1.0))
+            assert False, "zero position should raise"
+        except ValueError:
+            pass

@@ -201,6 +201,77 @@ def teme_to_geodetic(
     }
 
 
+def teme_to_rtn(
+    pos_primary: tuple[float, float, float],
+    vel_primary: tuple[float, float, float],
+    pos_secondary: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Express the secondary's position relative to the primary in the
+    primary's RTN frame (Radial / In-Track / Cross-Track).
+
+    RTN is the frame every operational conjunction report (CDM) uses —
+    a miss vector quoted as XYZ is meaningless to an operator, but
+    "0.2 km radial, 40 km in-track" immediately describes the encounter
+    geometry. Also the basis for asymmetric screening volumes (Phase 7).
+
+    Frame construction (Vallado's RSW frame, identical to CDM RTN):
+        R̂ = r / |r|            radial, outward from Earth's center
+        N̂ = (r × v) / |r × v|  cross-track, along orbital angular momentum
+        T̂ = N̂ × R̂             in-track, ~velocity direction (exactly v̂
+                                only for circular orbits)
+    Right-handed: R̂ × T̂ = N̂.
+
+    Args:
+        pos_primary: (x, y, z) primary TEME position, km
+        vel_primary: (vx, vy, vz) primary TEME velocity, km/s
+        pos_secondary: (x, y, z) secondary TEME position, km
+            (same instant, same frame)
+
+    Returns:
+        (r_km, t_km, n_km) — components of (secondary − primary) along
+        R̂, T̂, N̂. Orthonormal frame ⇒ r² + t² + n² = |Δr|².
+
+    Raises:
+        ValueError: degenerate state (|r| ≈ 0 or r ∥ v) — cannot happen
+        for a real orbiting body, so it signals corrupt input.
+    """
+    rx, ry, rz = pos_primary
+    vx, vy, vz = vel_primary
+
+    r_mag = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if r_mag < 1e-9:
+        raise ValueError("teme_to_rtn: primary position magnitude is ~0")
+
+    # h = r × v (orbital angular momentum direction)
+    hx = ry * vz - rz * vy
+    hy = rz * vx - rx * vz
+    hz = rx * vy - ry * vx
+    h_mag = math.sqrt(hx * hx + hy * hy + hz * hz)
+    if h_mag < 1e-9:
+        raise ValueError(
+            "teme_to_rtn: degenerate state (velocity parallel to position)")
+
+    r_hat = (rx / r_mag, ry / r_mag, rz / r_mag)
+    n_hat = (hx / h_mag, hy / h_mag, hz / h_mag)
+    # T̂ = N̂ × R̂
+    t_hat = (
+        n_hat[1] * r_hat[2] - n_hat[2] * r_hat[1],
+        n_hat[2] * r_hat[0] - n_hat[0] * r_hat[2],
+        n_hat[0] * r_hat[1] - n_hat[1] * r_hat[0],
+    )
+
+    dx = pos_secondary[0] - rx
+    dy = pos_secondary[1] - ry
+    dz = pos_secondary[2] - rz
+
+    return (
+        dx * r_hat[0] + dy * r_hat[1] + dz * r_hat[2],
+        dx * t_hat[0] + dy * t_hat[1] + dz * t_hat[2],
+        dx * n_hat[0] + dy * n_hat[1] + dz * n_hat[2],
+    )
+
+
 def utc_to_jd(utc_dt: datetime) -> tuple[float, float]:
     """
     Convert a UTC datetime to Julian Date components.
