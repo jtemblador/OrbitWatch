@@ -140,3 +140,21 @@ Full write-up: `progress/task_logs/task_6_3_medium_filter.md`. Summary:
   zero sqrts → 2.7× speedup, semantics-identical); sub-step scan window raises instead of silent [].
 - 12 tests → **321 passing**. Commits: `ade01ca` (code).
 - **6.4 closed:** all three C++ functions were bound inline with docstrings during their tasks.
+
+---
+
+## Task 6.5 — RTN Coordinate Transform (DONE, Jun 11)
+
+Full write-up: `progress/task_logs/task_6_5_rtn_transform.md`. Summary:
+
+- **Built:** `teme_to_rtn(pos_p, vel_p, pos_s)` → `(r_km, t_km, n_km)` in
+  `coordinate_transforms.py`. Vallado RSW frame (= CDM RTN), right-handed, pure `math`,
+  degenerate states raise. Position-only (Δv projection = noted extension).
+- **Validated:** exact hand case, orthonormality invariant on real SGP4 states, geometry
+  semantics (radial/along-track/retrograde), independent numpy cross-check ×50.
+- **Bonus catch — 6.0 escape:** `TestRefreshMocked::test_rate_limited_skips_reload` had an
+  unmocked `fetcher.fetch`; it went live (24 s hang) the moment the cache crossed 2 h staleness
+  mid-session. Fixed with `_offline_fetch_patch()`; assertion strengthened to
+  `assert_not_called()`. Suite 27 s → **2.6 s**. Lesson: "mocked the class" ≠ "mocked every call
+  site"; TTL crossings hide network deps for hours.
+- 8 tests → **329 passing**. Commit: `4b5afbc`.

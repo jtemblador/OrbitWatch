@@ -164,6 +164,27 @@ windows per 6 h. Search trick: `propagate_batch([sat]*K, times)` = full track in
 
 ---
 
+## RTN Transform — `teme_to_rtn` (Task 6.5)
+
+```python
+r_km, t_km, n_km = teme_to_rtn(pos_primary, vel_primary, pos_secondary)  # TEME, same instant
+```
+
+- Vallado **RSW** frame = the RTN frame real CDMs use: `R̂ = r/|r|` (radial out),
+  `N̂ = r×v/|r×v|` (cross-track), `T̂ = N̂×R̂` (in-track). Right-handed `R̂×T̂ = N̂`.
+- Orthonormal ⇒ `r²+t²+n² = |Δr|²` (cheap downstream sanity check).
+- T̂ equals v̂ exactly only for circular orbits (v has a radial component when e ≠ 0) — don't
+  write tests expecting along-v̂ offsets to be *purely* T.
+- Position-only; for RTN relative velocity (CDM fields), project Δv onto the same basis.
+
+**⚠️ Mocking lesson (6.0 escape, caught in 6.5):** "mocked the class" ≠ "mocked every call site."
+One refresh test mocked `reload_data` but not `fetcher.fetch` — it stayed offline only while the
+2 h cache was fresh, then silently went live mid-session (24 s network hang per run). Cache-TTL
+crossings make network deps **time-dependent**: a suite can pass offline-clean for hours and then
+start fetching. When auditing for network isolation, grep every call site, not every class.
+
+---
+
 ---
 
 ## Python sgp4 Library (Already Installed)

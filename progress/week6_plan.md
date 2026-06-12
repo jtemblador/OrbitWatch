@@ -197,9 +197,15 @@ real conjunction report uses. Small code, large credibility payoff.
   Project the relative vector `(r_secondary − r_primary)` onto `[R̂, T̂, N̂]` → `(R, T, N)` in km.
 
 **Success criteria:**
-- [ ] `R² + T² + N²` equals the raw miss distance squared (frame is orthonormal — sanity check)
-- [ ] A purely-radial offset maps to R only; an along-velocity offset maps to T only
-- [ ] Unit test against a hand-computed example
+- [x] `R² + T² + N²` equals the raw miss distance squared (synthetic + real SGP4 states)
+- [x] Purely-radial offset → R only; along-velocity offset → T-dominant (exactly-T only for circular orbits — test documents why); retrograde flips N
+- [x] Exact hand-computed case (basis = coordinate axes → offset (1,2,3) → RTN (1,2,3)) + independent numpy cross-check on 50 random states
+
+**Actual:** `teme_to_rtn()` in `coordinate_transforms.py` — Vallado RSW frame (= CDM RTN),
+right-handed `R̂×T̂=N̂`, pure `math` (file-consistent), degenerate states raise. Position-only by
+design (6.7 schema needs position RTN + scalar rel speed); Δv projection is the noted extension.
+8 tests; 329 passing. **Bonus: caught + fixed a 6.0 escape** — `test_rate_limited_skips_reload`
+had an unmocked fetch that went live once the cache crossed 2 h staleness (27 s suite → 2.6 s).
 
 ---
 
