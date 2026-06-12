@@ -158,3 +158,23 @@ Full write-up: `progress/task_logs/task_6_5_rtn_transform.md`. Summary:
   `assert_not_called()`. Suite 27 s → **2.6 s**. Lesson: "mocked the class" ≠ "mocked every call
   site"; TTL crossings hide network deps for hours.
 - 8 tests → **329 passing**. Commit: `4b5afbc`.
+
+---
+
+## Task 6.6 — Python Fine Filter (DONE, Jun 11)
+
+Full write-up: `progress/task_logs/task_6_6_fine_filter.md`. Summary:
+
+- **Built:** `fine_filter(satrec_a, satrec_b, jd_lo, jd_hi)` in new `backend/core/conjunctions.py`
+  — bounded scipy minimization (over minutes-from-bracket-start, not raw JD), each evaluation
+  propagates via C++ sgp4. Returns exact TCA (jd + UTC datetime), miss, rel speed, and both TEME
+  states (feed `teme_to_rtn` — integration-tested, norm == miss to 1e-9).
+- **Edge-widening:** minimum on a bracket edge → widen once, re-run; verified to recover a TCA
+  *outside* a deliberately wrong bracket.
+- **Key finding:** sampled grids overstate miss for fast crossers — the 1 s brute-force grid said
+  8.14 km where the true continuous minimum is **6.60 km** (d(t) ≈ √(d_min² + (v_rel·Δt)²)).
+  Phase 8 SOCRATES comparisons must compare refined minima, not sampled ones.
+- Validated vs independent 0.01 s brute force: TCA within 0.05 s, miss within 10 m.
+- 9 tests in new `tests/test_conjunctions.py` → **338 passing**.
+- **Pipeline status: all four computational stages done and interoperating**
+  (coarse → medium → fine → RTN). Next: 6.7 screener + endpoint.

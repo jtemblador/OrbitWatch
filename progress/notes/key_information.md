@@ -177,6 +177,28 @@ r_km, t_km, n_km = teme_to_rtn(pos_primary, vel_primary, pos_secondary)  # TEME,
   write tests expecting along-v̂ offsets to be *purely* T.
 - Position-only; for RTN relative velocity (CDM fields), project Δv onto the same basis.
 
+## Fine Filter — `fine_filter` (Task 6.6)
+
+```python
+from core.conjunctions import fine_filter
+out = fine_filter(satrec_a, satrec_b, jd_lo, jd_hi)
+# dict: jd_tca, tca_utc, miss_km, rel_speed_km_s, pos/vel TEME states (both sats)
+```
+
+- Bracket = medium_filter row's jd ± one step. Edge-minimum → auto-widens once.
+- Optimizes minutes-from-bracket-start (NOT raw JD — 2.46e6-scale variables have awkward
+  tolerance/float behavior). Tolerance 0.6 ms.
+- States feed `teme_to_rtn` directly.
+
+**⚠️ Sampled distances overstate the miss for fast crossers:** d(t) ≈ √(d_min² + (v_rel·Δt)²) —
+a 1 s grid at 12 km/s closing speed reported 8.14 km where the true minimum is 6.60 km. Any
+validation (Phase 8 SOCRATES deltas) must compare **refined** minima, never grid samples.
+
+**`invjday` can return sec == 60.0** at minute rollovers — route minutes+seconds through
+`timedelta` instead of constructing `datetime(..., second=int(sec))`.
+
+---
+
 **⚠️ Mocking lesson (6.0 escape, caught in 6.5):** "mocked the class" ≠ "mocked every call site."
 One refresh test mocked `reload_data` but not `fetcher.fetch` — it stayed offline only while the
 2 h cache was fresh, then silently went live mid-session (24 s network hang per run). Cache-TTL

@@ -223,9 +223,17 @@ loop (~10–50 iterations). C++-where-it's-hot, Python-where-it's-not.
   relative speed (km/s), and both TEME states at TCA (for the RTN transform).
 
 **Success criteria:**
-- [ ] Refined miss distance ≤ the medium-filter flagged distance (it's a minimum)
-- [ ] TCA falls inside the bracket
-- [ ] For a synthetic crossing pair, recovered TCA matches the analytic answer within seconds
+- [x] Refined miss distance ≤ the medium-filter flagged distance (199.6 km sampled → **6.60 km** refined on the crosser fixture)
+- [x] TCA falls inside the bracket (and edge-bracket widening recovers a TCA *outside* a wrong bracket)
+- [x] Recovered TCA matches independent 0.01 s brute-force ground truth within **0.05 s** (plan asked for "within seconds")
+
+**Actual:** `fine_filter()` in new `backend/core/conjunctions.py` — bounded scipy minimization
+over minutes-from-bracket-start (well-conditioned vs raw Julian dates), each evaluation calls C++
+sgp4. Edge-widening (once), failure→inf→RuntimeError, tca_utc via timedelta (handles invjday's
+sec=60 rollover). Returned TEME states verified to feed `teme_to_rtn` (norm == miss to 1e-9).
+**Key finding:** sampled grids overstate miss for fast crossers — 1 s grid said 8.14 km, true
+minimum 6.60 km; Phase 8 SOCRATES comparisons must use refined minima. 9 tests (new
+`test_conjunctions.py`); 338 passing.
 
 ---
 
