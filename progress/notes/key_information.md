@@ -197,6 +197,39 @@ validation (Phase 8 SOCRATES deltas) must compare **refined** minima, never grid
 **`invjday` can return sec == 60.0** at minute rollovers — route minutes+seconds through
 `timedelta` instead of constructing `datetime(..., second=int(sec))`.
 
+## Conjunction Screener + Endpoint — `run_screen` / `/api/conjunctions` (Task 6.7)
+
+```python
+from core.conjunctions import run_screen, ConjunctionScreener
+events = run_screen(satrecs, meta, start_utc, duration_hours, threshold_km,
+                    step_sec=60.0, pad_km=None)   # sorted ascending by miss
+events = ConjunctionScreener(propagator).screen(start_utc, duration_hours, threshold_km)
+
+GET /api/conjunctions?time=&duration_hours=&threshold_km=&step_sec=
+  -> { count, screening_start, duration_hours, threshold_km, events: [ConjunctionEvent] }
+```
+
+- **Index alignment is THE contract.** `medium_filter` returns positional `(i, j)`, NOT NORAD IDs.
+  `propagator.get_all_satrecs() -> (satrecs, meta)` builds both in one ordered pass so a result
+  index maps to identity via `meta[i]`. `run_screen` guards `len(satrecs)==len(meta)` — a mismatch
+  would silently attach the wrong satellites to a real event. `meta[k]` = `{norad_id, name,
+  object_type, epoch_age_days, periapsis_km, apoapsis_km}`.
+- **One threshold for medium-gross AND final report — safe by design.** Relies on 6.3's
+  velocity-aware no-skip bound: nothing sub-threshold is dropped at that threshold, so `fine_filter`
+  refines and we keep `miss < threshold`. Don't "inflate" the medium threshold.
+- **`pad_km` defaults to `threshold_km`** for the coarse cut: `miss ≥ radial separation`, so a band
+  gap > threshold can never produce a sub-threshold miss; a smaller pad would drop real conjunctions.
+- **Failure handling:** sub-step window → `medium_filter` `ValueError` → endpoint 422; decayed sat
+  in a fine bracket → `RuntimeError` caught per-row in `run_screen` (one bad sat can't kill a
+  screen); empty/NaN-band catalog → no pairs → `count: 0` (not an error).
+- **Perf baseline:** 25 stations, 24 h @ 60 s = **134 ms**. Two Phase-7 scaling items logged
+  (`scaling_tracker.md` #3 coarse-pair C++↔Python boundary round-trip; #4 sync CPU-bound screen
+  blocking the async handler → `run_in_threadpool`).
+- **⚠ Live `stations` returns ~82 events dominated by docked ISS modules** (Soyuz/Dragon/Progress/
+  Nauka at ~0 km, v_rel ~0). Real co-located objects, not a bug — co-orbital neighbors aren't
+  spam-flagged by the adaptive bound, they're genuinely within threshold. Phase 7's asymmetric RTN
+  screening volumes (+ a small min-miss floor) filter these. This is *why* RTN exists.
+
 ---
 
 **⚠️ Mocking lesson (6.0 escape, caught in 6.5):** "mocked the class" ≠ "mocked every call site."

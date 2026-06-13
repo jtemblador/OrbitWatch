@@ -7,8 +7,10 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from backend.core.conjunctions import ConjunctionScreener
 from backend.models.schemas import (
     BatchPositionResponse,
+    ConjunctionResponse,
     PositionResult,
     RefreshResponse,
     SatelliteListResponse,
@@ -173,6 +175,45 @@ async def get_track(
         "duration_min": duration_min,
         "steps": steps,
         "track": track,
+    }
+
+
+@router.get("/conjunctions", response_model=ConjunctionResponse)
+async def get_conjunctions(
+    request: Request,
+    duration_hours: float = Query(default=24.0, gt=0, le=72.0),
+    threshold_km: float = Query(default=50.0, gt=0, le=500.0),
+    step_sec: float = Query(default=60.0, ge=1.0, le=600.0),
+    time: str | None = None,
+):
+    """Screen the loaded catalog for close approaches over a time window.
+
+    Runs the cascade (coarse -> medium -> fine -> RTN) and returns events
+    sorted by miss distance, closest first. Geometric screening only — no Pc
+    (see project scope). An empty result is count: 0, not an error.
+
+    Note: use a 'Z' suffix (or %2B) in the time param — a literal '+' in a
+    query string decodes to a space and breaks ISO parsing.
+    """
+    propagator = request.app.state.propagator
+    try:
+        start_utc = _parse_time(time)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
+
+    screener = ConjunctionScreener(propagator)
+    try:
+        events = screener.screen(start_utc, duration_hours, threshold_km, step_sec)
+    except ValueError as e:
+        # e.g. a screening window shorter than the time step
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return {
+        "count": len(events),
+        "screening_start": start_utc.isoformat(),
+        "duration_hours": duration_hours,
+        "threshold_km": threshold_km,
+        "events": events,
     }
 
 

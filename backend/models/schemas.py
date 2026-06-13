@@ -97,3 +97,37 @@ class RefreshResponse(BaseModel):
     group: str
     satellite_count: int
     fetch_time: str
+
+
+# ---------------------------------------------------------------------------
+# Conjunctions
+# ---------------------------------------------------------------------------
+
+class ConjunctionEvent(BaseModel):
+    """One close-approach event, in the CDM-like geometry our pipeline
+    produces. Geometric screening only — no Pc (see project scope)."""
+    sat1_norad_id: int
+    sat1_name: str
+    sat1_object_type: str
+    sat1_epoch_age_days: float
+    sat2_norad_id: int
+    sat2_name: str
+    sat2_object_type: str
+    sat2_epoch_age_days: float
+
+    tca: str                    # Time of Closest Approach, ISO 8601 UTC
+    miss_distance_km: float
+    relative_speed_km_s: float
+
+    # Miss vector in the primary's RTN frame (the frame CDMs use)
+    r_km: float                 # radial
+    t_km: float                 # in-track
+    n_km: float                 # cross-track
+
+
+class ConjunctionResponse(BaseModel):
+    count: int
+    screening_start: str        # ISO 8601 UTC
+    duration_hours: float
+    threshold_km: float
+    events: list[ConjunctionEvent]

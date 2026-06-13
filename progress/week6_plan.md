@@ -251,9 +251,22 @@ Expose the pipeline output as CDM-like JSON.
   together, so the router stays thin.
 
 **Success criteria:**
-- [ ] `GET /api/conjunctions` returns valid JSON matching the schema (visible in `/docs`)
-- [ ] Each event includes RTN components and both satellites' names/NORAD IDs
-- [ ] Invalid params → 422; empty result → `count: 0`, not an error
+- [x] `GET /api/conjunctions` returns valid JSON matching the schema (visible in `/docs`)
+- [x] Each event includes RTN components and both satellites' names/NORAD IDs
+- [x] Invalid params → 422; empty result → `count: 0`, not an error
+
+**Actual:** Pure `run_screen(satrecs, meta, ...)` core + thin `ConjunctionScreener(propagator)`
+wrapper in `conjunctions.py`; new `propagator.get_all_satrecs()` is the index-aligned seam
+(medium_filter's positional `(i,j)` → identity via `meta[i]`, guarded by a length-mismatch check).
+One threshold drives medium-gross + report (safe by 6.3's no-skip bound); `pad_km`=threshold
+(miss ≥ radial separation). Endpoint guards: `Query` bounds + `ValueError`→422 (sub-step window) +
+per-row decay isolation. Deterministic crosser proof: 8 windows/6 h, min miss **6.59 km**, v_rel
+12 km/s, RTN norm==miss to 1e-9; cross-validation inherited from 6.6's brute-force anchor. 18 tests
+(8 screener + 5 propagator seam + 5 endpoint); **356 passing**. Perf: 25 sats/24 h@60 s = **134 ms**.
+Logged 2 Phase-7 scaling items (coarse-pair boundary round-trip; sync screen in async handler).
+**Live-catalog note:** stations yields ~82 events dominated by docked ISS modules (~0 km) — real
+co-located objects; Phase 7 asymmetric RTN volumes will filter them. See
+`task_logs/task_6_7_conjunction_api.md`.
 
 ---
 

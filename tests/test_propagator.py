@@ -909,5 +909,58 @@ class TestPropagatorConfig(unittest.TestCase):
         self.assertEqual(len(prop._satrec_cache), 0)
 
 
+class TestGetAllSatrecs(unittest.TestCase):
+    """get_all_satrecs() — the index-aligned screening seam (Task 6.7).
+
+    Asserts invariants (alignment, field presence, cache reuse) rather than
+    specific catalog contents, so it survives live-catalog churn.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.prop = SatellitePropagator()
+        cls.satrecs, cls.meta = cls.prop.get_all_satrecs()
+        cls.df = cls.prop._ensure_data()
+
+    def test_lengths_match_catalog(self):
+        self.assertEqual(len(self.satrecs), len(self.df))
+        self.assertEqual(len(self.meta), len(self.df))
+        self.assertGreater(len(self.satrecs), 0)
+
+    def test_index_alignment_with_dataframe(self):
+        """meta[k] must describe the satellite at DataFrame row k — this
+        alignment is the contract medium_filter's (i, j) output relies on."""
+        for k in range(len(self.df)):
+            row = self.df.iloc[k]
+            self.assertEqual(self.meta[k]["norad_id"], int(row["norad_cat_id"]))
+            self.assertEqual(self.meta[k]["name"], row["object_name"])
+            self.assertAlmostEqual(
+                self.meta[k]["periapsis_km"], float(row["periapsis"]), places=6)
+            self.assertAlmostEqual(
+                self.meta[k]["apoapsis_km"], float(row["apoapsis"]), places=6)
+
+    def test_satrec_matches_norad_id(self):
+        """Each returned Satrec is the one for its meta entry's NORAD ID
+        (satnum round-trips), proving satrecs and meta share an order."""
+        for k in range(len(self.meta)):
+            self.assertEqual(
+                int(self.satrecs[k].satnum), self.meta[k]["norad_id"])
+
+    def test_meta_has_all_screening_fields(self):
+        required = {"norad_id", "name", "object_type", "epoch_age_days",
+                    "periapsis_km", "apoapsis_km"}
+        for m in self.meta:
+            self.assertTrue(required.issubset(m.keys()))
+            self.assertIsInstance(m["periapsis_km"], float)
+            self.assertIsInstance(m["apoapsis_km"], float)
+
+    def test_reuses_satrec_cache(self):
+        """A second call returns the same cached Satrec objects (sgp4init is
+        expensive — it must run at most once per satellite)."""
+        again, _ = self.prop.get_all_satrecs()
+        for a, b in zip(self.satrecs, again):
+            self.assertIs(a, b)
+
+
 if __name__ == "__main__":
     unittest.main()

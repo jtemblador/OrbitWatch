@@ -13,11 +13,11 @@ Validates:
 import math
 import os
 import sys
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 import orbitcore
-from core.conjunctions import fine_filter
+from core.conjunctions import ConjunctionScreener, fine_filter, run_screen
 from core.coordinate_transforms import teme_to_rtn, utc_to_jd
 
 # --- Fixtures: ISS + the fast-crosser (same as TestMediumFilter) ----------
@@ -174,6 +174,120 @@ class TestFineFilter:
         jd0 = _iss_epoch_jd()
         try:
             fine_filter(a, b, jd0 + 1.0, jd0)
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
+
+# --- ConjunctionScreener / run_screen (Task 6.7) --------------------------
+
+def _crosser_meta():
+    """Index-aligned metadata for _crosser_pair(): two co-altitude ISS-band
+    objects (so coarse_filter always pairs them)."""
+    return [
+        {"norad_id": 25544, "name": "ISS (ZARYA)", "object_type": "PAYLOAD",
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+        {"norad_id": 90000, "name": "ISS CROSSER", "object_type": "DEBRIS",
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+    ]
+
+
+def _iss_epoch_dt():
+    """The ISS TLE epoch as a UTC datetime — screening start so tsince=0 is
+    the element epoch and the ~122.7 min encounter falls in the window."""
+    p = _parsed()
+    yr, mo, dy, hr, mn, sec = orbitcore.invjday(p.jdsatepoch, p.jdsatepochF)
+    return (datetime(yr, mo, dy, hr, 0, 0, tzinfo=timezone.utc)
+            + timedelta(minutes=mn, seconds=sec))
+
+
+class TestConjunctionScreener:
+    """run_screen()/ConjunctionScreener: the full coarse->medium->fine->RTN
+    cascade, driven deterministically by the crosser fixture."""
+
+    def test_screen_finds_crosser(self):
+        a, b = _crosser_pair()
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0)
+        assert len(ev) >= 1                      # ~8 windows per 6 h
+        top = ev[0]
+        assert top["miss_distance_km"] < 7.0     # documented refined min ~6.6 km
+        assert 11.0 < top["relative_speed_km_s"] < 13.0
+        assert {top["sat1_norad_id"], top["sat2_norad_id"]} == {25544, 90000}
+        assert top["sat1_name"] and top["sat2_name"]
+
+    def test_events_sorted_by_miss(self):
+        a, b = _crosser_pair()
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0)
+        misses = [e["miss_distance_km"] for e in ev]
+        assert misses == sorted(misses)
+
+    def test_rtn_norm_equals_miss(self):
+        """Each event's RTN components reconstruct its miss distance
+        (orthonormal frame ⇒ r²+t²+n² = miss²)."""
+        a, b = _crosser_pair()
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0)
+        for e in ev:
+            norm = math.sqrt(e["r_km"]**2 + e["t_km"]**2 + e["n_km"]**2)
+            assert abs(norm - e["miss_distance_km"]) < 1e-9
+
+    def test_threshold_excludes_distant_pair(self):
+        """A 1 km report threshold rejects the 6.6 km crosser even though the
+        velocity-aware medium bound brackets it."""
+        a, b = _crosser_pair()
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 1.0)
+        assert ev == []
+
+    def test_disjoint_altitude_coarse_cut(self):
+        """Non-overlapping altitude bands → coarse_filter drops the pair;
+        nothing reaches medium/fine."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+        meta[1] = {**meta[1], "periapsis_km": 20000.0, "apoapsis_km": 20200.0}
+        ev = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
+        assert ev == []
+
+    def test_screener_delegates_to_propagator(self):
+        """ConjunctionScreener pulls satrecs+meta from a propagator's
+        get_all_satrecs() and returns what run_screen would."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+
+        class _FakeProp:
+            def get_all_satrecs(self):
+                return [a, b], meta
+
+        start = _iss_epoch_dt()
+        direct = run_screen([a, b], meta, start, 6.0, 50.0)
+        via = ConjunctionScreener(_FakeProp()).screen(start, 6.0, 50.0)
+        assert len(via) == len(direct)
+        assert via[0]["miss_distance_km"] == direct[0]["miss_distance_km"]
+
+    def test_event_maps_correct_indices(self):
+        """A decoy at index 0 (disjoint altitude → coarse-cut) shifts the real
+        pair to satrecs (1, 2). Events must carry meta[1]/meta[2]'s identities,
+        proving the index→identity mapping isn't hardcoded to (0, 1)."""
+        a, b = _crosser_pair()
+        decoy = _make_variant(dmo_deg=30.0)
+        iss_meta, crosser_meta = _crosser_meta()
+        meta = [
+            {"norad_id": 11111, "name": "DECOY", "object_type": "DEBRIS",
+             "epoch_age_days": 1.0,
+             "periapsis_km": 19000.0, "apoapsis_km": 20500.0},  # GPS band
+            iss_meta,        # index 1
+            crosser_meta,    # index 2
+        ]
+        ev = run_screen([decoy, a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
+        assert len(ev) >= 1
+        for e in ev:
+            assert {e["sat1_norad_id"], e["sat2_norad_id"]} == {25544, 90000}
+            assert "DECOY" not in (e["sat1_name"], e["sat2_name"])
+
+    def test_misaligned_inputs_raise(self):
+        """satrecs/meta length mismatch would misattribute events — run_screen
+        must reject it up front, not silently screen."""
+        a, b = _crosser_pair()
+        try:
+            run_screen([a, b], _crosser_meta()[:1], _iss_epoch_dt(), 6.0, 50.0)
             assert False, "should have raised ValueError"
         except ValueError:
             pass

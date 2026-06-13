@@ -48,11 +48,11 @@ FastAPI Backend (Python)
 - **C++ compiled module:** `backend/orbitcore.cpython-312-x86_64-linux-gnu.so`
 - **Backend entry point:** `backend/main.py`
 - **API routes:** `backend/routers/satellites.py`
-- **Core pipeline:** `backend/core/propagator.py`, `tle_fetcher.py`, `coordinate_transforms.py`
+- **Core pipeline:** `backend/core/propagator.py`, `tle_fetcher.py`, `coordinate_transforms.py`, `conjunctions.py` (ConjunctionScreener + run_screen + fine_filter)
 - **Frontend entry point:** `frontend/index.html`
 - **Frontend JS:** `frontend/js/app.js` (viewer), `clock.js` (simulated clock + time bar), `satellites.js` (points + labels + adaptive refresh), `info-panel.js` (click interaction + orbit trail + nadir line), `controls.js` (display toggles)
-- **Pydantic schemas:** `backend/models/schemas.py` (8 response models)
-- **Tests:** `tests/` (279 tests across 7 test files)
+- **Pydantic schemas:** `backend/models/schemas.py` (10 response models)
+- **Tests:** `tests/` (356 tests across 8 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -60,11 +60,11 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Final Sprint underway — Phase 6 (Conjunction Screening), starting task 6.0
+- **Phase:** Final Sprint underway — Phase 6 (Conjunction Screening), 6.0–6.7 done; next 6.8 (globe viz)
 - **Timeline:** Mar 20 – Jul 10, 2026 (Weeks 0–5 ✅; Final Sprint = Phases 6–9, Jun 12 – Jul 10)
 - **Completed:** Weeks 0–5 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, nadir line with real-time tracking, display controls panel with label toggle, simulated clock with play/pause/speed + adaptive refresh + TEME trail re-rotation)
-- **Next steps:** Phase 6.7 (ConjunctionScreener orchestrator + `/api/conjunctions` endpoint + Pydantic schemas). Full breakdown in `progress/week6_plan.md`. (6.0–6.6 done; **all four computational stages complete and interoperating**: coarse → medium → fine → RTN.)
-- **Tests:** 338 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic. Frontend JS has no automated tests
+- **Next steps:** Phase 6.8 (minimal globe viz — one conjunction line + event list), then 6.9 (deterministic dataset wiring; the ISS-crosser fixture is the seed). Full breakdown in `progress/week6_plan.md`. (6.0–6.7 done; **full pipeline now reachable from one HTTP call**: coarse → medium → fine → RTN via `ConjunctionScreener` + `GET /api/conjunctions`.)
+- **Tests:** 356 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic. Frontend JS has no automated tests
 - **Conjunction-screening invariant (6.3):** the medium filter uses a velocity-aware interval bound — a crossing pair with an 8 km true miss samples at ~520 km on a 60 s grid, so plain distance thresholding misses real conjunctions. Any port/replacement must preserve an equivalent no-skip bound (see key_information.md)
 - **Perf note (6.1, measured):** Python-loop-over-C++ sgp4 overhead is only ~5% — the conjunction medium filter (6.3) must keep its whole loop inside C++; `orbitcore.propagate_batch` provides batch semantics + per-sat error sentinels
 - **Pivot (finalized Jun 11):** Dropped ML risk classifier (full CDM data requires an SSA Sharing Agreement — operators only; without it ML can't beat a threshold). Headline is now **conjunction screening validated against CelesTrak SOCRATES**. Scope narrowed further: **no Pc computation** (needs covariance we don't have) — this is an honest *geometric screener on SGP4*, not operational collision avoidance. Confirmed direction against Jose's targeted aerospace roles (all want C++/GNC/test-rigor, none want ML). See roadmap.

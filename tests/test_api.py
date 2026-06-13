@@ -743,5 +743,128 @@ class TestApiEdgeCases(unittest.TestCase):
         self.assertEqual(resp.status_code, 405)
 
 
+# ===========================================================================
+# 9. Conjunctions (Task 6.7)
+# ===========================================================================
+
+def _crosser_propagator():
+    """A stand-in propagator exposing only get_all_satrecs(), returning the
+    deterministic ISS-crosser pair (true miss ~6.6 km at v_rel ~12 km/s).
+    Lets the endpoint be tested without depending on the live catalog."""
+    import math
+
+    import orbitcore
+    from sgp4.api import WGS72
+    from sgp4.api import Satrec as PySatrec
+
+    L1 = "1 25544U 98067A   24056.27396747  .00015798  00000+0  28508-3 0  9991"
+    L2 = "2 25544  51.6415  32.0835 0004287  51.5994  12.5648 15.49571617441044"
+    p = PySatrec.twoline2rv(L1, L2, WGS72)
+
+    def variant(dmo=0.0, dnode=0.0):
+        return orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "a", "25544",
+            p.jdsatepoch + p.jdsatepochF - 2433281.5,
+            p.bstar, p.ndot, p.nddot, p.ecco, p.argpo, p.inclo,
+            (p.mo + math.radians(dmo)) % (2 * math.pi),
+            p.no_kozai, (p.nodeo + math.radians(dnode)) % (2 * math.pi))
+
+    satrecs = [variant(), variant(180.2, 180.0)]
+    meta = [
+        {"norad_id": 25544, "name": "ISS (ZARYA)", "object_type": "PAYLOAD",
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+        {"norad_id": 90000, "name": "ISS CROSSER", "object_type": "DEBRIS",
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+    ]
+
+    class _P:
+        def get_all_satrecs(self):
+            return satrecs, meta
+
+    return _P()
+
+
+# The crosser encounter is anchored to the ISS TLE epoch (2024-02-25).
+_CROSSER_TIME = "2024-02-25T06:34:30Z"
+
+
+class TestConjunctions(unittest.TestCase):
+    """GET /api/conjunctions — screening endpoint."""
+
+    def test_returns_valid_structure(self):
+        """Runs against the live stations catalog: structure + echoed params
+        are correct regardless of how many events the catalog yields."""
+        resp = client.get("/api/conjunctions?duration_hours=6&threshold_km=50")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        for key in ("count", "screening_start", "duration_hours",
+                    "threshold_km", "events"):
+            self.assertIn(key, body)
+        self.assertEqual(body["count"], len(body["events"]))
+        self.assertEqual(body["duration_hours"], 6.0)
+        self.assertEqual(body["threshold_km"], 50.0)
+        # events are sorted ascending by miss distance
+        misses = [e["miss_distance_km"] for e in body["events"]]
+        self.assertEqual(misses, sorted(misses))
+
+    def test_deterministic_event_fields_and_values(self):
+        """With the crosser propagator the result is fully deterministic:
+        ~6.6 km min miss, both objects identified, RTN consistent."""
+        original = app.state.propagator
+        app.state.propagator = _crosser_propagator()
+        try:
+            resp = client.get(
+                f"/api/conjunctions?time={_CROSSER_TIME}"
+                "&duration_hours=6&threshold_km=50")
+        finally:
+            app.state.propagator = original
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertGreaterEqual(body["count"], 1)
+        e = body["events"][0]
+        self.assertLess(e["miss_distance_km"], 7.0)
+        self.assertTrue(11.0 < e["relative_speed_km_s"] < 13.0)
+        self.assertEqual(
+            {e["sat1_norad_id"], e["sat2_norad_id"]}, {25544, 90000})
+        for field in ("tca", "miss_distance_km", "relative_speed_km_s",
+                      "r_km", "t_km", "n_km", "sat1_name", "sat2_name",
+                      "sat1_object_type", "sat2_object_type",
+                      "sat1_epoch_age_days", "sat2_epoch_age_days"):
+            self.assertIn(field, e)
+        norm = (e["r_km"]**2 + e["t_km"]**2 + e["n_km"]**2) ** 0.5
+        self.assertAlmostEqual(norm, e["miss_distance_km"], places=6)
+
+    def test_empty_result_is_count_zero(self):
+        """A threshold below the crosser's true miss yields a clean empty
+        result (count 0), not an error."""
+        original = app.state.propagator
+        app.state.propagator = _crosser_propagator()
+        try:
+            resp = client.get(
+                f"/api/conjunctions?time={_CROSSER_TIME}"
+                "&duration_hours=6&threshold_km=1")
+        finally:
+            app.state.propagator = original
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["events"], [])
+
+    def test_invalid_params_return_422(self):
+        for query in ("duration_hours=0", "duration_hours=200",
+                      "threshold_km=0", "threshold_km=-1",
+                      "step_sec=0", "step_sec=99999",
+                      "time=not-a-date"):
+            resp = client.get(f"/api/conjunctions?{query}")
+            self.assertEqual(resp.status_code, 422, msg=query)
+
+    def test_openapi_includes_conjunction_schemas(self):
+        schema = client.get("/openapi.json").json()
+        comps = schema["components"]["schemas"]
+        self.assertIn("ConjunctionEvent", comps)
+        self.assertIn("ConjunctionResponse", comps)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -256,6 +256,57 @@ class SatellitePropagator:
 
         return results, errors
 
+    def get_all_satrecs(self) -> tuple[list, list[dict]]:
+        """
+        Return every satellite's initialized Satrec plus screening metadata,
+        index-aligned, for the conjunction pipeline.
+
+        The C++ filters (coarse_filter, medium_filter) work in positional
+        indices: medium_filter returns (i, j) into the satrecs list passed
+        in, NOT NORAD IDs. So the satrecs list and the metadata list must
+        share the same order — both are built from one pass over the cached
+        DataFrame here, so callers can map a result index straight back to a
+        satellite's identity.
+
+        Satrecs come from the existing per-sat cache (sgp4init is expensive
+        and runs at most once per satellite); periapsis/apoapsis are the
+        GP-derived altitude columns already in the Parquet (km above
+        surface), suitable for coarse_filter directly.
+
+        Returns:
+            (satrecs, meta) where meta[k] describes satrecs[k]:
+                {norad_id, name, object_type, epoch_age_days,
+                 periapsis_km, apoapsis_km}
+        """
+        df = self._ensure_data()
+        now = datetime.now(timezone.utc)
+        satrecs = []
+        meta = []
+        for i in range(len(df)):
+            row = df.iloc[i]
+            satrec, _, _ = self._get_satrec(row)
+            satrecs.append(satrec)
+
+            # Recompute epoch age from current time (the cached column is
+            # stamped at fetch time and goes stale), matching the API layer.
+            epoch = row["epoch"]
+            if hasattr(epoch, "to_pydatetime"):
+                epoch = epoch.to_pydatetime()
+            if epoch.tzinfo is None:
+                epoch = epoch.replace(tzinfo=timezone.utc)
+            epoch_age_days = round((now - epoch).total_seconds() / 86400.0, 2)
+
+            meta.append({
+                "norad_id": int(row["norad_cat_id"]),
+                "name": row["object_name"],
+                "object_type": row["object_type"] if pd.notna(row["object_type"]) else "UNKNOWN",
+                "epoch_age_days": epoch_age_days,
+                "periapsis_km": float(row["periapsis"]),
+                "apoapsis_km": float(row["apoapsis"]),
+            })
+
+        return satrecs, meta
+
     def get_positions_at_times(
         self, name: str, utc_dts: list[datetime]
     ) -> list[dict]:
