@@ -16,7 +16,7 @@
    - WGS-72: gravity model used by NORAD when fitting TLE elements → must match for SGP4
    - WGS-84: Earth's physical shape → used for ECEF→lat/lon/alt conversion (same as GPS)
 
-5. **CelesTrak rate limiting is strict.** Data updates every 2 hours max. Do NOT retry on 403/404 — they will IP-block. 100 MB/day bandwidth cap. Our GPFetcher already enforces the 2-hour cache interval.
+5. **CelesTrak rate limiting is strict.** Data updates every 2 hours max. Do NOT retry on 403/404 — they will IP-block. **250 MB/IP/day cap** (verified Jun 2026 — was 100 MB; also: >50 HTTP 301/403/404 errors in 2 h → firewall; re-downloading identical data before an update → 403). Our GPFetcher already enforces the 2-hour cache + no-retry-on-403/404, so we're compliant. **CSV is now the gp.php default (since 2026-05-09)** — we explicitly pass `FORMAT=json`, so unaffected. No server-side orbital-parameter filter exists (query only by CATNR/INTDES/GROUP/NAME/SPECIAL) → to get one shell, fetch the full group and slice client-side. (Source: celestrak.org/NORAD/documentation/gp-data-formats.php)
 
 6. **Near-Earth vs Deep-Space split at 225 minutes orbital period.** Period < 225 min = SGP4 (near-Earth). Period >= 225 min = SDP4 (deep-space, adds lunar/solar perturbations). Modern implementations merge both under "SGP4" automatically. The Python `sgp4` library handles this transparently.
 
@@ -229,6 +229,45 @@ GET /api/conjunctions?time=&duration_hours=&threshold_km=&step_sec=
   Nauka at ~0 km, v_rel ~0). Real co-located objects, not a bug — co-orbital neighbors aren't
   spam-flagged by the adaptive bound, they're genuinely within threshold. Phase 7's asymmetric RTN
   screening volumes (+ a small min-miss floor) filter these. This is *why* RTN exists.
+
+## Dataset Wiring + Demo Seed (Task 6.8/6.9)
+
+- **Dataset is env-selectable** (so the test suite stays on the ISS-bearing `stations` group):
+  `ORBITWATCH_GROUP` (default `stations`) + `ORBITWATCH_DEMO_SEED=1`. Run modes:
+  `ORBITWATCH_DEMO_SEED=1 python backend/main.py` (stations + crosser, works out of the box) or
+  `ORBITWATCH_GROUP=starlink_shell ORBITWATCH_DEMO_SEED=1 python backend/main.py` (dense shell).
+- **`slice_to_shell(df, max_sats=300)`** (`tle_fetcher.py`): picks the single densest
+  (inclination, mean-altitude) bucket — one real shell where coarse-filter survival ≈100% so the
+  medium filter does the real work. Build the dev set with
+  `python -m backend.core.tle_fetcher starlink-shell` → caches `starlink_shell.parquet`.
+  **Requires network** (one live Starlink fetch; ~7–8k objects, well under the 250 MB cap).
+- **`append_demo_crosser(df)`** (`demo_seed.py`): clones row 0 (any catalog) with RAAN+180°,
+  MA+180.2° → a guaranteed crossing partner (NORAD `9900001`, "CROSSER (DEMO)"). Idempotent,
+  no-op on empty. Applied in `propagator._ensure_data` when `seed_demo=True`. Why needed: real
+  catalogs rarely have a *visibly dramatic* close approach in a given window (genuine misses are
+  small; constellations are station-kept), so the seed guarantees one for the demo.
+  **Measured:** on live stations the crosser hits **~8 km vs ISS at 12 km/s** (vs the 2024-fixture's
+  6.6 km — differs because it clones the *current* ISS TLE). Exact miss is epoch-dependent → the
+  viz uses a generous 100 km threshold; tests pin determinism on the fixed fixture instead.
+- **Frontend `conjunctions.js`:** one fetch → top-left list (pair/miss/TCA) + orange connecting
+  lines (CallbackProperty between the pair's live points). A conjunction line at TCA is invisible
+  (objects are close by definition), so lines are drawn for the **widest-separation** flagged pairs
+  (crossing geometry, currently far apart) while the list shows closest-first.
+  `CONJ_MIN_VISIBLE_KM=0.05` km skips docked artifacts (<5 m) but keeps real sub-km conjunctions.
+
+**⚠ Data freshness model (important — two distinct things):**
+- The **2 h interval is a cache-TTL / rate-limit guard, NOT auto-refresh.** `GPFetcher.fetch()`
+  serves cache if <2 h old (CelesTrak only publishes every ~2 h) and re-downloads only when called
+  with a staler cache. **Nothing calls `fetch()` automatically** — the only trigger is manual
+  `POST /api/refresh`. So data ages until someone refreshes; the app has no scheduler yet.
+- **`starlink_shell` never refreshes at all** (cache-only derived snapshot; even `POST /api/refresh`
+  re-serves the cached parquet). Rebuild via `python -m backend.core.tle_fetcher starlink-shell`.
+- Fix path = **roadmap 7.0** (scheduled auto-refresh + screen the live `starlink`/`active` group
+  directly) + `scaling_tracker.md #2, #5`. Prerequisite for Phase 8's epoch-matched validation.
+- **Downloader (data-layer fix):** `_download` uses requests+certifi, falls back to `curl` on
+  SSL/connection error; 4xx → `urllib.error.HTTPError` (preserves 403/404 no-retry). A VPN can
+  break the TLS handshake to CelesTrak (`UNEXPECTED_EOF_WHILE_READING`). Offline escape hatch:
+  `build_starlink_shell(json_path=…)` parses a browser-saved JSON.
 
 ---
 

@@ -84,15 +84,16 @@ Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code 
 - [x] **6.5 RTN coordinate transform** — `teme_to_rtn()` (Vallado RSW = CDM RTN frame), validated by exact hand case + numpy cross-check + real SGP4 geometry semantics. Bonus: caught/fixed a 6.0 escape (one refresh test went live once the cache crossed 2 h staleness). 8 tests; 329 passing. See `task_logs/task_6_5_rtn_transform.md`.
 - [x] **6.6 Python fine filter** — `fine_filter()` in new `backend/core/conjunctions.py`: bounded scipy minimization, exact TCA within 0.05 s of independent 0.01 s brute force; edge-bracket auto-widening; states feed `teme_to_rtn`. Key finding: sampled grids overstate fast-crosser miss (8.14 km grid vs 6.60 km true) — Phase 8 must compare refined minima. 9 tests; 338 passing. See `task_logs/task_6_6_fine_filter.md`.
 - [x] **6.7 `/api/conjunctions` endpoint** + Pydantic schemas + `ConjunctionScreener`. Pure `run_screen()` core (coarse→medium→fine→RTN, sorted by miss) wired via new `propagator.get_all_satrecs()` index-aligned seam. Deterministic crosser proof (8 windows/6h, min miss 6.59 km, RTN norm==miss). 18 tests; 356 passing; 25 sats/24h = 134 ms. See `task_logs/task_6_7_conjunction_api.md`.
-- [ ] **6.8 Minimal globe viz** — draw a line between one flagged pair + a bare alert list, to prove the data reaches the frontend.
-- [ ] **6.9 Dataset wiring** — load a ~300-sat dense subset (e.g., one Starlink shell). If no natural close approach appears early, use a known/synthetic close pair to prove the plumbing.
-- [ ] **6.10 Tests** — each filter stage + a full-pipeline integration test.
+- [x] **6.8 Minimal globe viz** — `frontend/js/conjunctions.js`: top-left list (`pair · miss · TCA`) + orange live connecting lines for the widest-separation (visible) flagged pairs. Verified in-browser. See `task_logs/task_6_8_globe_viz.md`.
+- [x] **6.9 Dataset wiring** — `slice_to_shell` (densest live Starlink shell, real: inc≈43°/483 km from 10,544) + `append_demo_crosser` seed (`demo_seed.py`), env-selectable via `ORBITWATCH_GROUP`/`ORBITWATCH_DEMO_SEED`. **Real result: 607 natural Starlink conjunctions** in 24 h (closest 0.34 km). Bonus: hardened `_download` (requests+certifi → curl) fixing a VPN-induced TLS failure. See `task_logs/task_6_9_dataset_wiring.md`.
+- [ ] **6.10 Tests** — each filter stage + a full-pipeline integration test. *(Largely covered already: 374 passing incl. dense-shell scale + seed→screen integration; 6.10 to formalize/round out.)*
 
 **✅ Done when:** one real conjunction is detected and visible end-to-end in the browser.
 
 ## Phase 7: Scale Up + Screening Volumes (Jun 21 – Jun 27)
 Make it run on a real, dense catalog and use industry-standard geometry.
 
+- [ ] **7.0 Live & accurate data** — make the data layer self-refreshing so screens never run on stale TLEs (SGP4 drifts ~5–10 km/day). Two parts: (a) a **scheduled auto-refresh** (FastAPI lifespan `asyncio` task or APScheduler, ~2–6 h) on top of the existing 2 h cache-TTL/rate-limit guard, plus the 202+background-task refactor (`scaling_tracker.md #2`); (b) **screen the live, auto-refreshing `starlink`/`active` group directly** instead of the static hand-sliced `starlink_shell`, so the snapshot (and its staleness, `scaling_tracker.md #5`) goes away. Prerequisite for Phase 8's epoch-matched SOCRATES validation.
 - [ ] **7.1 Scale to dense LEO** — Starlink (~6,000) / active LEO catalog. Profile the run; confirm the coarse filter eliminates the large majority of pairs so the medium filter stays tractable.
 - [ ] **7.2 Asymmetric screening volumes** — replace the single distance threshold with SFS Handbook per-regime RTN boxes (e.g., LEO 1: R = 0.4 km, T = 44 km, N = 51 km). This is *why* RTN matters — tight radially, loose along-track.
 - [ ] **7.3 Performance pass** — batch SGP4 carries the load; record timing numbers ("screened N objects, M pairs, in T seconds").

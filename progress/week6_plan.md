@@ -281,9 +281,17 @@ Phase 9.
 - Keep it crude — a single line + list is enough to confirm the end-to-end chain.
 
 **Success criteria:**
-- [ ] At least one conjunction line is visible on the globe
-- [ ] The event list shows the pair names + miss distance + TCA
-- [ ] No console errors
+- [x] At least one conjunction line is visible on the globe
+- [x] The event list shows the pair names + miss distance + TCA
+- [x] No console errors
+
+**Actual:** `frontend/js/conjunctions.js` — one fetch → top-left list (`pair · miss · TCA`, "N
+flagged" header) + orange connecting lines. Key insight: a conjunction line at TCA is invisible
+(objects are close by definition), so we draw a **live** line between the pair's current points
+(long while apart, shrinks at TCA) and pick the **widest-separation** flagged events for lines
+(crossing geometry) while the list shows closest-first. `CONJ_MIN_VISIBLE_KM=0.05` skips docked
+artifacts but surfaces real sub-km conjunctions. Verified in-browser on stations+seed and the real
+Starlink shell. Frontend-only → no automated tests. See `task_logs/task_6_8_globe_viz.md`.
 
 ---
 
@@ -299,8 +307,20 @@ Give the pipeline a population dense enough to actually have a close approach.
   as a deterministic test fixture afterward.
 
 **Success criteria:**
-- [ ] The screener runs on the ~300-sat set without errors
-- [ ] At least one conjunction (natural or the seeded test pair) flows through the full pipeline
+- [x] The screener runs on the ~300-sat set without errors
+- [x] At least one conjunction (natural or the seeded test pair) flows through the full pipeline
+
+**Actual:** `slice_to_shell` fetches the live `starlink` group and slices the densest shell
+(real: inc≈43°/483 km from 10,544 objects); `ORBITWATCH_GROUP=starlink_shell` loads it.
+`append_demo_crosser` (in new `demo_seed.py`) seeds a guaranteed crossing partner; `seed_demo`
+flag on the propagator, `ORBITWATCH_DEMO_SEED=1` in `main.py`. **Real-data result:** 301 sats,
+24 h @ 50 km = 2.57 s, 668 events incl. **607 natural** Starlink conjunctions (closest
+STARLINK-5969 × STARLINK-5771 @ 0.34 km). Deterministic CI guard = `build_synthetic_shell` scale
+test. **Bonus (data-layer fix):** rewrote `_download` (requests+certifi → curl fallback) to fix a
+real TLS handshake failure (VPN-induced) + a browser-download escape hatch + cache-only `fetch()`.
+18 tests across the 6.8/6.9 work; 374 passing. **Known limitation:** the shell is a static
+snapshot (no auto-refresh) → tracked `scaling_tracker.md #5`, Phase 7. See
+`task_logs/task_6_9_dataset_wiring.md`.
 
 ---
 

@@ -95,14 +95,23 @@ class SatellitePropagator:
     satellite don't re-run sgp4init().
     """
 
-    def __init__(self, group: str = "stations", fetcher: GPFetcher | None = None):
+    def __init__(
+        self,
+        group: str = "stations",
+        fetcher: GPFetcher | None = None,
+        seed_demo: bool = False,
+    ):
         """
         Args:
             group: CelesTrak satellite group to use
             fetcher: Optional GPFetcher instance (creates one if not provided)
+            seed_demo: if True, append a synthetic crosser to the loaded
+                catalog (demo scaffolding — see backend/core/demo_seed.py).
+                Off by default so tests run against the unmodified catalog.
         """
         self.group = group
         self.fetcher = fetcher or GPFetcher()
+        self.seed_demo = seed_demo
         self._df: pd.DataFrame | None = None
         self._satrec_cache: dict[int, tuple[orbitcore.Satrec, float, float]] = {}
         # Lookup indexes — built once on first data load, O(1) lookups after that.
@@ -113,7 +122,11 @@ class SatellitePropagator:
     def _ensure_data(self) -> pd.DataFrame:
         """Load cached OMM data if not already loaded."""
         if self._df is None:
-            self._df = self.fetcher.load_cached(self.group)
+            df = self.fetcher.load_cached(self.group)
+            if self.seed_demo:
+                from backend.core.demo_seed import append_demo_crosser
+                df = append_demo_crosser(df)
+            self._df = df
             self._build_indexes()
         return self._df
 

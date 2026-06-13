@@ -4,7 +4,17 @@ OrbitWatch FastAPI Backend — serves real-time satellite positions.
 Entry point: uvicorn backend.main:app --reload
 """
 
+import os
+import sys
 from contextlib import asynccontextmanager
+
+# Make `import backend.*` resolve whether launched as a module
+# (`uvicorn backend.main:app`) or as a script (`python backend/main.py`):
+# the latter puts backend/ on sys.path instead of the project root, so add
+# the root explicitly.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,11 +24,21 @@ from backend.core.propagator import SatellitePropagator
 from backend.models.schemas import HealthResponse
 from backend.routers.satellites import router as satellites_router
 
+# Dataset selection via environment (defaults keep the test suite on the
+# ISS-bearing "stations" group with no seed):
+#   ORBITWATCH_GROUP       — catalog to load (e.g. "starlink_shell"); default "stations"
+#   ORBITWATCH_DEMO_SEED=1 — append a synthetic crosser for a guaranteed visible
+#                            conjunction (see backend/core/demo_seed.py)
+# Demo run:  ORBITWATCH_DEMO_SEED=1 python backend/main.py            (stations + crosser)
+#            ORBITWATCH_GROUP=starlink_shell ORBITWATCH_DEMO_SEED=1 …  (dense shell + crosser)
+_GROUP = os.getenv("ORBITWATCH_GROUP", "stations")
+_SEED_DEMO = os.getenv("ORBITWATCH_DEMO_SEED") == "1"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Propagator is lazy — no data loaded until first request calls _ensure_data()
-    app.state.propagator = SatellitePropagator()
+    app.state.propagator = SatellitePropagator(group=_GROUP, seed_demo=_SEED_DEMO)
     yield
 
 
@@ -47,8 +67,13 @@ async def health_check():
 
 
 # Serve frontend static files — mounted AFTER API routes so /api/* resolves first.
-# html=True makes "/" serve index.html.
-app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+# html=True makes "/" serve index.html. Absolute path (off the project root) so
+# it works regardless of the current working directory.
+app.mount(
+    "/",
+    StaticFiles(directory=os.path.join(_ROOT, "frontend"), html=True),
+    name="frontend",
+)
 
 
 if __name__ == "__main__":

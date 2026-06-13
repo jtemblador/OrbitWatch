@@ -193,3 +193,60 @@ html, body, #cesiumContainer {
   color: #4fc3f7;
   background: rgba(79, 195, 247, 0.1);
 }
+
+/* --- Conjunction list (top-left; orange accent matches the on-globe lines) --- */
+#conjunction-list {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 260px;
+  max-height: 45vh;
+  overflow-y: auto;
+  background: rgba(10, 10, 20, 0.9);
+  border: 1px solid #ff9800;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #ccc;
+  z-index: 100;
+}
+
+#conjunction-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid #333;
+  color: #ff9800;
+  font-weight: bold;
+  font-size: 13px;
+}
+
+#conjunction-body {
+  padding: 4px 0;
+}
+
+.conjunction-row {
+  padding: 6px 10px;
+  border-bottom: 1px solid #222;
+}
+
+.conjunction-pair {
+  color: #e0e0e0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conjunction-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: #888;
+}
+
+.conjunction-miss {
+  color: #ff9800;
+}
+
+.conjunction-empty {
+  padding: 10px;
+  color: #888;
+}

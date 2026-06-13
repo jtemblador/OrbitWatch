@@ -962,5 +962,68 @@ class TestGetAllSatrecs(unittest.TestCase):
             self.assertIs(a, b)
 
 
+class TestDemoSeed(unittest.TestCase):
+    """Demo crosser seed (append_demo_crosser) + propagator seed_demo flag."""
+
+    @classmethod
+    def setUpClass(cls):
+        from backend.core.demo_seed import DEMO_CROSSER_ID
+        cls.DEMO_ID = DEMO_CROSSER_ID
+        cls.base = GPFetcher().load_cached("stations")
+
+    def test_append_adds_one_crosser_row(self):
+        from backend.core.demo_seed import append_demo_crosser
+        out = append_demo_crosser(self.base)
+        self.assertEqual(len(out), len(self.base) + 1)
+        self.assertIn(self.DEMO_ID, out["norad_cat_id"].values)
+
+    def test_append_is_idempotent(self):
+        """Safe to call on every data load — a second call adds nothing."""
+        from backend.core.demo_seed import append_demo_crosser
+        once = append_demo_crosser(self.base)
+        twice = append_demo_crosser(once)
+        self.assertEqual(len(twice), len(once))
+
+    def test_append_noop_on_empty(self):
+        from backend.core.demo_seed import append_demo_crosser
+        empty = self.base.iloc[0:0]
+        self.assertEqual(len(append_demo_crosser(empty)), 0)
+
+    def test_append_preserves_column_dtypes(self):
+        """Seeding must not upcast the served catalog's columns to object
+        (the iloc[[0]] vs iloc[0].to_frame().T trap)."""
+        from backend.core.demo_seed import append_demo_crosser
+        out = append_demo_crosser(self.base)
+        for col in ("norad_cat_id", "periapsis", "apoapsis",
+                    "mean_anomaly", "inclination"):
+            self.assertEqual(out[col].dtype, self.base[col].dtype, col)
+
+    def test_crosser_shares_orbit_shape_offsets_plane(self):
+        """The crosser clones the base orbit (same period/altitude) but flips
+        the plane (RAAN +180) and phase (MA +180.2) — that's what makes it
+        cross rather than co-locate."""
+        from backend.core.demo_seed import append_demo_crosser
+        out = append_demo_crosser(self.base)
+        base0 = self.base.iloc[0]
+        crosser = out[out["norad_cat_id"] == self.DEMO_ID].iloc[0]
+        self.assertAlmostEqual(crosser["period"], base0["period"], places=6)
+        self.assertAlmostEqual(crosser["apoapsis"], base0["apoapsis"], places=6)
+        self.assertAlmostEqual(
+            crosser["ra_of_asc_node"],
+            (base0["ra_of_asc_node"] + 180.0) % 360.0, places=6)
+
+    def test_propagator_seed_flag(self):
+        """seed_demo=True surfaces the crosser in get_all_satrecs; the default
+        leaves the catalog untouched."""
+        seeded = SatellitePropagator(seed_demo=True)
+        _, meta = seeded.get_all_satrecs()
+        ids = {m["norad_id"] for m in meta}
+        self.assertIn(self.DEMO_ID, ids)
+
+        plain = SatellitePropagator()
+        _, meta2 = plain.get_all_satrecs()
+        self.assertNotIn(self.DEMO_ID, {m["norad_id"] for m in meta2})
+
+
 if __name__ == "__main__":
     unittest.main()

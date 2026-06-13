@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-from core.tle_fetcher import GPFetcher
+from core.tle_fetcher import GPFetcher, build_starlink_shell, slice_to_shell
 
 # --- Sample CelesTrak JSON records ---
 
@@ -445,6 +445,145 @@ class TestDataFrameSchema:
         assert isinstance(row["period"], (float, np.floating))
 
 
+class TestSliceToShell:
+    """slice_to_shell() — pick one dense orbital shell from a GP DataFrame."""
+
+    @staticmethod
+    def _multi_shell_df():
+        # Three shells of different sizes: 53°/550 km (40), 70°/570 km (15),
+        # 97.6°/560 km (8). The 53° shell is the densest.
+        rows = []
+        for i in range(40):
+            rows.append(dict(norad_cat_id=1000 + i, inclination=53.0,
+                             apoapsis=552.0, periapsis=548.0))
+        for i in range(15):
+            rows.append(dict(norad_cat_id=2000 + i, inclination=70.0,
+                             apoapsis=572.0, periapsis=568.0))
+        for i in range(8):
+            rows.append(dict(norad_cat_id=3000 + i, inclination=97.6,
+                             apoapsis=562.0, periapsis=558.0))
+        return pd.DataFrame(rows)
+
+    def test_picks_densest_shell(self):
+        shell = slice_to_shell(self._multi_shell_df())
+        assert len(shell) == 40
+        assert list(shell["inclination"].unique()) == [53.0]
+
+    def test_respects_max_sats(self):
+        shell = slice_to_shell(self._multi_shell_df(), max_sats=10)
+        assert len(shell) == 10
+        # Cap takes the lowest NORAD IDs deterministically
+        assert list(shell["norad_cat_id"]) == list(range(1000, 1010))
+
+    def test_deterministic_order(self):
+        a = slice_to_shell(self._multi_shell_df())
+        b = slice_to_shell(self._multi_shell_df())
+        assert list(a["norad_cat_id"]) == list(b["norad_cat_id"])
+        assert list(a["norad_cat_id"]) == sorted(a["norad_cat_id"])
+
+    def test_empty_df_returns_empty(self):
+        out = slice_to_shell(pd.DataFrame(
+            columns=["norad_cat_id", "inclination", "apoapsis", "periapsis"]))
+        assert len(out) == 0
+
+    def test_build_from_json_file(self):
+        """Offline rebuild path: build_starlink_shell(json_path=…) parses a
+        saved OMM/JSON file, slices a shell, and caches the parquet — the
+        network-free workflow used when CelesTrak's TLS is unreachable."""
+        import json as _json
+        recs = []
+        for i in range(30):
+            recs.append({
+                "OBJECT_NAME": f"STARLINK-{i}", "OBJECT_ID": f"2024-{i:03d}A",
+                "NORAD_CAT_ID": 70000 + i, "CLASSIFICATION_TYPE": "U",
+                "EPOCH": "2026-06-01T00:00:00", "MEAN_MOTION": 15.05,
+                "ECCENTRICITY": 0.0001,
+                "INCLINATION": 53.0 if i < 22 else 70.0,
+                "RA_OF_ASC_NODE": (i * 17) % 360, "ARG_OF_PERICENTER": 0.0,
+                "MEAN_ANOMALY": (i * 13) % 360, "BSTAR": 1e-5,
+                "MEAN_MOTION_DOT": 0.0, "MEAN_MOTION_DDOT": 0.0,
+                "EPHEMERIS_TYPE": 0, "ELEMENT_SET_NO": 999, "REV_AT_EPOCH": 1,
+            })
+        tmp = tempfile.mkdtemp()
+        json_path = Path(tmp) / "starlink.json"
+        json_path.write_text(_json.dumps(recs))
+        fetcher = GPFetcher(cache_dir=Path(tmp))
+
+        shell = build_starlink_shell(
+            max_sats=300, json_path=str(json_path), fetcher=fetcher)
+
+        # densest shell (53°, 22 sats) selected; parquet written to cache_dir
+        assert list(shell["inclination"].unique()) == [53.0]
+        assert (Path(tmp) / "starlink_shell.parquet").exists()
+
+
+class TestCacheOnlyGroup:
+    """fetch() on a group with no CelesTrak source (e.g. a locally-built
+    starlink_shell) serves the cached Parquet instead of erroring — so
+    POST /api/refresh is a no-op, not a 502."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.fetcher = GPFetcher(cache_dir=Path(self.tmp_dir))
+
+    def test_serves_cache_without_network(self):
+        # A parquet for a group not in CELESTRAK_GROUPS.
+        df = pd.DataFrame({
+            "object_name": ["X"], "norad_cat_id": [1],
+            "fetch_time": [datetime.now(timezone.utc)],
+        })
+        df.to_parquet(Path(self.tmp_dir) / "starlink_shell.parquet", index=False)
+
+        with patch.object(self.fetcher, "_download") as mock_download:
+            out = self.fetcher.fetch("starlink_shell")
+        mock_download.assert_not_called()      # no network
+        assert len(out) == 1
+
+    def test_unknown_group_without_cache_raises(self):
+        try:
+            self.fetcher.fetch("not_a_real_group")
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
+
+class TestDownloader:
+    """_download(): requests-with-certifi primary, curl fallback on TLS/
+    connection failure, 4xx surfaced as urllib.error.HTTPError so fetch()'s
+    403/404 no-retry handling applies regardless of path."""
+
+    def setup_method(self):
+        self.fetcher = GPFetcher(cache_dir=Path(tempfile.mkdtemp()))
+
+    def test_success_returns_text(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=200, text="HELLO")
+        with patch("core.tle_fetcher.requests.get", return_value=resp):
+            assert self.fetcher._download("https://x") == "HELLO"
+
+    def test_4xx_raises_httperror_without_curl(self):
+        import urllib.error
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=404, reason="Not Found")
+        with patch("core.tle_fetcher.requests.get", return_value=resp), \
+             patch.object(self.fetcher, "_download_via_curl") as curl:
+            try:
+                self.fetcher._download("https://x")
+                assert False, "should have raised HTTPError"
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        curl.assert_not_called()  # 4xx is a real answer, not a TLS failure
+
+    def test_ssl_error_falls_back_to_curl(self):
+        import requests
+        with patch("core.tle_fetcher.requests.get",
+                   side_effect=requests.exceptions.SSLError("EOF")), \
+             patch.object(self.fetcher, "_download_via_curl",
+                          return_value="VIA_CURL") as curl:
+            assert self.fetcher._download("https://x") == "VIA_CURL"
+        curl.assert_called_once()
+
+
 import urllib.error
 
 # --- Run all tests ---
@@ -456,6 +595,9 @@ if __name__ == "__main__":
         TestCaching,
         TestFetchErrorHandling,
         TestDataFrameSchema,
+        TestSliceToShell,
+        TestCacheOnlyGroup,
+        TestDownloader,
     ]
 
     total = 0

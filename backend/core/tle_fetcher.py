@@ -24,7 +24,7 @@ Usage:
 import json
 import math
 import os
-import ssl
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 # WGS-72 constants (must match SGP4 — see key_information.md)
 GM_EARTH = 398600.8  # km³/s² (WGS-72 value used by SGP4)
@@ -76,7 +77,19 @@ class GPFetcher:
         """
         url = CELESTRAK_GROUPS.get(group)
         if not url:
-            raise ValueError(f"Unknown group: {group}. Options: {list(CELESTRAK_GROUPS.keys())}")
+            # Cache-only group (e.g. a locally-built "starlink_shell"): there is
+            # no CelesTrak source, so serve the cached Parquet instead of failing
+            # — keeps POST /api/refresh a no-op (rate_limited) rather than a 502.
+            # A genuinely unknown group with no cache still errors.
+            try:
+                cached = self.load_cached(group)
+                print(f"Group '{group}' is cache-only (no CelesTrak source) — serving cache.")
+                return cached
+            except FileNotFoundError:
+                raise ValueError(
+                    f"Unknown group: {group}. Options: {list(CELESTRAK_GROUPS.keys())} "
+                    f"(or a locally-built cache-only group)."
+                )
 
         # Check if cached data is fresh enough
         if not force:
@@ -179,16 +192,50 @@ class GPFetcher:
                 "Check your network connection."
             )
 
+    _USER_AGENT = "OrbitWatch/1.0"
+
     def _download(self, url: str) -> str:
-        """Download data from CelesTrak."""
-        # SSL verification disabled: CelesTrak's cert chain triggers SSL errors
-        # in some environments. Acceptable for public, non-sensitive orbital data.
-        # TODO: Re-enable once CelesTrak cert issues are resolved in our env.
-        ctx = ssl._create_unverified_context()
-        req = urllib.request.Request(url, headers={"User-Agent": "OrbitWatch/1.0"})
-        # urlopen raises HTTPError for non-2xx status codes automatically
-        resp = urllib.request.urlopen(req, context=ctx, timeout=30)
-        return resp.read().decode("utf-8")
+        """Download text from CelesTrak.
+
+        Uses requests with proper certificate verification (certifi). Some
+        environments fail the raw-urllib TLS handshake to CelesTrak
+        (UNEXPECTED_EOF_WHILE_READING) — if requests hits an SSL/connection
+        error, fall back to the system `curl`, whose TLS stack tends to
+        succeed where Python's does not. 4xx responses are re-raised as
+        urllib.error.HTTPError so fetch()'s 403/404 no-retry handling applies
+        regardless of which path was used.
+        """
+        headers = {"User-Agent": self._USER_AGENT}
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code >= 400:
+                raise urllib.error.HTTPError(
+                    url, resp.status_code, resp.reason, hdrs=None, fp=None)
+            return resp.text
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError) as e:
+            print(f"  requests fetch failed ({type(e).__name__}); retrying via curl…")
+            return self._download_via_curl(url)
+
+    def _download_via_curl(self, url: str) -> str:
+        """Fallback downloader using the system curl (robust TLS).
+
+        `-f` makes curl exit non-zero on HTTP >= 400; we surface those so the
+        caller treats them like other fetch failures (cache fallback).
+        """
+        try:
+            result = subprocess.run(
+                ["curl", "-fsS", "--max-time", "30",
+                 "-A", self._USER_AGENT, url],
+                capture_output=True, timeout=40, check=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("curl not available for fallback download")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"curl download failed (exit {e.returncode}): "
+                f"{e.stderr.decode('utf-8', 'replace')[:200]}")
+        return result.stdout.decode("utf-8")
 
     @staticmethod
     def _derive_orbit_params(mean_motion: float, eccentricity: float) -> dict:
@@ -347,8 +394,105 @@ class GPFetcher:
         print(f"  Cached to {parquet_path}")
 
 
+def slice_to_shell(
+    df: pd.DataFrame,
+    max_sats: int = 300,
+    inc_tol_deg: float = 1.0,
+    alt_tol_km: float = 25.0,
+) -> pd.DataFrame:
+    """
+    Select the single densest orbital shell from a GP DataFrame.
+
+    A megaconstellation like Starlink spans several shells (e.g. 53° / 550 km,
+    70° / 570 km, 97.6° SSO). For conjunction-screening dev we want ONE shell:
+    co-altitude + co-inclination members, where the coarse altitude-band filter
+    leaves ~all pairs and the medium filter does the real work (the realistic
+    intra-shell screening case).
+
+    Buckets objects by (inclination, mean altitude), picks the most populous
+    bucket, and returns up to `max_sats` of its members. Deterministic — sorted
+    by NORAD ID — so the slice is reproducible from the same input.
+
+    Args:
+        df: parsed GP DataFrame (needs inclination/apoapsis/periapsis columns).
+        max_sats: cap on returned satellites.
+        inc_tol_deg / alt_tol_km: bucket widths for grouping into shells.
+
+    Returns:
+        A new DataFrame (index reset) with the selected shell's satellites.
+    """
+    if df.empty:
+        return df.copy()
+
+    mean_alt = (df["apoapsis"] + df["periapsis"]) / 2.0
+    inc_key = (df["inclination"] / inc_tol_deg).round()
+    alt_key = (mean_alt / alt_tol_km).round()
+
+    groups = df.groupby([inc_key, alt_key]).groups
+    # Most populous (inclination, altitude) bucket = the densest shell.
+    densest = max(groups, key=lambda k: len(groups[k]))
+
+    shell = (
+        df.loc[groups[densest]]
+        .sort_values("norad_cat_id")
+        .head(max_sats)
+        .reset_index(drop=True)
+    )
+    return shell
+
+
+def build_starlink_shell(
+    max_sats: int = 300,
+    json_path: str | None = None,
+    fetcher: "GPFetcher | None" = None,
+) -> pd.DataFrame:
+    """
+    Cache a single ~`max_sats` Starlink shell as `starlink_shell.parquet` —
+    the dense dev dataset for conjunction screening.
+
+    By default fetches the live Starlink group (respects CelesTrak's 2-hour
+    cache). If `json_path` is given, parses that local OMM/JSON file instead —
+    the network-free escape hatch when CelesTrak's TLS is unreachable: open
+    https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=json in
+    a browser, save it, and pass the path.
+
+    `fetcher` is injectable for tests (its cache_dir is where the parquet is
+    written); defaults to a normal GPFetcher (backend/data/tle).
+
+    The app loads the result via ORBITWATCH_GROUP=starlink_shell (backend/main.py).
+    """
+    fetcher = fetcher or GPFetcher()
+    if json_path:
+        with open(json_path) as f:
+            records = json.load(f)
+        full = fetcher._parse_json(records)
+        print(f"Loaded {len(full)} Starlink objects from {json_path}")
+    else:
+        full = fetcher.fetch("starlink")
+
+    shell = slice_to_shell(full, max_sats=max_sats)
+    out = fetcher.cache_dir / "starlink_shell.parquet"
+    shell.to_parquet(out, index=False)
+    print(
+        f"Built {out} — {len(shell)} sats "
+        f"(inc≈{shell['inclination'].mean():.1f}°, "
+        f"alt≈{((shell['apoapsis'] + shell['periapsis']) / 2).mean():.0f} km) "
+        f"from {len(full)} Starlink objects"
+    )
+    return shell
+
+
 if __name__ == "__main__":
-    fetcher = GPFetcher()
-    df = fetcher.fetch("stations")
-    print()
-    print(df[["object_name", "norad_cat_id", "period", "periapsis", "apoapsis", "epoch_age_days"]].to_string(index=False))
+    import sys
+
+    # `python -m backend.core.tle_fetcher starlink-shell [path.json]` builds the
+    # dense dev dataset (live fetch, or from a saved JSON file if a path is
+    # given); with no arg it just previews the stations group.
+    if len(sys.argv) > 1 and sys.argv[1] == "starlink-shell":
+        path = sys.argv[2] if len(sys.argv) > 2 else None
+        build_starlink_shell(json_path=path)
+    else:
+        fetcher = GPFetcher()
+        df = fetcher.fetch("stations")
+        print()
+        print(df[["object_name", "norad_cat_id", "period", "periapsis", "apoapsis", "epoch_age_days"]].to_string(index=False))
