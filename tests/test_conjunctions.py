@@ -292,6 +292,63 @@ class TestConjunctionScreener:
         except ValueError:
             pass
 
+    def test_full_pipeline_deterministic(self):
+        """End-to-end anchor (the 6.10 deliverable): run the full cascade over a
+        fixed window and confirm it reproduces the encounter that 6.6's
+        independent 0.01 s brute force validated — TCA ≈122.72 min from the ISS
+        epoch, miss ≈6.60 km — within tolerance. The crossing repeats, so we
+        locate that specific window rather than the global-closest one.
+        Fixed TLEs + fixed window ⇒ reproducible."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0)
+        assert ev, "no events from the full pipeline"
+
+        def tca_min(e):
+            jw, jf = utc_to_jd(datetime.fromisoformat(e["tca"]))
+            return ((jw + jf) - jd0) * 1440.0
+
+        near = min(ev, key=lambda e: abs(tca_min(e) - 122.72))
+        # The full pipeline finds the brute-force-validated encounter...
+        assert abs(tca_min(near) - 122.72) < 0.1
+        # ...with the brute-force-validated miss distance.
+        assert abs(near["miss_distance_km"] - 6.60) < 0.1
+
+        # Every event is geometry self-consistent end to end (RTN ⇒ miss).
+        for e in ev:
+            norm = math.sqrt(e["r_km"]**2 + e["t_km"]**2 + e["n_km"]**2)
+            assert abs(norm - e["miss_distance_km"]) < 1e-9
+
+    def test_empty_catalog_returns_no_events(self):
+        """No satellites → no pairs → clean empty result, not an error."""
+        assert run_screen([], [], _iss_epoch_dt(), 6.0, 50.0) == []
+
+    def test_fine_filter_failure_is_isolated(self):
+        """One window that fails fine_filter (e.g. a sat un-propagatable there)
+        is dropped; the rest of the screen survives and no exception escapes."""
+        from unittest.mock import patch
+
+        import core.conjunctions as conj
+
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+        full = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
+        assert len(full) >= 2  # crossing repeats → multiple windows
+
+        real_fine = conj.fine_filter
+        state = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("simulated propagation failure")
+            return real_fine(*args, **kwargs)
+
+        with patch.object(conj, "fine_filter", side_effect=flaky):
+            out = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
+
+        assert len(out) == len(full) - 1  # exactly the one failed window dropped
+
 
 class TestSeededScreenIntegration:
     """Demo seed → screener: the synthetic crosser must produce a flagged

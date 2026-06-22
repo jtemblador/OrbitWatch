@@ -86,7 +86,7 @@ Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code 
 - [x] **6.7 `/api/conjunctions` endpoint** + Pydantic schemas + `ConjunctionScreener`. Pure `run_screen()` core (coarse→medium→fine→RTN, sorted by miss) wired via new `propagator.get_all_satrecs()` index-aligned seam. Deterministic crosser proof (8 windows/6h, min miss 6.59 km, RTN norm==miss). 18 tests; 356 passing; 25 sats/24h = 134 ms. See `task_logs/task_6_7_conjunction_api.md`.
 - [x] **6.8 Minimal globe viz** — `frontend/js/conjunctions.js`: top-left list (`pair · miss · TCA`) + orange live connecting lines for the widest-separation (visible) flagged pairs. Verified in-browser. See `task_logs/task_6_8_globe_viz.md`.
 - [x] **6.9 Dataset wiring** — `slice_to_shell` (densest live Starlink shell, real: inc≈43°/483 km from 10,544) + `append_demo_crosser` seed (`demo_seed.py`), env-selectable via `ORBITWATCH_GROUP`/`ORBITWATCH_DEMO_SEED`. **Real result: 607 natural Starlink conjunctions** in 24 h (closest 0.34 km). Bonus: hardened `_download` (requests+certifi → curl) fixing a VPN-induced TLS failure. See `task_logs/task_6_9_dataset_wiring.md`.
-- [ ] **6.10 Tests** — each filter stage + a full-pipeline integration test. *(Largely covered already: 374 passing incl. dense-shell scale + seed→screen integration; 6.10 to formalize/round out.)*
+- [x] **6.10 Tests** — coverage audit (per-stage tests already existed, built test-first) + closed the gaps: deterministic full-pipeline anchor (reproduces 6.6's brute-force TCA/miss), empty-catalog, fine-filter error-isolation. 377 passing on two consecutive runs. See `task_logs/task_6_10_tests.md`.
 
 **✅ Done when:** one real conjunction is detected and visible end-to-end in the browser.
 

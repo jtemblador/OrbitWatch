@@ -334,8 +334,16 @@ snapshot (no auto-refresh) → tracked `scaling_tracker.md #5`, Phase 7. See
 - Cross-check `propagate_batch` vs individual `sgp4` calls.
 
 **Success criteria:**
-- [ ] New tests pass; existing 279 still pass
-- [ ] Pipeline integration test is deterministic (fixed TLEs + fixed screening window)
+- [x] New tests pass; existing still pass (377 passing, 1 skipped)
+- [x] Pipeline integration test is deterministic (fixed TLEs + fixed screening window)
+
+**Actual:** Consolidation pass — the per-stage unit tests + `propagate_batch` cross-check already
+existed (built test-first in 6.1–6.9; see coverage matrix in the task log). Added the genuine gaps:
+`test_full_pipeline_deterministic` (full cascade reproduces 6.6's brute-force encounter — TCA ≈122.72
+min, miss ≈6.60 km — tolerance-bounded; the crossing repeats so it locates that specific window),
+`test_empty_catalog_returns_no_events`, `test_fine_filter_failure_is_isolated`. 3 tests; **377
+passing on two consecutive runs** (deterministic/offline). No production code changed. See
+`task_logs/task_6_10_tests.md`. **Phase 6 complete (6.0–6.10).**
 
 ---
 

@@ -52,7 +52,7 @@ FastAPI Backend (Python)
 - **Frontend entry point:** `frontend/index.html`
 - **Frontend JS:** `frontend/js/app.js` (viewer), `clock.js` (simulated clock + time bar), `satellites.js` (points + labels + adaptive refresh), `info-panel.js` (click interaction + orbit trail + nadir line), `controls.js` (display toggles), `conjunctions.js` (conjunction list + connecting lines)
 - **Pydantic schemas:** `backend/models/schemas.py` (10 response models)
-- **Tests:** `tests/` (374 tests across 8 test files)
+- **Tests:** `tests/` (377 tests across 8 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -60,11 +60,11 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Final Sprint underway — Phase 6 (Conjunction Screening), 6.0–6.9 done; next 6.10 (round out tests), then Phase 7
+- **Phase:** Final Sprint underway — **Phase 6 (Conjunction Screening) COMPLETE (6.0–6.10)**; next is Phase 7 (scale + live/auto-refresh data, roadmap 7.0)
 - **Timeline:** Mar 20 – Jul 10, 2026 (Weeks 0–5 ✅; Final Sprint = Phases 6–9, Jun 12 – Jul 10)
 - **Completed:** Weeks 0–5 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, nadir line with real-time tracking, display controls panel with label toggle, simulated clock with play/pause/speed + adaptive refresh + TEME trail re-rotation)
-- **Next steps:** Phase 6.10 (round out the integration/scale tests — already largely covered), then Phase 7 (scale + **live/auto-refreshing data**, see roadmap 7.0). Full breakdown in `progress/week6_plan.md`. (6.0–6.9 done; **full pipeline runs end-to-end and is visible in the browser** — coarse → medium → fine → RTN via `ConjunctionScreener` + `GET /api/conjunctions` + `conjunctions.js`. Validated on a real ~300-sat Starlink shell: **607 natural conjunctions** in 24 h, closest 0.34 km.)
-- **Tests:** 374 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic. Frontend JS has no automated tests
+- **Next steps:** Phase 7 (scale to dense catalog + asymmetric RTN screening volumes; **7.0 = live/auto-refreshing data**, see roadmap). Full Phase-6 breakdown in `progress/week6_plan.md`. (6.0–6.10 done; **full pipeline runs end-to-end and is visible in the browser** — coarse → medium → fine → RTN via `ConjunctionScreener` + `GET /api/conjunctions` + `conjunctions.js`. Validated on a real ~300-sat Starlink shell: **607 natural conjunctions** in 24 h, closest 0.34 km.)
+- **Tests:** 377 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic, verified on two consecutive runs. Frontend JS has no automated tests
 - **Dataset / demo modes:** default `stations` (tests stay ISS-based). Env-selectable: `ORBITWATCH_DEMO_SEED=1` seeds a synthetic crosser; `ORBITWATCH_GROUP=starlink_shell` loads the dense real shell. Build the shell: `python -m backend.core.tle_fetcher starlink-shell [path.json]`. ⚠ The shell is a **static snapshot — no auto-refresh yet** (Phase 7.0 / `scaling_tracker.md #5`); rebuild to refresh.
 - **Conjunction-screening invariant (6.3):** the medium filter uses a velocity-aware interval bound — a crossing pair with an 8 km true miss samples at ~520 km on a 60 s grid, so plain distance thresholding misses real conjunctions. Any port/replacement must preserve an equivalent no-skip bound (see key_information.md)
 - **Perf note (6.1, measured):** Python-loop-over-C++ sgp4 overhead is only ~5% — the conjunction medium filter (6.3) must keep its whole loop inside C++; `orbitcore.propagate_batch` provides batch semantics + per-sat error sentinels
