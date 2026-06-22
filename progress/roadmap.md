@@ -93,10 +93,10 @@ Prove the whole pipeline on a ~300-sat subset. Heaviest phase — most new code 
 ## Phase 7: Scale Up + Screening Volumes (Jun 21 – Jun 27)
 Make it run on a real, dense catalog and use industry-standard geometry.
 
-- [ ] **7.0 Live & accurate data** — make the data layer self-refreshing so screens never run on stale TLEs (SGP4 drifts ~5–10 km/day). Two parts: (a) a **scheduled auto-refresh** (FastAPI lifespan `asyncio` task or APScheduler, ~2–6 h) on top of the existing 2 h cache-TTL/rate-limit guard, plus the 202+background-task refactor (`scaling_tracker.md #2`); (b) **screen the live, auto-refreshing `starlink`/`active` group directly** instead of the static hand-sliced `starlink_shell`, so the snapshot (and its staleness, `scaling_tracker.md #5`) goes away. Prerequisite for Phase 8's epoch-matched SOCRATES validation.
+- [ ] **7.0 Live & epoch-matched data** — **screen the live `starlink`/`active` group directly** instead of the static hand-sliced `starlink_shell`, so the snapshot and its staleness (`scaling_tracker.md #5`) go away, and support **epoch-matched fetch-on-demand** (pull GP data fresh right before a screen). This is the real prerequisite for Phase 8's SOCRATES comparison — without epoch-matching, TCA/miss disagree from epoch drift alone. *(The background auto-refresh **scheduler** — keeping a deployed demo current with no manual step — is deferred to Phase 9.7; fetch-on-demand is sufficient through Phase 8.)*
 - [ ] **7.1 Scale to dense LEO** — Starlink (~6,000) / active LEO catalog. Profile the run; confirm the coarse filter eliminates the large majority of pairs so the medium filter stays tractable.
-- [ ] **7.2 Asymmetric screening volumes** — replace the single distance threshold with SFS Handbook per-regime RTN boxes (e.g., LEO 1: R = 0.4 km, T = 44 km, N = 51 km). This is *why* RTN matters — tight radially, loose along-track.
-- [ ] **7.3 Performance pass** — batch SGP4 carries the load; record timing numbers ("screened N objects, M pairs, in T seconds").
+- [ ] **7.2 Asymmetric screening volumes + co-located suppression** — (a) replace the single distance threshold with SFS Handbook per-regime RTN boxes (e.g., LEO 1: R = 0.4 km, T = 44 km, N = 51 km) — *why* RTN matters, tight radially / loose along-track. (b) **Suppress co-located / persistent-proximity pairs** (docked modules, parked constellation sats) via a min-miss floor + low-relative-velocity (or shared international-designator) guard. Asymmetric volumes alone do **not** catch these — both objects sit inside the box — so without this the screen counts non-crossing clusters as conjunctions, distorting the Phase-8 false-positive analysis. *(Found in 6.7/6.9: stations docked modules at ~0 km; Starlink 0.34 km @ 1.26 km/s — currently only hidden client-side by the viz floor.)*
+- [ ] **7.3 Performance pass** — record timing ("screened N objects, M pairs, in T s"). Address the tracked scale costs: coarse→medium boundary round-trip (`scaling_tracker.md #3`) and the synchronous screen blocking the event loop (`#4` → `run_in_threadpool`). **Watch the fine stage** — with many flagged windows the Python `fine_filter` loop, not the C++ medium filter, can dominate (measured: ~13k windows → ~7 s).
 - [ ] **7.4 Enable type filters** — turn on the PAYLOAD / ROCKET BODY / DEBRIS checkboxes in `controls.js` (code already exists; useful once the catalog has real types).
 - [ ] **7.5 Tests** — screening-volume logic + scale/perf regression check.
 
@@ -121,9 +121,10 @@ Turn it into something a recruiter can run and watch.
 - [ ] **9.1 Frontend** — alert table sorted by miss distance with TCA countdown; conjunction lines color-coded by severity; camera fly-to on click; detail panel (RTN components, TLE ages, object types, "matched SOCRATES?" status).
 - [ ] **9.2 README rewrite** — remove all ML framing, add architecture diagram, screenshots, run instructions.
 - [ ] **9.3 Clean stale ML references** — `PROJECT_PLAN.md`, `requirements.txt`, `progress/week0_setup.md`, `progress/notes/week0_notes.md`, and the `1plan.md` instruction file.
-- [ ] **9.4 Docker** — `Dockerfile` + `docker-compose.yml` for one-command startup (backend + frontend + SPICE kernels + C++ build).
+- [ ] **9.4 Docker** — `Dockerfile` + `docker-compose.yml` for one-command startup (backend + frontend + SPICE kernels + C++ build). **Handle data bootstrap:** the catalog parquets are gitignored, so the image has no data — fetch the catalog on first startup (or bake a snapshot), otherwise a fresh container serves an empty screen.
 - [ ] **9.5 Demo** — record a GIF/video walkthrough for the portfolio.
-- [ ] **9.6 Cleanup** — remove dead code, all tests passing, docstrings on public APIs.
+- [ ] **9.6 Cleanup** — remove dead code, all tests passing, docstrings on public APIs. **Remove the synthetic demo crosser seed** (`ORBITWATCH_DEMO_SEED` + `append_demo_crosser`) now that real conjunctions drive the demo — keep `build_synthetic_shell` only if still used by tests.
+- [ ] **9.7 Background auto-refresh** *(moved from 7.0)* — scheduled refresh (FastAPI lifespan `asyncio` task / APScheduler, ~2–6 h) on top of the 2 h cache-TTL + the 202-Accepted background-task refactor (`scaling_tracker.md #2`), so the deployed demo stays current with no manual step.
 
 **✅ Done when:** one-command startup works, demo is recorded, repo reads as portfolio-ready.
 
@@ -134,7 +135,7 @@ Turn it into something a recruiter can run and watch.
 | Date | Milestone | Demoable? |
 |------|-----------|-----------|
 | ✅ Apr 30 | Foundation done — C++ SGP4, FastAPI, interactive 3D globe, 279 tests | Yes |
-| Jun 20 | **Phase 6:** one conjunction detected end-to-end, shown on globe | Yes |
+| ✅ Jun 21 | **Phase 6:** full conjunction pipeline end-to-end on real Starlink data — 607 natural conjunctions (closest 0.34 km), visible on globe, 377 tests | Yes |
 | Jun 27 | **Phase 7:** full-catalog screening with industry screening volumes + perf numbers | Yes |
 | Jul 4  | **Phase 8:** detections validated against CelesTrak SOCRATES | Yes |
 | Jul 10 | **Phase 9:** polished, Dockerized, demo recorded — portfolio-ready | Portfolio-ready |
