@@ -52,7 +52,8 @@ FastAPI Backend (Python)
 - **Frontend entry point:** `frontend/index.html`
 - **Frontend JS:** `frontend/js/app.js` (viewer), `clock.js` (simulated clock + time bar), `satellites.js` (points + labels + adaptive refresh), `info-panel.js` (click interaction + orbit trail + nadir line), `controls.js` (display toggles), `conjunctions.js` (conjunction list + connecting lines)
 - **Pydantic schemas:** `backend/models/schemas.py` (10 response models)
-- **Tests:** `tests/` (381 tests across 8 test files)
+- **Profiling harness:** `scripts/profile_screening.py` (7.1 — sweeps the cascade over the Starlink catalog; `run_screen(timings=…)` is the passive hook)
+- **Tests:** `tests/` (386 tests across 8 test files)
 
 ## Related Projects & Files
 - **Resume:** `/home/j0e/Portfolio/JoseTrinidadTemblador_Resume.pdf`
@@ -60,11 +61,11 @@ FastAPI Backend (Python)
 - **Job Tracker:** `/home/j0e/Projects/Job Tracker/`
 
 ## Current Status
-- **Phase:** Final Sprint underway — Phase 6 COMPLETE (6.0–6.10); **Phase 7 underway: 7.0 (live data) done**, next 7.1 (scale to dense catalog). Also: interactive core of 9.1 (conjunction UX) pulled forward.
+- **Phase:** Final Sprint underway — Phase 6 COMPLETE (6.0–6.10); **Phase 7 underway: 7.0 (live data) + 7.1 (scale profile) done**, next 7.2 (asymmetric RTN volumes + co-located suppression). Also: interactive core of 9.1 (conjunction UX) pulled forward.
 - **Timeline:** Mar 20 – Jul 10, 2026 (Weeks 0–5 ✅; Final Sprint = Phases 6–9, Jun 12 – Jul 10)
 - **Completed:** Weeks 0–5 (setup, C++ SGP4 engine, coordinate transforms, GP fetcher, propagator wrapper, FastAPI backend with 6 endpoints, Pydantic response models, 82 API tests, Cesium.js globe, satellite points with interpolation, info panel with click interaction, orbit trail at orbital altitude via TEME API + GMST rotation, selection indicator, nadir line with real-time tracking, display controls panel with label toggle, simulated clock with play/pause/speed + adaptive refresh + TEME trail re-rotation)
-- **Next steps:** Phase 7 (scale to dense catalog + asymmetric RTN screening volumes; **7.0 = live/auto-refreshing data**, see roadmap). Full Phase-6 breakdown in `progress/week6_plan.md`. (6.0–6.10 done; **full pipeline runs end-to-end and is visible in the browser** — coarse → medium → fine → RTN via `ConjunctionScreener` + `GET /api/conjunctions` + `conjunctions.js`. Validated on a real ~300-sat Starlink shell: **607 natural conjunctions** in 24 h, closest 0.34 km.)
-- **Tests:** 381 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic. Frontend JS has no automated tests
+- **Next steps:** Phase 7.2 (asymmetric RTN screening volumes + co-located/persistent-proximity suppression + de-dupe). **7.1 profile reordered the rest of Phase 7** (see `task_logs/task_7_1_scale_profile.md`): the **fine stage is 82–87% of wall time** (window count, not the C++ scan, dominates) → 7.2's de-dupe/suppression is a perf lever and 7.3's fine-stage batching is the primary speedup; the coarse filter is inclination-blind (**49% survive on full Starlink**) so #3 is a memory fix (4.5 GB), not a time fix. **Demo operating point: `MAX_SATS=300` = 2.6 s @ 24 h**; full catalog = 258 s / 4.5 GB → batch-only until 7.2+7.3. (6.0–6.10 done; full pipeline runs end-to-end in the browser — coarse → medium → fine → RTN via `ConjunctionScreener` + `GET /api/conjunctions` + `conjunctions.js`; real ~300-sat Starlink shell = **607 natural conjunctions** in 24 h, closest 0.34 km.)
+- **Tests:** 386 passing + 1 skipped (opt-in live fetch) across 8 test files — suite runs offline/deterministic. Frontend JS has no automated tests
 - **Dataset / demo modes:** default `stations` (tests stay ISS-based, cached). Env-selectable: `ORBITWATCH_DEMO_SEED=1` seeds a synthetic crosser; `ORBITWATCH_GROUP=<group>` picks the catalog; `ORBITWATCH_LIVE=1` fetches fresh on load (7.0); `ORBITWATCH_MAX_SATS=N` slices a dense shell in-app. **Live dense demo:** `ORBITWATCH_LIVE=1 ORBITWATCH_GROUP=starlink ORBITWATCH_MAX_SATS=300 ORBITWATCH_DEMO_SEED=1 python backend/main.py`. Offline fallback: `ORBITWATCH_GROUP=starlink_shell` (static snapshot, rebuild via `python -m backend.core.tle_fetcher starlink-shell [path.json]`). ⚠ "Live" = fresh-on-load + manual refresh; auto-refresh scheduler is Phase 9.7.
 - **Conjunction-screening invariant (6.3):** the medium filter uses a velocity-aware interval bound — a crossing pair with an 8 km true miss samples at ~520 km on a 60 s grid, so plain distance thresholding misses real conjunctions. Any port/replacement must preserve an equivalent no-skip bound (see key_information.md)
 - **Perf note (6.1, measured):** Python-loop-over-C++ sgp4 overhead is only ~5% — the conjunction medium filter (6.3) must keep its whole loop inside C++; `orbitcore.propagate_batch` provides batch semantics + per-sat error sentinels

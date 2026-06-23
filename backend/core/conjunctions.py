@@ -22,6 +22,7 @@ progress/task_logs/task_6_1_batch_sgp4.md for the measured rationale
 import math
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from scipy.optimize import minimize_scalar
@@ -158,6 +159,7 @@ def run_screen(
     threshold_km: float,
     step_sec: float = _DEFAULT_STEP_SEC,
     pad_km: float | None = None,
+    timings: dict | None = None,
 ) -> list[dict]:
     """
     Run the full conjunction cascade over an index-aligned satellite set and
@@ -187,6 +189,14 @@ def run_screen(
                          threshold_km — a pair must close radially to within
                          the threshold to ever count, so a smaller pad could
                          drop real conjunctions.
+        timings:         optional dict; if provided, populated with per-stage
+                         wall times (t_coarse / t_medium / t_fine, seconds) and
+                         counts (n_sats, n_pairs, n_windows, n_events) for
+                         profiling (see scripts/profile_screening.py). None
+                         (default) → no measurement, no behavior change.
+                         t_coarse / t_medium include the C++↔Python
+                         survivor/row materialization — the scaling_tracker #3
+                         boundary cost this profiling is meant to expose.
 
     Returns:
         list of event dicts matching the ConjunctionEvent schema fields,
@@ -206,14 +216,27 @@ def run_screen(
     periapsis = [m["periapsis_km"] for m in meta]
     apoapsis = [m["apoapsis_km"] for m in meta]
 
-    # ⚠ PERF (Phase 7): coarse_filter hands survivor pairs back to Python and we
-    # pass them straight into medium_filter. Within one dense shell survival is
-    # ~100%, so this round-trips millions of (i, j) tuples across the C++↔Python
-    # boundary twice (~378 ns/pair each way — see key_information.md / 6.2). Fine
-    # at <=300 sats; at scale, fuse the coarse cut inside medium_filter. Tracked
-    # in scaling_tracker.md.
+    # ⚠ PERF (Phase 7, scaling_tracker #3): coarse_filter hands survivor pairs
+    # back to Python and we pass them straight into medium_filter — millions of
+    # (i, j) tuples crossing the C++↔Python boundary twice (~378 ns/pair each
+    # way, measured 6.2). Measured on the full 10,544-sat Starlink catalog (7.1):
+    # 49% of all pairs survive at a 50 km pad (27.3 M), 19% at 5 km (10.5 M) —
+    # altitude-band screening is inclination-blind, so a constellation's stacked
+    # shells (43°/53°/97° all near ~475 km) barely cull. Fine at <=300 sats; at
+    # scale, 7.3 fuses the coarse cut inside medium_filter so survivors never
+    # materialize as Python objects.
+    _t = time.perf_counter()
     pairs = orbitcore.coarse_filter(periapsis, apoapsis, pad_km)
+    if timings is not None:
+        timings["n_sats"] = len(satrecs)
+        timings["n_pairs"] = len(pairs)
+        timings["t_coarse"] = time.perf_counter() - _t
     if not pairs:
+        if timings is not None:
+            timings["n_windows"] = 0
+            timings["n_events"] = 0
+            timings["t_medium"] = 0.0
+            timings["t_fine"] = 0.0
         return []
 
     if start_utc.tzinfo is None:
@@ -226,9 +249,14 @@ def run_screen(
     jd_start = jd_w + jd_f
     jd_end = jd_start + duration_hours / 24.0
 
+    _t = time.perf_counter()
     rows = orbitcore.medium_filter(
         satrecs, pairs, jd_start, jd_end, step_sec, threshold_km)
+    if timings is not None:
+        timings["t_medium"] = time.perf_counter() - _t
+        timings["n_windows"] = len(rows)
 
+    _t = time.perf_counter()
     step_day = step_sec / 86400.0
     events = []
     for (i, j, jd_flag, _d_flag) in rows:
@@ -267,6 +295,9 @@ def run_screen(
         })
 
     events.sort(key=lambda e: e["miss_distance_km"])
+    if timings is not None:
+        timings["t_fine"] = time.perf_counter() - _t
+        timings["n_events"] = len(events)
     return events
 
 

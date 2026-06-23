@@ -280,6 +280,42 @@ stay correct.
 
 ---
 
+## Conjunction Screening at Scale — Profile (Task 7.1)
+
+`run_screen(..., timings=dict)` is a **passive** profiling hook — pass a dict and it fills
+`n_sats / n_pairs / n_windows / n_events` + `t_coarse / t_medium / t_fine`; `None` (default,
+and what `/api/conjunctions` passes) is a byte-identical no-op. Driver:
+`scripts/profile_screening.py` (sweeps N over the real Starlink parquet; `--source synth`
+offline; `--full` for the whole catalog). It's also 7.3's before/after benchmark.
+
+**Measured on the full 10,544-sat Starlink catalog. Three findings that reorder Phase 7:**
+
+1. **⚠ Coarse altitude-band filtering barely culls within a constellation** — 45 % of all
+   55.6 M pairs survive at a 25 km pad, **49 % at 50 km** (the endpoint default), only down to
+   19 % at a tight 5 km. It's **inclination-blind**: Starlink stacks its 43°/53°/97° shells
+   into ~475 km, so co-altitude survival is high regardless of plane. (The roadmap's
+   "coarse eliminates the large majority" assumption only holds for *mixed-altitude*
+   catalogs, LEO→GEO — not a dense LEO constellation.) The 25 M survivor tuples are the
+   **memory** driver (4.5 GB peak), which is what the 7.3 C++ fusion (#3) buys back.
+
+2. **⚠ The fine stage is the time bottleneck — 82–87 % of wall time at every scale**, driven
+   by window count (300 sats → 14.7 k windows; full catalog → **1.43 M**), each window a
+   Python `scipy.minimize_scalar`. The C++ medium scan is cheap by comparison (≤ 28 s even at
+   full scale). So **7.2 (de-dupe + co-located/persistent-proximity suppression) is a perf
+   lever**, not just output cleanup — fewer windows → less fine work — and 7.3's fine-stage
+   batching is the *primary* speedup, not the footnote it reads as in the roadmap.
+
+3. **Operating point: `MAX_SATS=300` = 2.6 s @ 24 h/50 km** (the demo default, validated).
+   ~500 sats = 7.5 s (click-and-wait ceiling); the **full catalog = 258 s / 4.5 GB → batch
+   only** until 7.2 + 7.3. **Footgun:** a plain `ORBITWATCH_GROUP=starlink` run with no
+   `MAX_SATS` screens all 10,544 → that 258 s / 4.5 GB hang on the first `/api/conjunctions`
+   (synchronous — scaling_tracker #4).
+
+**Lesson:** *profile before optimizing.* The tracked scale item (#3 boundary) was the memory
+driver; the wall time lived in the fine stage — a place the plan had as a one-line aside.
+
+---
+
 **⚠️ Mocking lesson (6.0 escape, caught in 6.5):** "mocked the class" ≠ "mocked every call site."
 One refresh test mocked `reload_data` but not `fetcher.fetch` — it stayed offline only while the
 2 h cache was fresh, then silently went live mid-session (24 s network hang per run). Cache-TTL

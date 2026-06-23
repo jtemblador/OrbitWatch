@@ -350,6 +350,74 @@ class TestConjunctionScreener:
         assert len(out) == len(full) - 1  # exactly the one failed window dropped
 
 
+class TestRunScreenTimings:
+    """7.1 profiling hook: run_screen(timings=dict) fills per-stage wall times
+    and counts for scripts/profile_screening.py, and is a provable no-op on the
+    screening result itself (the production endpoint passes timings=None)."""
+
+    _KEYS = {"n_sats", "n_pairs", "n_windows", "n_events",
+             "t_coarse", "t_medium", "t_fine"}
+
+    def test_populates_every_key(self):
+        a, b = _crosser_pair()
+        t = {}
+        run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0, timings=t)
+        assert set(t) == self._KEYS
+        assert t["n_sats"] == 2
+        for k in ("t_coarse", "t_medium", "t_fine"):
+            assert isinstance(t[k], float) and t[k] >= 0.0
+
+    def test_timings_do_not_change_result(self):
+        """The byte-identical guarantee — timings is a passive side channel, so
+        the events with it on must equal the events with it off (default None)."""
+        a, b = _crosser_pair()
+        args = ([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0)
+        off = run_screen(*args)
+        on = run_screen(*args, timings={})
+        assert off == on
+        assert len(off) > 0  # the crosser really is found (not a vacuous equality)
+
+    def test_counts_match_result(self):
+        a, b = _crosser_pair()
+        t = {}
+        ev = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0, 50.0, timings=t)
+        assert t["n_pairs"] == 1                       # the one co-altitude pair
+        assert t["n_events"] == len(ev)
+        assert t["n_windows"] >= t["n_events"] > 0     # a window may refine out
+
+    def test_no_pairs_early_return_still_populates_zeros(self):
+        """Disjoint altitude bands → coarse cut → early return before medium.
+        The dict must still carry every key, with the un-run stages at 0."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+        meta[1] = {**meta[1], "periapsis_km": 20000.0, "apoapsis_km": 20200.0}
+        t = {}
+        ev = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0, timings=t)
+        assert ev == []
+        assert set(t) == self._KEYS
+        assert t["n_pairs"] == 0
+        assert t["n_windows"] == 0 and t["n_events"] == 0
+        assert t["t_medium"] == 0.0 and t["t_fine"] == 0.0
+
+
+class TestProfileHarness:
+    """scripts/profile_screening.py is the 7.1 runner. One smoke test so it
+    can't silently rot if run_screen's signature changes (they are coupled)."""
+
+    def test_profile_one_synth_returns_wellformed_row(self):
+        import tempfile
+
+        # scripts/ lives at the project root (one up from tests/).
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from scripts.profile_screening import _profile_one
+
+        with tempfile.TemporaryDirectory() as tmp:
+            t_load, tm = _profile_one("synth", 50, 2.0, 25.0, 60.0, tmp)
+        assert t_load >= 0.0
+        assert tm["n_sats"] == 50
+        assert TestRunScreenTimings._KEYS <= set(tm)
+
+
 class TestSeededScreenIntegration:
     """Demo seed → screener: the synthetic crosser must produce a flagged
     conjunction against the live stations catalog. Invariant-based (the crosser
