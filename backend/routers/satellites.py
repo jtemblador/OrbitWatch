@@ -182,15 +182,19 @@ async def get_track(
 async def get_conjunctions(
     request: Request,
     duration_hours: float = Query(default=24.0, gt=0, le=72.0),
-    threshold_km: float = Query(default=50.0, gt=0, le=500.0),
+    threshold_km: float | None = Query(default=None, gt=0, le=500.0),
     step_sec: float = Query(default=60.0, ge=1.0, le=600.0),
     time: str | None = None,
 ):
     """Screen the loaded catalog for close approaches over a time window.
 
-    Runs the cascade (coarse -> medium -> fine -> RTN) and returns events
-    sorted by miss distance, closest first. Geometric screening only — no Pc
-    (see project scope). An empty result is count: 0, not an error.
+    By default uses the SFS Handbook per-regime RTN screening **ellipsoids**
+    (radial-tight, along/cross-track loose), with co-located suppression and
+    de-dupe to unique pairs — so `count` is the number of at-risk pairs.
+    Geometric screening only — no Pc (see project scope). Pass `threshold_km`
+    to fall back to a single Euclidean miss threshold (legacy/debugging; no
+    suppression or de-dupe). Events are sorted by miss distance, closest first.
+    An empty result is count: 0, not an error.
 
     Note: use a 'Z' suffix (or %2B) in the time param — a literal '+' in a
     query string decodes to a space and breaks ISO parsing.
@@ -202,8 +206,10 @@ async def get_conjunctions(
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
     screener = ConjunctionScreener(propagator)
+    stats: dict = {}
     try:
-        events = screener.screen(start_utc, duration_hours, threshold_km, step_sec)
+        events = screener.screen(
+            start_utc, duration_hours, threshold_km, step_sec, timings=stats)
     except ValueError as e:
         # e.g. a screening window shorter than the time step
         raise HTTPException(status_code=422, detail=str(e))
@@ -214,6 +220,7 @@ async def get_conjunctions(
         "screening_start": start_utc.isoformat(),
         "duration_hours": duration_hours,
         "threshold_km": threshold_km,
+        "suppressed_count": stats.get("n_suppressed", 0),
         "last_fetched": freshness["last_fetched"],
         "data_max_epoch_age_days": freshness["max_epoch_age_days"],
         "events": events,

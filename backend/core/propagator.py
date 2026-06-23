@@ -361,6 +361,12 @@ class SatellitePropagator:
                 "epoch_age_days": epoch_age_days,
                 "periapsis_km": float(row["periapsis"]),
                 "apoapsis_km": float(row["apoapsis"]),
+                # 7.2 screening: object_id (intl designator, YYYY-DDDxxx) drives
+                # the shared-launch co-located guard; eccentricity + period pick
+                # the SFS screening-volume regime (screening_volumes.regime_for).
+                "object_id": str(row["object_id"]) if pd.notna(row["object_id"]) else "",
+                "eccentricity": float(row["eccentricity"]),
+                "period_min": float(row["period"]),
             })
 
         return satrecs, meta

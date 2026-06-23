@@ -948,11 +948,17 @@ class TestGetAllSatrecs(unittest.TestCase):
 
     def test_meta_has_all_screening_fields(self):
         required = {"norad_id", "name", "object_type", "epoch_age_days",
-                    "periapsis_km", "apoapsis_km"}
+                    "periapsis_km", "apoapsis_km",
+                    # 7.2 regime + suppression inputs (screening_volumes.regime_for
+                    # + co-located guard depend on these being present and typed)
+                    "object_id", "eccentricity", "period_min"}
         for m in self.meta:
             self.assertTrue(required.issubset(m.keys()))
             self.assertIsInstance(m["periapsis_km"], float)
             self.assertIsInstance(m["apoapsis_km"], float)
+            self.assertIsInstance(m["eccentricity"], float)
+            self.assertIsInstance(m["period_min"], float)
+            self.assertIsInstance(m["object_id"], str)
 
     def test_reuses_satrec_cache(self):
         """A second call returns the same cached Satrec objects (sgp4init is

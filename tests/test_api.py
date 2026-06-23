@@ -772,9 +772,11 @@ def _crosser_propagator():
     satrecs = [variant(), variant(180.2, 180.0)]
     meta = [
         {"norad_id": 25544, "name": "ISS (ZARYA)", "object_type": "PAYLOAD",
-         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0,
+         "object_id": "1998-067A", "eccentricity": 0.0004, "period_min": 92.9},
         {"norad_id": 90000, "name": "ISS CROSSER", "object_type": "DEBRIS",
-         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0,
+         "object_id": "2099-001A", "eccentricity": 0.0004, "period_min": 92.9},
     ]
 
     class _P:
@@ -860,6 +862,24 @@ class TestConjunctions(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["count"], 0)
         self.assertEqual(body["events"], [])
+
+    def test_sfs_default_excludes_radial_crosser_and_surfaces_counts(self):
+        """No threshold_km -> the SFS ellipsoid path (the new default). The
+        crosser's miss is radial-dominated (~3.6 km vs the 0.4 km LEO-1 radial
+        semi-axis), so the ellipsoid excludes it; the response advertises SFS
+        mode (threshold_km null) and carries suppressed_count."""
+        original = app.state.propagator
+        app.state.propagator = _crosser_propagator()
+        try:
+            resp = client.get(
+                f"/api/conjunctions?time={_CROSSER_TIME}&duration_hours=6")
+        finally:
+            app.state.propagator = original
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIsNone(body["threshold_km"])     # SFS volumes, not a scalar
+        self.assertIn("suppressed_count", body)
+        self.assertEqual(body["count"], 0)          # radial-dominated -> excluded
 
     def test_invalid_params_return_422(self):
         for query in ("duration_hours=0", "duration_hours=200",

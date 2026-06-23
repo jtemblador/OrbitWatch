@@ -14,12 +14,9 @@
  */
 
 const CONJ_DURATION_HOURS = 24;
-// A "watch" threshold — close enough to matter, not the 100 km firehose.
-// Phase 7.2 replaces this with per-regime asymmetric RTN screening volumes.
-const CONJ_THRESHOLD_KM = 25;
-// Skip essentially co-located objects (docked station modules sit at <5 m);
-// kept low so genuine sub-km conjunctions still show.
-const CONJ_MIN_VISIBLE_KM = 0.05;
+// 7.2: the backend now screens with the SFS per-regime RTN ellipsoids, suppresses
+// co-located / docked clusters, and de-dupes to unique pairs — so the client just
+// renders its events (no client-side threshold or min-miss floor needed anymore).
 const CONJ_LIST_MAX = 12;
 const CONJ_COLOR = Cesium.Color.ORANGE;
 // Start the clock this far BEFORE TCA (at 1x) so the full approach + closest
@@ -30,7 +27,8 @@ const TRAIL_BLUE = Cesium.Color.fromCssColorString("#4fc3f7").withAlpha(0.35);
 
 // State
 let conjEvents = [];                       // meaningful events, closest-first
-let conjTotalCount = 0;                     // total flagged (incl. degenerate)
+let conjTotalCount = 0;                     // at-risk pairs (server de-duped)
+let conjSuppressedCount = 0;                // co-located/docked pairs suppressed
 const conjByNorad = new Map();             // norad_id -> [events involving it]
 let conjOrb = null;                        // translucent yellow orb at the approach
 let conjTrails = [];                       // [{teme, positions, entity}] both orbits
@@ -221,8 +219,10 @@ function clearConjunctionFocus() {
 function renderConjunctionList() {
   const satCount = (typeof satelliteMetadata !== "undefined")
     ? satelliteMetadata.size : "—";
+  const suffix = conjSuppressedCount
+    ? ` · ${conjSuppressedCount} co-located hidden` : "";
   document.getElementById("conjunction-header").textContent =
-    `Conjunctions · ${conjTotalCount} flagged · ${satCount} sats`;
+    `Conjunctions · ${conjTotalCount} pairs · ${satCount} sats${suffix}`;
 
   const body = document.getElementById("conjunction-body");
   if (!conjEvents.length) {
@@ -289,8 +289,9 @@ function showConjunctionsFor(noradId) {
 
 async function fetchConjunctions() {
   try {
+    // No threshold_km → the backend's SFS ellipsoid volumes (the default).
     const url = `/api/conjunctions?time=${simClock.getTime()}`
-      + `&duration_hours=${CONJ_DURATION_HOURS}&threshold_km=${CONJ_THRESHOLD_KM}`;
+      + `&duration_hours=${CONJ_DURATION_HOURS}`;
     const resp = await fetch(url);
     if (!resp.ok) {
       console.error("Failed to fetch conjunctions:", resp.status);
@@ -299,7 +300,8 @@ async function fetchConjunctions() {
     const data = await resp.json();
 
     conjTotalCount = data.count;
-    conjEvents = data.events.filter(e => e.miss_distance_km >= CONJ_MIN_VISIBLE_KM);
+    conjSuppressedCount = data.suppressed_count || 0;
+    conjEvents = data.events;   // already SFS-filtered, suppressed, de-duped
     conjByNorad.clear();
     for (const e of conjEvents) {
       for (const id of [e.sat1_norad_id, e.sat2_norad_id]) {

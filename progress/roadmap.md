@@ -10,8 +10,8 @@
 > restricted to satellite operators and government agencies. Without that data, an ML model
 > would lack the features to outperform a well-tuned threshold, making it decoration rather
 > than engineering. We pivoted to making the conjunction detection pipeline itself the
-> centerpiece: industry-standard RTN coordinates, asymmetric screening volumes matching
-> 19 SDS tables, and validation against CelesTrak SOCRATES. The technical depth is in the
+> centerpiece: industry-standard RTN coordinates, asymmetric (ellipsoidal) screening volumes
+> matching the 19 SDS HAC tables, and validation against CelesTrak SOCRATES. The technical depth is in the
 > orbital mechanics and systems engineering, not in bolting on ML without a genuine purpose.
 
 > **Scope refinement (Jun 11) — the final sprint.** Reviewing the aerospace/defense roles being
@@ -95,8 +95,8 @@ Make it run on a real, dense catalog and use industry-standard geometry.
 
 - [x] **7.0 Live & epoch-matched data** — `SatellitePropagator(live=True, max_sats=N)` fetches the live `starlink` group fresh on load (`ORBITWATCH_LIVE=1`), slices a dense shell in-app, and surfaces `last_fetched` + `data_max_epoch_age_days` on `/api/conjunctions`. Verified live: 10,544 → 300, freshness exposed (file fresh, epochs 13.7 d → shows *why* live matters). "Live" = fresh-on-load + manual refresh; the auto-refresh **scheduler** is **9.7** (fetch-on-demand is enough through Phase 8). 5 tests; 381 passing. See `task_logs/task_7_0_live_data.md`.
 - [x] **7.1 Scale to dense LEO (profile-first)** — instrumented `run_screen(timings=…)` (passive; no behavior change) + `scripts/profile_screening.py`, then profiled the real 10,544-sat Starlink catalog. **Findings reorder the rest of Phase 7:** (1) the coarse filter does **NOT** eliminate the majority — it's inclination-blind, so **49% of pairs survive at 50 km** on a single constellation (shells stack into ~475 km); the 25 M survivor tuples are the **memory** driver (4.5 GB). (2) The **fine stage is the time bottleneck — 82–87% of wall time at every scale**, driven by window count (300 sats → 14.7 k; full → **1.43 M**), so 7.2's de-dupe/suppression is a perf lever and 7.3's fine-stage batching is the primary speedup. (3) **Operating point: `MAX_SATS=300` = 2.6 s @ 24 h** (demo default, validated); full catalog = 258 s / 4.5 GB → batch-only until 7.2 + 7.3. 5 tests; 386 passing. See `task_logs/task_7_1_scale_profile.md`.
-- [ ] **7.2 Asymmetric screening volumes + co-located suppression** — (a) replace the single distance threshold with SFS Handbook per-regime RTN boxes (e.g., LEO 1: R = 0.4 km, T = 44 km, N = 51 km) — *why* RTN matters, tight radially / loose along-track. (b) **Suppress co-located / persistent-proximity pairs** (docked modules, parked constellation sats) via a min-miss floor + low-relative-velocity (or shared international-designator) guard. Asymmetric volumes alone do **not** catch these — both objects sit inside the box — so without this the screen counts non-crossing clusters as conjunctions, distorting the Phase-8 false-positive analysis. *(Found in 6.7/6.9: stations docked modules at ~0 km; Starlink 0.34 km @ 1.26 km/s — currently only hidden client-side by the viz floor.)* **Also a performance lever (7.1 profile):** de-dupe to unique pairs + co-located suppression cut the flagged-window count that drives the fine stage (82–87% of wall time) — do this before 7.3's fine-stage batching.
-- [ ] **7.3 Performance pass** *(now scoped by 7.1's profile; use `scripts/profile_screening.py` for before/after)*. Priority order, by measured share of wall time: (1) **fine stage first** — it's **82–87%** of the time (the Python per-window `fine_filter` loop; full catalog = 1.43 M windows → 223 s). Batch its SGP4 evals in C++ (`propagate_batch`) and lean on 7.2 to cut the window count. (2) **coarse→medium boundary** (`scaling_tracker #3`) — the **memory** fix (25 M tuples → 4.5 GB), not a big time win; fuse the cut inside `medium_filter`. (3) **un-block the event loop** (`#4` → `run_in_threadpool`) + a sane default screening cap (full catalog = 258 s today). Record "screened N objects, M pairs, in T s".
+- [x] **7.2 Ellipsoidal screening volumes + co-located suppression** — `screening_volumes.py` (SFS Table 3 **RTN ellipsoids** `(r/R)²+(t/T)²+(n/N)²≤1`, regime by **perigee** + **ecc<0.25**) + `run_screen(volumes=…)`: per-pair ellipsoid cut, medium gross = **largest semi-axis (51 km LEO 1, no-skip)**, **Conservative-drop** co-located suppression (`v_rel<0.5 AND (miss<0.05 OR shared YYYY-DDD launch)` — mirrors 19 SDS's "relative speed too small" Pc skip), **de-dupe to unique pairs** *(closes 9.1's de-dupe item, server-side)*. Default on `/api/conjunctions`; `threshold_km` = optional legacy-Euclidean override; `screening_regime` + `suppressed_count` surfaced; output stays geometric (no Pc). **Validated on real data:** Starlink shell (300) → **7 conjunctions**, all radially tight (r≈±0.3 km) with ~26 km in-track — real co-altitude crossings a 25 km Euclidean cut *misses*; live stations → **0 events, 46 suppressed** (docked modules gone, was 57); synthetic crosser correctly excluded (3.6 km radial ≫ 0.4 km axis → the default demo shifts to a real Starlink shell). The radial coarse-pad tightening (perf) deferred to 7.3 (needs a measured SGP4 radial-drift bound). +23 tests; 409 passing. See `task_logs/task_7_2_screening_volumes.md`.
+- [ ] **7.3 Performance pass** *(now scoped by 7.1's profile; use `scripts/profile_screening.py` for before/after)*. Priority order, by measured share of wall time: (1) **fine stage first** — it's **82–87%** of the time (the Python per-window `fine_filter` loop; full catalog = 1.43 M windows → 223 s). Batch its SGP4 evals in C++ (`propagate_batch`) and lean on 7.2 to cut the window count. (2) **coarse→medium boundary** (`scaling_tracker #3`) — the **memory** fix (25 M tuples → 4.5 GB), not a big time win; fuse the cut inside `medium_filter`. (3) **un-block the event loop** (`#4` → `run_in_threadpool`) + a sane default screening cap (full catalog = 258 s today). (4) **tighten the radial coarse pad** — 7.2 made the screening volume's radial axis tiny (0.4 km), so the coarse pad can shrink from the flat ~51 km toward `R + SGP4 radial-drift bound`, cutting survivors before the fine stage; needs a measured radial-drift margin to stay no-skip (deferred from 7.2). Record "screened N objects, M pairs, in T s".
 - [ ] **7.4 Enable type filters** — turn on the PAYLOAD / ROCKET BODY / DEBRIS checkboxes in `controls.js` (code already exists; useful once the catalog has real types).
 - [ ] **7.5 Tests** — screening-volume logic + scale/perf regression check.
 
@@ -118,7 +118,7 @@ The credibility anchor: prove our detections match reality. SOCRATES (now "SOCRA
 ## Phase 9: Polish, Package, Demo (Jul 5 – Jul 10)
 Turn it into something a recruiter can run and watch.
 
-- [~] **9.1 Frontend** — *interactive core done early (Jun 22, `task_logs/task_9_1_conjunction_ux.md`):* click-a-conjunction → fly-to + jump to TCA-5min at 1× + yellow orb + both orbit trails; selection-driven bottom-right detail panel (RTN, miss, rel-speed, TCA); clickable list; label de-overlap; LIVE button; `N flagged · M sats` header. **Still open:** alert-table sorting / TCA countdown, severity color-coding, "matched SOCRATES?" status, de-dupe to unique pairs, re-screen on large time jumps.
+- [~] **9.1 Frontend** — *interactive core done early (Jun 22, `task_logs/task_9_1_conjunction_ux.md`):* click-a-conjunction → fly-to + jump to TCA-5min at 1× + yellow orb + both orbit trails; selection-driven bottom-right detail panel (RTN, miss, rel-speed, TCA); clickable list; label de-overlap; LIVE button; `N flagged · M sats` header. **Still open:** alert-table sorting / TCA countdown, severity color-coding, "matched SOCRATES?" status, re-screen on large time jumps. *(De-dupe to unique pairs moves server-side in 7.2.)*
 - [ ] **9.2 README rewrite** — remove all ML framing, add architecture diagram, screenshots, run instructions.
 - [ ] **9.3 Clean stale ML references** — `PROJECT_PLAN.md`, `requirements.txt`, `progress/week0_setup.md`, `progress/notes/week0_notes.md`, and the `1plan.md` instruction file.
 - [ ] **9.4 Docker** — `Dockerfile` + `docker-compose.yml` for one-command startup (backend + frontend + SPICE kernels + C++ build). **Handle data bootstrap:** the catalog parquets are gitignored, so the image has no data — fetch the catalog on first startup (or bake a snapshot), otherwise a fresh container serves an empty screen.
@@ -136,7 +136,7 @@ Turn it into something a recruiter can run and watch.
 |------|-----------|-----------|
 | ✅ Apr 30 | Foundation done — C++ SGP4, FastAPI, interactive 3D globe, 279 tests | Yes |
 | ✅ Jun 21 | **Phase 6:** full conjunction pipeline end-to-end on real Starlink data — 607 natural conjunctions (closest 0.34 km), visible on globe, 377 tests | Yes |
-| Jun 27 | **Phase 7:** full-catalog screening with industry screening volumes + perf numbers | Yes |
+| Jun 27 | **Phase 7:** full-catalog screening with industry **ellipsoidal** RTN screening volumes + measured perf numbers | Yes |
 | Jul 4  | **Phase 8:** detections validated against CelesTrak SOCRATES | Yes |
 | Jul 10 | **Phase 9:** polished, Dockerized, demo recorded — portfolio-ready | Portfolio-ready |
 
@@ -157,6 +157,16 @@ Turn it into something a recruiter can run and watch.
 
 > **Dataset assumption:** "dense LEO" = Starlink and/or the active catalog. SOCRATES screens the
 > full catalog, so Phase 8 fetches the specific objects SOCRATES flags and confirms we detect them.
+
+> **Industry screening model (Phase 7.2) — SFS Handbook V1.7, HAC vs HAC.** The 19 SDS screening
+> volume is an **RTN ellipsoid**, not a box: `(r/R)² + (t/T)² + (n/N)² ≤ 1`, semi-axes from HAC
+> Table 3 by **perigee** (with an **ecc < 0.25** gate). Our data is **LEO 1** (R/T/N = 0.4 / 44 / 51 km):
+> radial tight, along/cross-track loose. The medium-filter no-skip gross threshold = the **largest
+> semi-axis (51 km)**, not the box-corner. 19 SDS itself **skips Pc when relative speed is "too small"**
+> (user-settable) → precedent for our co-located suppression; same-launch objects share the
+> **YYYY-DDD** international-designator prefix. **RTN = RIC = UVW.** We output **geometry + regime,
+> never Pc** (no covariance). Full model + page citations: `progress/week6and7_planning/sfs_handbook_summary.md`
+> (re-read addendum, Jun 22).
 
 > **Conjunction data sources (Phase 8).** SOCRATES-Plus = open/no-auth, SGP4-based (same method),
 > ~14,000 primaries × ~29,600 secondaries, 108,000+ conjunctions, refreshed ~2×/day. Query:

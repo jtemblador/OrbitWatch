@@ -124,12 +124,21 @@ class ConjunctionEvent(BaseModel):
     t_km: float                 # in-track
     n_km: float                 # cross-track
 
+    # SFS screening regime whose RTN ellipsoid this event satisfies (e.g.
+    # "LEO 1"); "" for the legacy Euclidean-threshold path.
+    screening_regime: str = ""
+
 
 class ConjunctionResponse(BaseModel):
-    count: int
+    count: int                  # at-risk pairs (de-duped) in SFS mode
     screening_start: str        # ISO 8601 UTC
     duration_hours: float
-    threshold_km: float
+    # SFS ellipsoidal screening volumes (per-regime) when null; a number means
+    # the legacy Euclidean miss threshold (km) was used instead.
+    threshold_km: float | None
+    # Co-located / persistent-proximity pairs dropped (docked modules, parked
+    # formations) — 0 in legacy mode. See screening_volumes / Conservative-drop.
+    suppressed_count: int = 0
     # Catalog freshness: when the GP data was last fetched, and the oldest
     # orbital epoch in the set (epoch age drives SGP4 accuracy — see Phase 8
     # epoch-matching). last_fetched is None if the catalog carries no fetch time.

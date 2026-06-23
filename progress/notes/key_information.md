@@ -316,6 +316,86 @@ driver; the wall time lived in the fine stage — a place the plan had as a one-
 
 ---
 
+## Industry Screening Volumes — SFS Handbook V1.7 (Phase 7.2)
+
+Authoritative model from a full re-read of `SFS_Handbook_For_Operators_V1.7.pdf` (HAC vs HAC = our
+SGP4 self-screen). Full notes + page cites: `progress/week6and7_planning/sfs_handbook_summary.md`
+(re-read addendum).
+
+- **⚠ The screening volume is an RTN ELLIPSOID, not a box** (p.10: "ellipsoid and covariance
+  screenings"). In-volume test on the fine-stage miss vector:
+  ```
+  (r / R)^2 + (t / T)^2 + (n / N)^2  <=  1
+  ```
+  The earlier "asymmetric box" framing was wrong. (The *reporting* criteria, Table 6, use a box —
+  distinct from the screening *volume*.)
+- **HAC Table 3 regimes** — keyed by **perigee**, all gated on **eccentricity < 0.25**. Semi-axes
+  R/T/N (km); `gross` = largest semi-axis (see no-skip below):
+
+  | Regime | Perigee | R | T | N | gross |
+  |--------|---------|---|---|---|-------|
+  | **LEO 1** | ≤ 500 km | 0.4 | 44 | 51 | **51** |
+  | LEO 2 | 500–750 | 0.4 | 25 | 25 | 25 |
+  | LEO 3 | 750–1200 | 0.4 | 12 | 12 | 12 |
+  | LEO 4 | 1200–2000 | 0.4 | 2 | 2 | 2 |
+  | Deep Space | 1300<P<1800 min, inc<35° | 10 | 10 | 10 | 10 |
+
+  Our Starlink/stations data is **LEO 1**. Radial (0.4 km) is tight/well-determined; along- &
+  cross-track (44/51) are loose (timing-dominated) — *why a single Euclidean threshold is wrong*.
+- **⚠ No-skip invariant (medium filter):** the gross threshold passed to `medium_filter` must be the
+  **largest semi-axis** = `max(R, T, N)` (51 km for LEO 1) — any point inside an ellipsoid has
+  Euclidean norm ≤ its largest semi-axis. This is the box-corner `√(R²+T²+N²)` ≈ 67 km only if it
+  were a box; it is not. Below 51 km, an in-ellipsoid event with a large along-track offset would be
+  silently skipped.
+- **Coarse pad shrinks → perf win:** coarse is altitude-band (radial), and the radial semi-axis is
+  only 0.4 km, so `pad ≈ R + SGP4 drift margin` (a few km) — far tighter than the old flat 50 km,
+  cutting survivors before the fine stage (the 7.1 bottleneck). Still no-skip: an in-ellipsoid event
+  needs the two altitude bands to coincide within ~R.
+- **Co-located suppression has direct SDS precedent:** 19 SDS **does not compute Pc when the
+  relative speed is "too small"** (user-settable — Annex A, p.45). **Conservative-drop** policy:
+  suppress if `v_rel < V_floor AND (miss < MIN_MISS_FLOOR OR shared launch designator)`. Same-launch
+  objects share the **`YYYY-DDD`** international-designator prefix (the `object_id` column) — our
+  parked-formation signal.
+- **De-dupe to unique pairs:** `medium_filter` emits one row per flagged window per pair (a crossing
+  repeats per node-pass), so collapse to one event per unordered pair = the closest approach.
+  Reported `count` = at-risk pairs.
+- **Output is geometric, never Pc:** TCA, RTN miss vector, relative speed, in-ellipsoid flag +
+  regime label. No covariance → no Pc (project scope).
+- **Frame:** **RTN = RIC = UVW** (handbook, Annex A): U = Radial, V = Transverse/In-track,
+  W = Normal/Cross-track. Matches our `teme_to_rtn` (Vallado RSW). Collision plane (⊥ relative
+  velocity) is Pc-only — not needed for the volume test.
+- **Units when comparing to real CDMs/SOCRATES (Phase 8):** a CDM is in **meters / m·s⁻¹**; our API
+  is **km / km·s⁻¹**. Pc method in CDMs is `FOSTER-1992`. Annex C has a real worked example,
+  **STARLINK-61 vs COSMOS 1408 DEB** (a strong demo/validation narrative).
+
+**Implemented (7.2, `backend/core/screening_volumes.py` + `conjunctions.py`):**
+```python
+regime_for(perigee_km, eccentricity, period_min) -> ScreeningVolume   # SFS Table 3
+vol.contains(r, t, n)            # (r/R)^2+(t/T)^2+(n/N)^2 <= 1  (ellipsoid)
+vol.circumscribing_radius()      # = max semi-axis = medium no-skip gross
+# SFS path is the default when volumes given / threshold_km is None:
+run_screen(..., volumes=[ScreeningVolume,...], suppress=True)         # ellipsoid + suppress + de-dupe
+ConjunctionScreener(prop).screen(start, hours)                        # builds volumes from meta
+GET /api/conjunctions            # no threshold_km -> SFS; a value -> legacy Euclidean
+#   -> { count(=at-risk pairs), suppressed_count, threshold_km|null, events:[…, screening_regime] }
+```
+- **Conservative-drop constants** (`conjunctions.py`, tunable): `_V_REL_FLOOR_KM_S = 0.5`,
+  `_MIN_MISS_FLOOR_KM = 0.05`. Suppress iff `v_rel < 0.5 AND (miss < 0.05 OR same YYYY-DDD launch)`.
+- **Legacy Euclidean path preserved** (scalar `threshold_km`, no suppression/de-dupe) for the API
+  override + the 18 pre-7.2 tests. `meta` now also carries `object_id`/`eccentricity`/`period_min`.
+- **⚠ The SFS volume is SELECTIVE — it finds different, often FEWER conjunctions than a Euclidean
+  cut.** Validated: real Starlink shell (300) → **7** unique pairs, all radially tight (r ≈ ±0.3 km)
+  with ~26 km in-track — real co-altitude crossings at 26–36 km *Euclidean* miss that a 25 km
+  Euclidean cut **misses**. Live stations → **0 events, 46 suppressed** (docked modules gone, was 57).
+  The synthetic demo crosser is **excluded** (3.6 km radial ≫ 0.4 km axis) → the default `stations`
+  demo shows 0 conjunctions; use a **real Starlink shell** for a populated demo (or `?threshold_km=`
+  for the legacy view). "Close" means close *radially*, not in raw range.
+- **Coarse pad stays = circumscribing radius (51 km, no-skip).** Tighter *radial* pad (≈ R + drift)
+  = a 7.3 perf item (needs a measured SGP4 radial-drift bound). MEO/HEO default to LEO 1 (pragmatic,
+  not a no-skip bound — out of scope; our data is LEO).
+
+---
+
 **⚠️ Mocking lesson (6.0 escape, caught in 6.5):** "mocked the class" ≠ "mocked every call site."
 One refresh test mocked `reload_data` but not `fetcher.fetch` — it stayed offline only while the
 2 h cache was fresh, then silently went live mid-session (24 s network hang per run). Cache-TTL
@@ -485,9 +565,10 @@ difference. So Phase 8 must screen with GP data from the same time SOCRATES used
   that's a strong "we catch real threats" story. **Detection-only — we do NOT use the `PC` field.**
 - Also the better source for full-catalog/debris TLEs later (Phase 4 territory).
 
-**Method provenance:** Our screening geometry (asymmetric RTN screening volumes) comes from the
-**Spaceflight Safety Handbook for Operators** (a.k.a. SFS Handbook), the 18/19 SDS operator doc —
-on disk (see Resources table). Summary in `progress/week6and7_planning/sfs_handbook_summary.md`.
+**Method provenance:** Our screening geometry (asymmetric RTN **ellipsoidal** screening volumes —
+see "Industry Screening Volumes" section above) comes from the **Spaceflight Safety Handbook for
+Operators** (a.k.a. SFS Handbook), the 18/19 SDS operator doc — on disk (see Resources table).
+Summary in `progress/week6and7_planning/sfs_handbook_summary.md`.
 
 ---
 

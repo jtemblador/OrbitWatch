@@ -17,8 +17,19 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 import orbitcore
-from core.conjunctions import ConjunctionScreener, fine_filter, run_screen
+from core.conjunctions import (
+    ConjunctionScreener,
+    _dedupe_to_unique_pairs,
+    fine_filter,
+    run_screen,
+)
 from core.coordinate_transforms import teme_to_rtn, utc_to_jd
+from core.screening_volumes import LEO_1, ScreeningVolume
+
+# A deliberately generous ellipsoid (10 km on every axis) for tests that need an
+# encounter to fall *inside* the volume — the real LEO-1 radial axis (0.4 km) is
+# tighter than the crosser fixture's radial separation (see the exclusion test).
+_GENEROUS = ScreeningVolume("TEST", 10.0, 10.0, 10.0)
 
 # --- Fixtures: ISS + the fast-crosser (same as TestMediumFilter) ----------
 
@@ -183,12 +194,16 @@ class TestFineFilter:
 
 def _crosser_meta():
     """Index-aligned metadata for _crosser_pair(): two co-altitude ISS-band
-    objects (so coarse_filter always pairs them)."""
+    objects (so coarse_filter always pairs them). Carries the 7.2 fields
+    (object_id / eccentricity / period_min) so the SFS path can classify them
+    (both -> LEO 1); different launch ids so they're not suppressed as same-launch."""
     return [
         {"norad_id": 25544, "name": "ISS (ZARYA)", "object_type": "PAYLOAD",
-         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0,
+         "object_id": "1998-067A", "eccentricity": 0.0004, "period_min": 92.9},
         {"norad_id": 90000, "name": "ISS CROSSER", "object_type": "DEBRIS",
-         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0},
+         "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0,
+         "object_id": "2099-001A", "eccentricity": 0.0004, "period_min": 92.9},
     ]
 
 
@@ -355,7 +370,7 @@ class TestRunScreenTimings:
     and counts for scripts/profile_screening.py, and is a provable no-op on the
     screening result itself (the production endpoint passes timings=None)."""
 
-    _KEYS = {"n_sats", "n_pairs", "n_windows", "n_events",
+    _KEYS = {"n_sats", "n_pairs", "n_windows", "n_events", "n_suppressed",
              "t_coarse", "t_medium", "t_fine"}
 
     def test_populates_every_key(self):
@@ -418,6 +433,137 @@ class TestProfileHarness:
         assert TestRunScreenTimings._KEYS <= set(tm)
 
 
+class TestScreeningVolumesPath:
+    """7.2 SFS path: run_screen(volumes=…) applies the per-pair RTN ellipsoid,
+    suppresses co-located pairs, and de-dupes to unique pairs."""
+
+    def test_requires_threshold_or_volumes(self):
+        a, b = _crosser_pair()
+        try:
+            run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0)
+            assert False, "expected ValueError (neither threshold nor volumes)"
+        except ValueError:
+            pass
+
+    def test_volumes_length_mismatch_raises(self):
+        a, b = _crosser_pair()
+        try:
+            run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                       volumes=[_GENEROUS])
+            assert False, "expected ValueError (volumes not index-aligned)"
+        except ValueError:
+            pass
+
+    def test_ellipsoid_excludes_radial_dominated_miss(self):
+        """The headline 7.2 behavior. The crosser's ~6.6 km miss is mostly
+        *radial* (~3.6 km); the SFS LEO-1 ellipsoid (radial semi-axis 0.4 km)
+        excludes it, though a 50 km Euclidean cut flags it. Radial separation is
+        well-determined — a 3.6 km radial gap is not a collision risk."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+        assert len(run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)) > 0
+        sfs = run_screen([a, b], meta, _iss_epoch_dt(), 6.0,
+                         volumes=[LEO_1, LEO_1])
+        assert sfs == []
+
+    def test_generous_volume_includes_dedupes_and_tags_regime(self):
+        """A volume that contains the miss flags the pair; the many node-pass
+        windows collapse to ONE event, tagged with the regime name."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+        windows = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
+        assert len(windows) >= 2          # crossing repeats over 6 h
+        sfs = run_screen([a, b], meta, _iss_epoch_dt(), 6.0,
+                         volumes=[_GENEROUS, _GENEROUS])
+        assert len(sfs) == 1              # de-duped to the unique pair
+        assert sfs[0]["screening_regime"] == "TEST"
+        assert sfs[0]["relative_speed_km_s"] > 1.0   # a real crossing, not co-located
+
+    def test_dedupe_keeps_closest_per_unordered_pair(self):
+        evs = [
+            {"sat1_norad_id": 1, "sat2_norad_id": 2, "miss_distance_km": 9.0},
+            {"sat1_norad_id": 2, "sat2_norad_id": 1, "miss_distance_km": 3.0},
+            {"sat1_norad_id": 1, "sat2_norad_id": 3, "miss_distance_km": 5.0},
+        ]
+        out = _dedupe_to_unique_pairs(evs)
+        assert len(out) == 2  # {1,2} and {1,3}
+        pair12 = next(e for e in out
+                      if {e["sat1_norad_id"], e["sat2_norad_id"]} == {1, 2})
+        assert pair12["miss_distance_km"] == 3.0  # closest, order-independent
+
+    def test_co_located_pair_suppressed(self):
+        """Two identical objects (miss ~0, v_rel ~0) are co-located, not
+        crossing — Conservative-drop suppresses them and reports the count."""
+        meta = [_crosser_meta()[0],
+                {**_crosser_meta()[0], "norad_id": 25545}]
+        t = {}
+        sfs = run_screen([_make_variant(), _make_variant()], meta,
+                         _iss_epoch_dt(), 6.0,
+                         volumes=[_GENEROUS, _GENEROUS], timings=t)
+        assert sfs == []
+        assert t["n_suppressed"] >= 1
+
+    def test_suppress_false_keeps_co_located(self):
+        meta = [_crosser_meta()[0],
+                {**_crosser_meta()[0], "norad_id": 25545}]
+        sfs = run_screen([_make_variant(), _make_variant()], meta,
+                         _iss_epoch_dt(), 6.0,
+                         volumes=[_GENEROUS, _GENEROUS], suppress=False)
+        assert len(sfs) == 1   # kept (and de-duped)
+
+    def test_same_launch_low_v_rel_suppressed(self):
+        """Same-launch designator + low relative speed (a parked formation) is
+        suppressed even when the miss is above the docked floor."""
+        # A slow co-orbital neighbour: small mean-anomaly offset -> a few km
+        # in-track, low v_rel, same launch id.
+        a = _make_variant()
+        b = _make_variant(dmo_deg=0.03)        # ~few km along-track, co-altitude
+        same = {"norad_id": 25544, "name": "A", "object_type": "PAYLOAD",
+                "epoch_age_days": 1.0, "periapsis_km": 410.0, "apoapsis_km": 420.0,
+                "object_id": "1998-067A", "eccentricity": 0.0004, "period_min": 92.9}
+        meta = [same, {**same, "norad_id": 25545, "object_id": "1998-067Z"}]
+        t = {}
+        out = run_screen([a, b], meta, _iss_epoch_dt(), 6.0,
+                         volumes=[_GENEROUS, _GENEROUS], timings=t)
+        # low v_rel + shared 1998-067 launch -> suppressed
+        assert out == [] and t["n_suppressed"] >= 1
+
+    def test_screener_sfs_default_builds_volumes_from_meta(self):
+        """Through the ConjunctionScreener seam: screen() with no threshold
+        builds each object's SFS volume from meta (regime_for) and runs the
+        ellipsoid path. The radial-dominated crosser is excluded (LEO 1) while
+        the legacy override still flags it — and SFS stats thread through."""
+        a, b = _crosser_pair()
+        meta = _crosser_meta()
+
+        class _FakeProp:
+            def get_all_satrecs(self):
+                return [a, b], meta
+
+        t = {}
+        sfs = ConjunctionScreener(_FakeProp()).screen(
+            _iss_epoch_dt(), 6.0, timings=t)
+        assert sfs == []              # excluded by the 0.4 km radial semi-axis
+        assert "n_suppressed" in t    # SFS stats surfaced via timings
+        leg = ConjunctionScreener(_FakeProp()).screen(_iss_epoch_dt(), 6.0, 50.0)
+        assert len(leg) > 0           # legacy Euclidean override still flags it
+
+    def test_screener_sfs_suppresses_co_located(self):
+        """End-to-end through the screener: two identical orbits (miss ~0,
+        v_rel ~0) are co-located and suppressed under the SFS default."""
+        meta = _crosser_meta()
+
+        class _FakeProp:
+            def get_all_satrecs(self):
+                return [_make_variant(), _make_variant()], meta
+
+        t = {}
+        out = ConjunctionScreener(_FakeProp()).screen(
+            _iss_epoch_dt(), 6.0, timings=t)
+        assert out == []
+        assert t["n_suppressed"] >= 1
+
+
 class TestSeededScreenIntegration:
     """Demo seed → screener: the synthetic crosser must produce a flagged
     conjunction against the live stations catalog. Invariant-based (the crosser
@@ -472,6 +618,12 @@ class TestDenseShellScale:
             events = ConjunctionScreener(prop).screen(start, 6.0, 100.0)
             elapsed = time.perf_counter() - t0
 
+            # 7.2: the SFS default (no threshold) also runs at scale through the
+            # propagator seam — builds per-object volumes, suppresses, de-dupes.
+            sfs_stats = {}
+            sfs_events = ConjunctionScreener(prop).screen(
+                start, 6.0, timings=sfs_stats)
+
         # Criterion 2: a conjunction flows through (the crosser at minimum).
         crosser = [e for e in events
                    if DEMO_CROSSER_ID in (e["sat1_norad_id"], e["sat2_norad_id"])]
@@ -484,3 +636,13 @@ class TestDenseShellScale:
         # Loose bound (real ~0.2–2 s) — a guard against pathological regressions,
         # not a precise benchmark.
         assert elapsed < 30.0
+
+        # Criterion 3 (7.2): the SFS result is de-duped to unique pairs and every
+        # event carries a regime label.
+        assert isinstance(sfs_stats["n_suppressed"], int)
+        seen = set()
+        for e in sfs_events:
+            key = frozenset((e["sat1_norad_id"], e["sat2_norad_id"]))
+            assert key not in seen, "SFS result not de-duped to unique pairs"
+            seen.add(key)
+            assert e["screening_regime"], "SFS event missing regime label"
