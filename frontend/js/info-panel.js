@@ -98,6 +98,9 @@ async function selectSatellite(noradId) {
   document.getElementById("trail-checkbox").checked = true;
   createNadirLine(noradId);
   await fetchAndRenderTrail(noradId);
+
+  // Show this satellite's conjunctions (conjunctions.js, if loaded)
+  if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
 }
 
 function deselectSatellite() {
@@ -107,6 +110,7 @@ function deselectSatellite() {
   cachedDenseTEME = null;
   clearNadirLine();
   clearSelectionIndicator();
+  if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
 }
 
 // --- Selection Indicator (highlight selected satellite's point) ---

@@ -58,6 +58,15 @@ const simClock = (() => {
     return speed;
   }
 
+  /** Jump simulated time to an absolute instant (ms since Unix epoch).
+   *  Re-anchors so the new time advances correctly from here. Used to fast-
+   *  travel to a conjunction's TCA so the two satellites converge on screen. */
+  function setTime(ms) {
+    baseSimTime = ms;
+    baseWallTime = Date.now();
+    updateUI();
+  }
+
   // --- Time Bar UI ---
 
   const bar = document.createElement("div");
@@ -67,9 +76,10 @@ const simClock = (() => {
     <span id="time-display"></span>
     <span id="time-speed-group">
       <button class="time-speed active" data-speed="1">1×</button>
+      <button class="time-speed" data-speed="5">5×</button>
       <button class="time-speed" data-speed="10">10×</button>
-      <button class="time-speed" data-speed="60">60×</button>
     </span>
+    <button id="time-live" title="Jump back to the current time">LIVE</button>
   `;
   document.body.appendChild(bar);
 
@@ -82,6 +92,13 @@ const simClock = (() => {
     if (!e.target.classList.contains("time-speed")) return;
     const n = parseInt(e.target.dataset.speed);
     setSpeed(n);
+  });
+
+  // LIVE — return the clock to the present and drop any conjunction focus.
+  bar.querySelector("#time-live").addEventListener("click", () => {
+    setTime(Date.now());
+    setSpeed(1);
+    if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
   });
 
   function updateUI() {
@@ -110,5 +127,5 @@ const simClock = (() => {
   setInterval(tick, 250);
   tick(); // initial render
 
-  return { getTime, getTimeMs, isPaused, togglePause, setSpeed, getSpeed };
+  return { getTime, getTimeMs, isPaused, togglePause, setSpeed, getSpeed, setTime };
 })();

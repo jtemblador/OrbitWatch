@@ -208,11 +208,14 @@ async def get_conjunctions(
         # e.g. a screening window shorter than the time step
         raise HTTPException(status_code=422, detail=str(e))
 
+    freshness = propagator.data_freshness()
     return {
         "count": len(events),
         "screening_start": start_utc.isoformat(),
         "duration_hours": duration_hours,
         "threshold_km": threshold_km,
+        "last_fetched": freshness["last_fetched"],
+        "data_max_epoch_age_days": freshness["max_epoch_age_days"],
         "events": events,
     }
 

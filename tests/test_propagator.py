@@ -1025,5 +1025,57 @@ class TestDemoSeed(unittest.TestCase):
         self.assertNotIn(self.DEMO_ID, {m["norad_id"] for m in meta2})
 
 
+class TestLiveModeAndFreshness(unittest.TestCase):
+    """Phase 7.0 — live fetch-on-load, in-app shell slice, and catalog
+    freshness. Uses a mocked fetcher + synthetic data (offline/deterministic)."""
+
+    @staticmethod
+    def _fetcher(df):
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.fetch.return_value = df
+        m.load_cached.return_value = df
+        return m
+
+    def test_live_mode_fetches_fresh(self):
+        """live=True loads via fetcher.fetch (fresh-if-stale), not load_cached."""
+        from backend.core.demo_seed import build_synthetic_shell
+        f = self._fetcher(build_synthetic_shell(n=10))
+        prop = SatellitePropagator(group="starlink", fetcher=f, live=True)
+        out = prop._ensure_data()
+        f.fetch.assert_called_once_with("starlink")
+        f.load_cached.assert_not_called()
+        self.assertEqual(len(out), 10)
+
+    def test_non_live_uses_cache(self):
+        """Default (live=False) serves cache — keeps the suite offline."""
+        from backend.core.demo_seed import build_synthetic_shell
+        f = self._fetcher(build_synthetic_shell(n=10))
+        prop = SatellitePropagator(group="stations", fetcher=f, live=False)
+        prop._ensure_data()
+        f.load_cached.assert_called_once_with("stations")
+        f.fetch.assert_not_called()
+
+    def test_max_sats_slices_in_app(self):
+        """max_sats caps the loaded catalog to one shell (≤ N)."""
+        from backend.core.demo_seed import build_synthetic_shell
+        f = self._fetcher(build_synthetic_shell(n=50))
+        prop = SatellitePropagator(
+            group="starlink", fetcher=f, live=True, max_sats=20)
+        out = prop._ensure_data()
+        self.assertEqual(len(out), 20)
+        # positional index invariant preserved for get_all_satrecs/iloc
+        self.assertEqual(list(out.index), list(range(20)))
+
+    def test_data_freshness_reports_fetch_and_epoch_age(self):
+        from backend.core.demo_seed import build_synthetic_shell
+        f = self._fetcher(build_synthetic_shell(n=10))  # epoch 2026-06-01
+        prop = SatellitePropagator(group="starlink", fetcher=f, live=True)
+        info = prop.data_freshness()
+        self.assertIsNotNone(info["last_fetched"])
+        # synthetic epoch is in the past → a positive age
+        self.assertGreater(info["max_epoch_age_days"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

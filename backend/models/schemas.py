@@ -130,4 +130,9 @@ class ConjunctionResponse(BaseModel):
     screening_start: str        # ISO 8601 UTC
     duration_hours: float
     threshold_km: float
+    # Catalog freshness: when the GP data was last fetched, and the oldest
+    # orbital epoch in the set (epoch age drives SGP4 accuracy — see Phase 8
+    # epoch-matching). last_fetched is None if the catalog carries no fetch time.
+    last_fetched: str | None
+    data_max_epoch_age_days: float
     events: list[ConjunctionEvent]

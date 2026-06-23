@@ -781,6 +781,10 @@ def _crosser_propagator():
         def get_all_satrecs(self):
             return satrecs, meta
 
+        def data_freshness(self):
+            return {"last_fetched": "2024-02-25T00:00:00+00:00",
+                    "max_epoch_age_days": 1.0}
+
     return _P()
 
 
@@ -798,11 +802,14 @@ class TestConjunctions(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         for key in ("count", "screening_start", "duration_hours",
-                    "threshold_km", "events"):
+                    "threshold_km", "last_fetched", "data_max_epoch_age_days",
+                    "events"):
             self.assertIn(key, body)
         self.assertEqual(body["count"], len(body["events"]))
         self.assertEqual(body["duration_hours"], 6.0)
         self.assertEqual(body["threshold_km"], 50.0)
+        # freshness surfaced: epoch age is a non-negative number
+        self.assertGreaterEqual(body["data_max_epoch_age_days"], 0.0)
         # events are sorted ascending by miss distance
         misses = [e["miss_distance_km"] for e in body["events"]]
         self.assertEqual(misses, sorted(misses))
@@ -822,6 +829,9 @@ class TestConjunctions(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertGreaterEqual(body["count"], 1)
+        # 7.0 freshness fields flow through from propagator.data_freshness()
+        self.assertEqual(body["last_fetched"], "2024-02-25T00:00:00+00:00")
+        self.assertEqual(body["data_max_epoch_age_days"], 1.0)
         e = body["events"][0]
         self.assertLess(e["miss_distance_km"], 7.0)
         self.assertTrue(11.0 < e["relative_speed_km_s"] < 13.0)

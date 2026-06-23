@@ -100,6 +100,8 @@ class SatellitePropagator:
         group: str = "stations",
         fetcher: GPFetcher | None = None,
         seed_demo: bool = False,
+        live: bool = False,
+        max_sats: int | None = None,
     ):
         """
         Args:
@@ -108,10 +110,20 @@ class SatellitePropagator:
             seed_demo: if True, append a synthetic crosser to the loaded
                 catalog (demo scaffolding — see backend/core/demo_seed.py).
                 Off by default so tests run against the unmodified catalog.
+            live: if True, fetch fresh GP data on load (GPFetcher.fetch, which
+                re-downloads only when the cache is older than CelesTrak's 2 h
+                update interval and otherwise serves cache; falls back to cache
+                offline) instead of serving a static parquet. Off by default so
+                the test suite stays offline/deterministic.
+            max_sats: if set, slice the loaded catalog to one dense shell of at
+                most this many satellites (slice_to_shell). Keeps the live
+                Starlink group tractable until Phase 7.1 lifts the cap.
         """
         self.group = group
         self.fetcher = fetcher or GPFetcher()
         self.seed_demo = seed_demo
+        self.live = live
+        self.max_sats = max_sats
         self._df: pd.DataFrame | None = None
         self._satrec_cache: dict[int, tuple[orbitcore.Satrec, float, float]] = {}
         # Lookup indexes — built once on first data load, O(1) lookups after that.
@@ -120,15 +132,48 @@ class SatellitePropagator:
         self._norad_index: dict[int, int] | None = None  # norad_id → df row index
 
     def _ensure_data(self) -> pd.DataFrame:
-        """Load cached OMM data if not already loaded."""
+        """Load OMM data if not already loaded (fresh fetch in live mode)."""
         if self._df is None:
-            df = self.fetcher.load_cached(self.group)
+            if self.live:
+                # Fresh data at the allowed cadence: fetch() re-downloads only
+                # when the cache is >2 h stale, else serves cache; on network
+                # failure it falls back to the cached parquet.
+                df = self.fetcher.fetch(self.group)
+            else:
+                df = self.fetcher.load_cached(self.group)
+
+            if self.max_sats is not None:
+                from backend.core.tle_fetcher import slice_to_shell
+                df = slice_to_shell(df, max_sats=self.max_sats)
             if self.seed_demo:
                 from backend.core.demo_seed import append_demo_crosser
                 df = append_demo_crosser(df)
-            self._df = df
+
+            # Positional indexing (get_all_satrecs / _find_satellite use iloc on
+            # index labels) requires a clean 0..n-1 RangeIndex.
+            self._df = df.reset_index(drop=True)
             self._build_indexes()
         return self._df
+
+    def data_freshness(self) -> dict:
+        """Catalog freshness for the API: when we last fetched, and the oldest
+        orbital epoch in the set (epoch age drives SGP4 accuracy)."""
+        df = self._ensure_data()
+        if len(df) == 0:
+            return {"last_fetched": None, "max_epoch_age_days": 0.0}
+
+        last_fetched = pd.Timestamp(df["fetch_time"].iloc[0])
+        if last_fetched.tzinfo is None:
+            last_fetched = last_fetched.tz_localize("UTC")
+
+        epochs = pd.to_datetime(df["epoch"], utc=True)
+        now = pd.Timestamp.now(tz="UTC")
+        max_age_days = (now - epochs).dt.total_seconds().max() / 86400.0
+
+        return {
+            "last_fetched": last_fetched.isoformat(),
+            "max_epoch_age_days": round(float(max_age_days), 2),
+        }
 
     def _build_indexes(self):
         """Build O(1) lookup indexes from the DataFrame."""

@@ -264,6 +264,15 @@ GET /api/conjunctions?time=&duration_hours=&threshold_km=&step_sec=
   re-serves the cached parquet). Rebuild via `python -m backend.core.tle_fetcher starlink-shell`.
 - Fix path = **roadmap 7.0** (scheduled auto-refresh + screen the live `starlink`/`active` group
   directly) + `scaling_tracker.md #2, #5`. Prerequisite for Phase 8's epoch-matched validation.
+
+**Live mode (7.0, DONE):** `SatellitePropagator(live=True, max_sats=N)` → `_ensure_data` calls
+`fetch()` (fresh-if->2h-stale, cache fallback) instead of `load_cached`, then `slice_to_shell(N)`.
+`ORBITWATCH_LIVE=1` + `ORBITWATCH_MAX_SATS=N` (defaults keep tests on cached `stations`).
+`data_freshness()` → `{last_fetched, max_epoch_age_days}`, surfaced on `/api/conjunctions`.
+⚠ **"Live" = fresh-on-load + manual refresh, NOT continuous** — `_ensure_data` caches `self._df`, so
+it fetches once per reload; the auto-refresh scheduler is **9.7**. The freshness fields make the
+aging visible. `_ensure_data` now `reset_index(drop=True)` after slice/seed so `iloc[label]` lookups
+stay correct.
 - **Downloader (data-layer fix):** `_download` uses requests+certifi, falls back to `curl` on
   SSL/connection error; 4xx → `urllib.error.HTTPError` (preserves 403/404 no-retry). A VPN can
   break the TLS handshake to CelesTrak (`UNEXPECTED_EOF_WHILE_READING`). Offline escape hatch:
