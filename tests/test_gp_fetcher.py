@@ -20,7 +20,12 @@ from unittest.mock import patch
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-from core.tle_fetcher import GPFetcher, build_starlink_shell, slice_to_shell
+from core.tle_fetcher import (
+    GPFetcher,
+    _derive_object_type,
+    build_starlink_shell,
+    slice_to_shell,
+)
 
 # --- Sample CelesTrak JSON records ---
 
@@ -161,10 +166,11 @@ class TestParseJson:
         assert df.iloc[0]["object_name"] == "ISS (ZARYA)"
 
     def test_optional_metadata_defaults_to_none(self):
-        """gp.php doesn't provide OBJECT_TYPE, RCS_SIZE, etc. — should be None."""
+        """gp.php omits OBJECT_TYPE, RCS_SIZE, etc. As of 7.4 object_type is
+        DERIVED from the name (ISS → PAYLOAD); the rest still default to None."""
         df = self.fetcher._parse_json([ISS_RECORD])
         row = df.iloc[0]
-        assert row["object_type"] is None
+        assert row["object_type"] == "PAYLOAD"   # 7.4: derived, no longer None
         assert row["rcs_size"] is None
         assert row["country_code"] is None
         assert row["launch_date"] is None
@@ -181,6 +187,72 @@ class TestParseJson:
         assert row["object_type"] == "PAYLOAD"
         assert row["rcs_size"] == "LARGE"
         assert row["country_code"] == "US"
+
+
+class TestObjectType:
+    """7.4 — derive object_type from the CelesTrak name convention (gp.php omits
+    OBJECT_TYPE) so the frontend PAYLOAD/ROCKET BODY/DEBRIS filters light up."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.fetcher = GPFetcher(cache_dir=Path(self.tmp_dir))
+
+    def test_derive_by_name_convention(self):
+        assert _derive_object_type("ISS (ZARYA)") == "PAYLOAD"
+        assert _derive_object_type("STARLINK-1008") == "PAYLOAD"
+        assert _derive_object_type("FREGAT DEB") == "DEBRIS"
+        assert _derive_object_type("COSMOS 2251 DEB") == "DEBRIS"
+        assert _derive_object_type("SL-16 R/B") == "ROCKET BODY"
+        assert _derive_object_type("FALCON 9 R/B") == "ROCKET BODY"
+
+    def test_token_match_not_substring(self):
+        """'DEB'/'R/B' match as whole tokens — a payload whose name merely
+        contains those letters (e.g. 'DEBUT') must NOT be flagged debris."""
+        assert _derive_object_type("DEBUT SAT") == "PAYLOAD"
+        assert _derive_object_type("ARABSAT") == "PAYLOAD"
+
+    def test_empty_or_none_name_is_payload(self):
+        import math
+        assert _derive_object_type("") == "PAYLOAD"
+        assert _derive_object_type(None) == "PAYLOAD"
+        assert _derive_object_type(math.nan) == "PAYLOAD"   # NaN from a cache
+
+    def test_null_object_name_does_not_crash(self):
+        """A null object_name (NaN after a parquet round-trip) must not crash the
+        fill — that row just falls back to PAYLOAD."""
+        df = pd.DataFrame([
+            {"object_name": "FREGAT DEB", "object_type": None},
+            {"object_name": None, "object_type": None},
+        ])
+        df.to_parquet(Path(self.tmp_dir) / "g.parquet", index=False)
+        loaded = self.fetcher.load_cached("g")
+        assert loaded["object_type"].tolist() == ["DEBRIS", "PAYLOAD"]
+
+    def test_parse_json_derives_when_absent(self):
+        """gp.php records (no OBJECT_TYPE) get a type derived from the name."""
+        deb = make_record(OBJECT_NAME="COSMOS 2251 DEB")
+        df = self.fetcher._parse_json([ISS_RECORD, deb])
+        assert df.set_index("object_name")["object_type"].to_dict() == {
+            "ISS (ZARYA)": "PAYLOAD", "COSMOS 2251 DEB": "DEBRIS"}
+
+    def test_parse_json_preserves_real_type(self):
+        """A real OBJECT_TYPE (sup-gp/Space-Track) is never overwritten by the
+        name heuristic — even when the two disagree."""
+        rec = make_record(OBJECT_NAME="ODD NAME DEB", OBJECT_TYPE="PAYLOAD")
+        df = self.fetcher._parse_json([rec])
+        assert df.iloc[0]["object_type"] == "PAYLOAD"
+
+    def test_load_cached_fills_null_object_type(self):
+        """Pre-7.4 caches were written with null object_type; load_cached fills
+        them on read, so no parquet rebuild is needed."""
+        df = pd.DataFrame([
+            {"object_name": "ISS (ZARYA)", "object_type": None},
+            {"object_name": "FREGAT DEB", "object_type": None},
+        ])
+        df.to_parquet(Path(self.tmp_dir) / "grp.parquet", index=False)
+        loaded = self.fetcher.load_cached("grp")
+        assert loaded.set_index("object_name")["object_type"].to_dict() == {
+            "ISS (ZARYA)": "PAYLOAD", "FREGAT DEB": "DEBRIS"}
 
 
 class TestValidation:

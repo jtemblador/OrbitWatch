@@ -55,6 +55,25 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "tle"
 MIN_FETCH_INTERVAL = timedelta(hours=2)
 
 
+def _derive_object_type(name: str) -> str:
+    """Infer object type from a CelesTrak GP object name.
+
+    CelesTrak's gp.php (OMM/GP JSON) omits OBJECT_TYPE — it's a SATCAT field —
+    so we derive it from the name's consistent convention: a standalone `DEB`
+    token marks debris, an `R/B`-prefixed token a rocket body, everything else a
+    payload. Token-matched (not substring) so a payload like "DEBUT" isn't
+    mislabeled. Authoritative typing would join CelesTrak SATCAT (deferred 7.4).
+
+    A non-string name (None, or a NaN from a cached frame) → PAYLOAD.
+    """
+    tokens = name.upper().split() if isinstance(name, str) else []
+    if any(t.startswith("R/B") for t in tokens):   # "SL-16 R/B", "... R/B(1)"
+        return "ROCKET BODY"
+    if "DEB" in tokens:                             # "COSMOS 2251 DEB", "FREGAT DEB"
+        return "DEBRIS"
+    return "PAYLOAD"
+
+
 class GPFetcher:
     def __init__(self, cache_dir: Path = DATA_DIR):
         self.cache_dir = cache_dir
@@ -145,7 +164,7 @@ class GPFetcher:
         parquet_path = self.cache_dir / f"{group}.parquet"
         if not parquet_path.exists():
             raise FileNotFoundError(f"No cached data for group '{group}'. Run fetch() first.")
-        return pd.read_parquet(parquet_path)
+        return self._ensure_object_type(pd.read_parquet(parquet_path))
 
     def _load_if_fresh(self, group: str) -> pd.DataFrame | None:
         """Return cached data if it's less than 2 hours old, else None."""
@@ -161,7 +180,7 @@ class GPFetcher:
         if file_age >= MIN_FETCH_INTERVAL:
             return None
 
-        df = pd.read_parquet(parquet_path)
+        df = self._ensure_object_type(pd.read_parquet(parquet_path))
         if "fetch_time" not in df.columns or df.empty:
             return None
 
@@ -265,6 +284,28 @@ class GPFetcher:
             "apoapsis": round(apoapsis, 3),
             "periapsis": round(periapsis, 3),
         }
+
+    @staticmethod
+    def _ensure_object_type(df: pd.DataFrame) -> pd.DataFrame:
+        """Fill a null/missing `object_type` by deriving it from `object_name`,
+        so the type filters work on gp.php data (which omits OBJECT_TYPE). A real
+        OBJECT_TYPE (sup-gp/Space-Track) is preserved — only nulls are filled.
+        Idempotent: safe on a fresh-parsed frame or a cached one (existing caches
+        were written before 7.4 with null types, so they get filled on load)."""
+        if df.empty or "object_name" not in df.columns:
+            return df
+        # Fast path: a fully-typed frame (sup-gp/Space-Track) is returned as-is,
+        # no copy. Only null types are filled, from the name.
+        has_col = "object_type" in df.columns
+        if has_col and not df["object_type"].isna().any():
+            return df
+        df = df.copy()
+        if not has_col:
+            df["object_type"] = None
+        missing = df["object_type"].isna()
+        df.loc[missing, "object_type"] = (
+            df.loc[missing, "object_name"].map(_derive_object_type))
+        return df
 
     def _parse_json(self, records: list[dict]) -> pd.DataFrame:
         """
@@ -372,7 +413,7 @@ class GPFetcher:
             print(f"  Parsed {len(df)} satellites ({skipped} skipped: decayed/invalid/non-SGP4)")
         else:
             print(f"  Parsed {len(df)} satellites")
-        return df
+        return self._ensure_object_type(df)
 
     def _cache_to_parquet(self, df: pd.DataFrame, group: str):
         """Save parsed GP data to Parquet for offline use.

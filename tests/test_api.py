@@ -221,6 +221,17 @@ class TestSatelliteList(unittest.TestCase):
         for sat in self.data["satellites"]:
             self.assertTrue(len(sat["object_type"]) > 0, sat["name"])
 
+    def test_object_type_is_derived_not_all_unknown(self):
+        """7.4 chain lock: gp.php omits OBJECT_TYPE, so the fetcher derives it
+        from the name. The stations catalog must surface meaningful (non-UNKNOWN)
+        types — exactly the condition controls.js needs to render the type-filter
+        checkboxes. Stations = ISS-family payloads + a 'FREGAT DEB'."""
+        types = {s["object_type"] for s in self.data["satellites"]}
+        self.assertTrue(types - {"UNKNOWN"},
+                        f"all UNKNOWN — type filters won't render: {types}")
+        self.assertIn("PAYLOAD", types)
+        self.assertIn("DEBRIS", types)
+
     def test_no_numpy_types_in_json(self):
         """Verify JSON serialization didn't leak numpy types (would crash FastAPI)."""
         import json

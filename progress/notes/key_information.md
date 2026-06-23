@@ -20,6 +20,8 @@
 
 6. **Near-Earth vs Deep-Space split at 225 minutes orbital period.** Period < 225 min = SGP4 (near-Earth). Period >= 225 min = SDP4 (deep-space, adds lunar/solar perturbations). Modern implementations merge both under "SGP4" automatically. The Python `sgp4` library handles this transparently.
 
+7. **gp.php omits `OBJECT_TYPE`** (it's a SATCAT field, not an OMM/GP one) — so the fetched `object_type` is `None` for every object and the frontend type filters never render. **Phase 7.4 derives it from the CelesTrak NAME convention** (`_derive_object_type` in `tle_fetcher.py`): a standalone `DEB` token → DEBRIS, an `R/B`-prefixed token → ROCKET BODY, else PAYLOAD — token-matched so `DEBUT`/`ARABSAT` aren't mislabeled. `_ensure_object_type(df)` fills **only nulls** (a real `OBJECT_TYPE` from sup-gp/Space-Track is preserved) and runs on **every read path incl. `load_cached`**, so existing caches get types with no re-fetch. `(name or "").upper()` is a NaN trap (`float('nan')` is truthy → `.upper()` crashes) — gate with `isinstance(name, str)`. Authoritative typing = a CelesTrak **SATCAT** join (deferred).
+
 ---
 
 ## Coordinate Transform Pipeline (RESOLVED)
