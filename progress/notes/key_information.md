@@ -229,6 +229,14 @@ out = fine_filter_batch(satrecs, rows, step_sec)   # rows = medium_filter output
 - **Don't just "batch scipy":** scipy is sequential per window (each eval picks the next) and can't
   vectorize across windows — reformulating the minimum as a *root-find on range-rate* is what makes
   the whole catalog step in lockstep.
+- **Solver-vs-solver equivalence is only meaningful where the TCA is well-defined (Phase 7.5).** On a
+  co-moving pair (`|Δv|≈0`) the distance objective is near-flat with many near-equal minima, so the
+  scipy oracle and the batched Newton solve can land on *different* TCAs without either being wrong.
+  Any oracle-vs-batch test must gate on a real crossing (`rel_speed_km_s > 1`) — comparing TCAs on a
+  co-mover is a false-flake generator. The scale lock (`TestScaleRegression`) does this and is
+  **mutation-checked** (inject +100 ms → all windows fail) so the green test provably bites. A
+  *synthetic* shell also needs density (~300 sats + 100 km pad) to produce **natural** windows — at
+  120 sats a single shell is too sparse and only a seeded crosser closes.
 
 ## Conjunction Screener + Endpoint — `run_screen` / `/api/conjunctions` (Task 6.7)
 

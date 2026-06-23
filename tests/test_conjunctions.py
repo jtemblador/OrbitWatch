@@ -782,3 +782,120 @@ class TestDenseShellScale:
             assert key not in seen, "SFS result not de-duped to unique pairs"
             seen.add(key)
             assert e["screening_regime"], "SFS event missing regime label"
+
+
+def _shell_satrecs(n):
+    """Build a deterministic dense single shell (no network) and return its
+    (satrecs, meta, start_utc). The satrecs are in-memory C++ objects and meta
+    is a plain list, so both outlive the temp parquet the propagator loads from.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from core.demo_seed import build_synthetic_shell
+    from core.propagator import SatellitePropagator
+    from core.tle_fetcher import GPFetcher
+
+    df = build_synthetic_shell(n=n)
+    with tempfile.TemporaryDirectory() as d:
+        df.to_parquet(Path(d) / "synthshell.parquet", index=False)
+        prop = SatellitePropagator(
+            group="synthshell", fetcher=GPFetcher(cache_dir=Path(d)))
+        sats, meta = prop.get_all_satrecs()
+    return sats, meta, datetime(2026, 6, 1, tzinfo=timezone.utc)  # the shell epoch
+
+
+class TestScaleRegression:
+    """7.5 cross-task regression locks — the invariants 7.2/7.3 introduced,
+    enforced at constellation scale (not just on the handful of crosser
+    windows). These would fail loudly if a future 'optimization' silently
+    changed screening results, so they protect the Phase-7 refactors durably.
+    Deterministic + offline (synthetic dense shell)."""
+
+    def test_batch_matches_oracle_at_shell_scale(self):
+        """The keystone 7.3 lock: on a dense shell's *real* medium-filter
+        windows, the batched Newton fine stage (fine_filter_batch) reproduces
+        the per-window scipy oracle (fine_filter) to <10 m / <50 ms / <1 mm/s.
+        TestFineFilterBatch only proves this on ~8 crosser windows; the 7.3
+        headline ('byte-identical event counts on dense catalogs') is otherwise
+        unenforced. We compare only genuine crossings (rel speed > 1 km/s): a
+        co-moving same-plane pair has an ambiguous TCA that *both* methods place
+        arbitrarily, so it isn't a meaningful equivalence case (and the SFS path
+        suppresses it anyway)."""
+        sats, meta, start = _shell_satrecs(300)
+        jd_w, jd_f = utc_to_jd(start)   # same JD seam run_screen uses internally
+        jd0 = jd_w + jd_f
+
+        # A 100 km pad over 3 h yields thousands of real cross-plane windows on
+        # the 300-sat shell (a tighter pad leaves a sparse shell with none — only
+        # the seeded crosser would close). The pad sizes the *window set*; the
+        # equivalence we lock is independent of miss magnitude.
+        pad = 100.0
+        step_sec = 30.0
+        periapsis = [m["periapsis_km"] for m in meta]
+        apoapsis = [m["apoapsis_km"] for m in meta]
+        pairs = orbitcore.coarse_filter(periapsis, apoapsis, pad)
+        rows = orbitcore.medium_filter(
+            sats, pairs, jd0, jd0 + 3.0 / 24.0, step_sec, pad)
+        assert len(rows) > 50, "shell didn't produce enough windows to be a scale test"
+
+        # Sample to bound the oracle's per-window scipy cost; the batch still
+        # refines the sampled set in one pass, so this exercises chunked,
+        # many-window batching against the trusted reference.
+        stride = max(1, len(rows) // 250)
+        sampled = rows[::stride]
+        batch = fine_filter_batch(sats, sampled, step_sec)
+        assert len(batch) == len(sampled)
+
+        step_day = step_sec / 86400.0
+        compared = 0
+        for (i, j, jd_flag, _d), got in zip(sampled, batch):
+            if got is None or got["rel_speed_km_s"] < 1.0:
+                continue   # decayed, or an ambiguous-TCA co-mover (see docstring)
+            ref = fine_filter(sats[i], sats[j],
+                              jd_flag - step_day, jd_flag + step_day)
+            assert abs(got["miss_km"] - ref["miss_km"]) < 0.01          # 10 m
+            assert abs(got["jd_tca"] - ref["jd_tca"]) * 86400.0 < 0.05  # 50 ms
+            assert abs(got["rel_speed_km_s"] - ref["rel_speed_km_s"]) < 1e-3
+            compared += 1
+        assert compared > 30, "too few genuine crossings to lock the equivalence"
+
+    def test_screen_is_deterministic_at_scale(self):
+        """A full screen over a dense shell is reproducible run-to-run: the
+        batched fine stage (NaN masking, einsum reductions, chunk boundaries)
+        and the sort must introduce no nondeterminism. Locks event identity,
+        order, and every float — the count-based regression signal is only
+        meaningful if the screen is deterministic."""
+        sats, meta, start = _shell_satrecs(300)
+        first = run_screen(sats, meta, start, 3.0, 100.0)
+        second = run_screen(sats, meta, start, 3.0, 100.0)
+        assert len(first) > 5      # the shell really does produce events
+        assert first == second     # identical dicts, order included
+
+    def test_medium_gross_threshold_is_largest_semi_axis(self, monkeypatch):
+        """The 7.2 no-skip wiring, locked at the integration boundary: in the
+        SFS path the Euclidean threshold handed to the C++ medium filter must be
+        the *largest semi-axis* present — not the tight radial axis (would skip
+        in-track-loose events) and not the box corner sqrt(R²+T²+N²) (would
+        over-screen). Unit tests prove circumscribing_radius() in isolation; this
+        proves run_screen actually passes it down."""
+        import core.conjunctions as conj
+
+        a, b = _crosser_pair()
+        asym = ScreeningVolume("ASYM", 0.4, 44.0, 51.0)   # LEO-1 shape
+        real_medium = orbitcore.medium_filter
+        seen = {}
+
+        def spy(satrecs, pairs, jd_start, jd_end, step_sec, gross_km):
+            seen["gross_km"] = gross_km
+            return real_medium(
+                satrecs, pairs, jd_start, jd_end, step_sec, gross_km)
+
+        monkeypatch.setattr(conj.orbitcore, "medium_filter", spy)
+        run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                   volumes=[asym, asym])
+
+        assert seen["gross_km"] == 51.0                       # largest semi-axis
+        assert seen["gross_km"] != asym.r_km                  # not the radial axis
+        corner = math.sqrt(0.4 ** 2 + 44 ** 2 + 51 ** 2)      # ~67.4 km
+        assert seen["gross_km"] < corner                      # not the box corner
