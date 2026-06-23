@@ -195,7 +195,38 @@ a 1 s grid at 12 km/s closing speed reported 8.14 km where the true minimum is 6
 validation (Phase 8 SOCRATES deltas) must compare **refined** minima, never grid samples.
 
 **`invjday` can return sec == 60.0** at minute rollovers — route minutes+seconds through
-`timedelta` instead of constructing `datetime(..., second=int(sec))`.
+`timedelta` instead of constructing `datetime(..., second=int(sec))`. (Factored into `_jd_to_utc`
+in 7.3; `run_screen` calls it lazily, only for events that survive the report cut.)
+
+## Batched Fine Stage — `fine_filter_batch` (Phase 7.3)
+
+```python
+from core.conjunctions import fine_filter_batch
+out = fine_filter_batch(satrecs, rows, step_sec)   # rows = medium_filter output
+# list aligned to rows: geometry dict (jd_tca, miss_km, rel_speed_km_s, pos/vel TEME) or None
+```
+
+- **What `run_screen` uses in production now** (7.3). `fine_filter` (scipy) is kept only as the
+  **validation oracle** — the batch is cross-validated against it AND a 0.01 s brute-force grid.
+- **TCA = root of the range-rate, solved by Newton.** The closest-approach instant is where
+  `d(d²)/dt = 2·Δr·Δv = 0`. With `g'(t) = |Δv|² + Δr·Δa ≈ |Δv|²` (gravity-gradient `Δa` ~1e-4 of
+  `|Δv|²` near an encounter), the step is `t ← t − (Δr·Δv)/|Δv|²` **seconds** (note units: `g` is
+  km²/s, `g'` km²/s²; convert to days `/86400` before adding to a JD). Starts at the medium-filter
+  sample (within one step of TCA), converges quadratically in ~3 steps; **5 fixed steps** used.
+- **Why it's fast:** all windows take the same fixed step count → vectorizable → **one
+  `propagate_batch` crossing per step** (GIL released) instead of per-window scipy. `propagate_batch`
+  returns `Δr` AND `Δv`, so the derivative is free. Fewer propagations than scipy (~6 vs ~15–50).
+  Measured **~3.7× faster fine stage** (same-machine A/B), **byte-identical event counts** at every
+  scale — *the speedup changes the speed, not the answers*.
+- **Gotchas:** `np.where(g/gprime, ...)` still evaluates `g/gprime` on decayed (NaN) windows and
+  warns — use `np.divide(out=…, where=gprime>1e-9)`. Co-moving pairs (`|Δv|≈0`, docked) don't step
+  (any instant equally close) → finite ~0 miss, handled downstream by co-located suppression. Decayed
+  pair → `None` (the per-window drop seam run_screen skips). Chunked by `_FINE_CHUNK=20000` to bound
+  memory (`scaling_tracker #7`: it holds a dict per non-decayed window before the cut → +0.7 GB at
+  full catalog).
+- **Don't just "batch scipy":** scipy is sequential per window (each eval picks the next) and can't
+  vectorize across windows — reformulating the minimum as a *root-find on range-rate* is what makes
+  the whole catalog step in lockstep.
 
 ## Conjunction Screener + Endpoint — `run_screen` / `/api/conjunctions` (Task 6.7)
 
@@ -222,9 +253,17 @@ GET /api/conjunctions?time=&duration_hours=&threshold_km=&step_sec=
 - **Failure handling:** sub-step window → `medium_filter` `ValueError` → endpoint 422; decayed sat
   in a fine bracket → `RuntimeError` caught per-row in `run_screen` (one bad sat can't kill a
   screen); empty/NaN-band catalog → no pairs → `count: 0` (not an error).
-- **Perf baseline:** 25 stations, 24 h @ 60 s = **134 ms**. Two Phase-7 scaling items logged
-  (`scaling_tracker.md` #3 coarse-pair C++↔Python boundary round-trip; #4 sync CPU-bound screen
-  blocking the async handler → `run_in_threadpool`).
+- **Perf baseline:** 25 stations, 24 h @ 60 s = **134 ms**. Fine stage batched in 7.3 (~3.7×; see
+  `fine_filter_batch` above). Remaining scaling item: `scaling_tracker #3` (coarse→medium C++ memory
+  fusion, deferred — the cap below removes its urgency).
+- **Concurrency (7.3):** `/api/conjunctions` runs the screen in `run_in_threadpool` (medium_filter +
+  propagate_batch release the GIL → the C++ scan runs on the worker thread, event loop stays free),
+  guarded by a **413 cap** (`ORBITWATCH_MAX_SCREEN_SATS`, default 1500 — a full-catalog sync screen
+  is 258 s and would hang the worker). **⚠ Shared-Satrec race:** `sgp4()` mutates each Satrec's
+  `t`/`error`, and the position/track endpoints share the same `_satrec_cache`. A single module-level
+  `_propagator_lock` (asyncio) serializes **all** propagation endpoints — not just screen-vs-screen
+  but screen-vs-position (the frontend polls `/api/positions` during a screen). Adding concurrency
+  means auditing *every* reader of the mutated cache, not only the path you moved off the event loop.
 - **⚠ Live `stations` returns ~82 events dominated by docked ISS modules** (Soyuz/Dragon/Progress/
   Nauka at ~0 km, v_rel ~0). Real co-located objects, not a bug — co-orbital neighbors aren't
   spam-flagged by the adaptive bound, they're genuinely within threshold. Phase 7's asymmetric RTN

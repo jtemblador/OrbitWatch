@@ -783,6 +783,9 @@ def _crosser_propagator():
         def get_all_satrecs(self):
             return satrecs, meta
 
+        def catalog_size(self):
+            return len(satrecs)
+
         def data_freshness(self):
             return {"last_fetched": "2024-02-25T00:00:00+00:00",
                     "max_epoch_age_days": 1.0}
@@ -888,6 +891,70 @@ class TestConjunctions(unittest.TestCase):
                       "time=not-a-date"):
             resp = client.get(f"/api/conjunctions?{query}")
             self.assertEqual(resp.status_code, 422, msg=query)
+
+    def test_oversized_catalog_returns_413(self):
+        """A catalog larger than the screening cap is refused up front with a
+        clear 413 (Phase 7.3) rather than hanging the worker on an O(N^2) screen.
+        The 2-sat crosser catalog exceeds a cap of 1."""
+        original = app.state.propagator
+        app.state.propagator = _crosser_propagator()
+        try:
+            with patch.dict(os.environ, {"ORBITWATCH_MAX_SCREEN_SATS": "1"}):
+                resp = client.get(f"/api/conjunctions?time={_CROSSER_TIME}")
+        finally:
+            app.state.propagator = original
+        self.assertEqual(resp.status_code, 413)
+        self.assertIn("exceeds", resp.json()["detail"])
+
+    def test_cap_allows_catalog_at_or_below_limit(self):
+        """At/under the cap the screen runs normally — the cap only rejects
+        oversized catalogs, it doesn't change results."""
+        original = app.state.propagator
+        app.state.propagator = _crosser_propagator()
+        try:
+            with patch.dict(os.environ, {"ORBITWATCH_MAX_SCREEN_SATS": "2"}):
+                resp = client.get(
+                    f"/api/conjunctions?time={_CROSSER_TIME}"
+                    "&duration_hours=6&threshold_km=50")
+        finally:
+            app.state.propagator = original
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(resp.json()["count"], 1)
+
+    def test_propagation_endpoints_run_under_the_lock(self):
+        """Phase 7.3 concurrency fix: every endpoint that propagates the shared
+        Satrec cache (positions, single position, track, conjunctions) must run
+        under _propagator_lock, so the worker-thread screen can't race a
+        position request on the sgp4()-mutated Satrec structs."""
+        import backend.routers.satellites as sat
+
+        class _CountingLock:
+            def __init__(self):
+                self.entered = 0
+
+            async def __aenter__(self):
+                self.entered += 1
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        counter = _CountingLock()
+        original = sat._propagator_lock
+        sat._propagator_lock = counter
+        try:
+            for path in (
+                "/api/positions",
+                "/api/positions/25544",
+                "/api/positions/25544/track",
+                "/api/conjunctions?duration_hours=6&threshold_km=50",
+            ):
+                before = counter.entered
+                resp = client.get(path)
+                self.assertEqual(resp.status_code, 200, msg=path)
+                self.assertGreater(counter.entered, before, msg=path)
+        finally:
+            sat._propagator_lock = original
 
     def test_openapi_includes_conjunction_schemas(self):
         schema = client.get("/openapi.json").json()

@@ -2,10 +2,13 @@
 Satellite metadata, position, and data refresh endpoints.
 """
 
+import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 
 from backend.core.conjunctions import ConjunctionScreener
 from backend.models.schemas import (
@@ -92,7 +95,8 @@ async def get_positions(request: Request, time: str | None = None):
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
-    results, errors = propagator.get_all_positions(utc_dt)
+    async with _propagator_lock:
+        results, errors = propagator.get_all_positions(utc_dt)
 
     positions = [_format_position(r) for r in results]
     response = {
@@ -115,7 +119,8 @@ async def get_position(request: Request, norad_id: int, time: str | None = None)
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
     try:
-        result = propagator.get_position_by_norad_id(norad_id, utc_dt)
+        async with _propagator_lock:
+            result = propagator.get_position_by_norad_id(norad_id, utc_dt)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"NORAD ID {norad_id} not found")
     except RuntimeError as e:
@@ -152,7 +157,8 @@ async def get_track(
     utc_dts = [utc_dt + step_size * i for i in range(steps)]
 
     try:
-        results = propagator.get_positions_at_times(name, utc_dts)
+        async with _propagator_lock:
+            results = propagator.get_positions_at_times(name, utc_dts)
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=f"Propagation failed for NORAD ID {norad_id}: {e}")
 
@@ -176,6 +182,39 @@ async def get_track(
         "steps": steps,
         "track": track,
     }
+
+
+# Synchronous screening is O(N^2): the full 10,544-sat Starlink catalog takes
+# ~258 s / 4.5 GB (7.1 profile), which would hang the worker on a single
+# request. Cap the catalog size we'll screen in-request and return a clear 413
+# above it. The demo operating point (<=300 sats) sits far under the default;
+# raise ORBITWATCH_MAX_SCREEN_SATS to override for an offline/batch box.
+_DEFAULT_MAX_SCREEN_SATS = 1500
+
+
+def _max_screen_sats() -> int:
+    """Screening cap from the environment, default _DEFAULT_MAX_SCREEN_SATS.
+    A non-numeric override falls back to the default rather than erroring."""
+    raw = os.environ.get("ORBITWATCH_MAX_SCREEN_SATS")
+    if not raw:
+        return _DEFAULT_MAX_SCREEN_SATS
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_SCREEN_SATS
+
+
+# Serialize ALL propagation that touches the shared Satrec cache. Every request
+# shares the propagator's cached Satrec objects, and sgp4() mutates each one's
+# time/error state on every call. The screen now runs on a worker thread
+# (run_in_threadpool) and medium_filter releases the GIL during its scan, so
+# without this lock a concurrent position/track request — the frontend polls
+# positions continuously — would propagate the same Satrec struct on the event
+# loop while the worker thread mutates it: a genuine data race (corrupt position
+# or spurious propagation error). One lock guards the screen AND the position
+# endpoints; it is uncontended in normal use and the event loop stays free while
+# a request waits on it.
+_propagator_lock = asyncio.Lock()
 
 
 @router.get("/conjunctions", response_model=ConjunctionResponse)
@@ -205,11 +244,30 @@ async def get_conjunctions(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
+    # Refuse an oversized synchronous screen up front (see _max_screen_sats).
+    cap = _max_screen_sats()
+    n_sats = propagator.catalog_size()
+    if n_sats > cap:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Catalog of {n_sats} satellites exceeds the synchronous "
+                f"screening cap of {cap}. Lower ORBITWATCH_MAX_SATS to screen "
+                f"a smaller shell, or raise ORBITWATCH_MAX_SCREEN_SATS."),
+        )
+
     screener = ConjunctionScreener(propagator)
     stats: dict = {}
     try:
-        events = screener.screen(
-            start_utc, duration_hours, threshold_km, step_sec, timings=stats)
+        # CPU-bound screen off the event loop: medium_filter and the batched
+        # fine stage release the GIL, so the worker thread runs the C++ scan
+        # while the event loop stays responsive to other requests. The lock
+        # keeps the screen from racing with position/track requests (and other
+        # screens) on the shared, sgp4()-mutated Satrec cache.
+        async with _propagator_lock:
+            events = await run_in_threadpool(
+                screener.screen, start_utc, duration_hours, threshold_km,
+                step_sec, timings=stats)
     except ValueError as e:
         # e.g. a screening window shorter than the time step
         raise HTTPException(status_code=422, detail=str(e))

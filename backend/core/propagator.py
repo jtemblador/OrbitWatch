@@ -155,6 +155,12 @@ class SatellitePropagator:
             self._build_indexes()
         return self._df
 
+    def catalog_size(self) -> int:
+        """Number of satellites in the loaded catalog. Cheap after the first
+        load (the DataFrame is cached) — used by the API to cap synchronous
+        screening before paying for a full O(N^2) screen."""
+        return len(self._ensure_data())
+
     def data_freshness(self) -> dict:
         """Catalog freshness for the API: when we last fetched, and the oldest
         orbital epoch in the set (epoch age drives SGP4 accuracy)."""

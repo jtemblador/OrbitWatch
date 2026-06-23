@@ -21,6 +21,7 @@ from core.conjunctions import (
     ConjunctionScreener,
     _dedupe_to_unique_pairs,
     fine_filter,
+    fine_filter_batch,
     run_screen,
 )
 from core.coordinate_transforms import teme_to_rtn, utc_to_jd
@@ -190,6 +191,138 @@ class TestFineFilter:
             pass
 
 
+class TestFineFilterBatch:
+    """fine_filter_batch(): the Phase 7.3 batched fine stage. It must reproduce
+    the scipy per-window oracle (fine_filter) within SGP4-meaningful tolerance,
+    and isolate decayed / co-moving / edge windows exactly as the oracle does."""
+
+    def _windows(self):
+        """Several real medium-filter windows for the crosser (the crossing
+        repeats, so a multi-hour scan yields a handful)."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        rows = orbitcore.medium_filter(
+            [a, b], [(0, 1)], jd0, jd0 + 0.25, 60.0, 50.0)
+        return a, b, rows
+
+    def test_matches_oracle_across_all_windows(self):
+        """The headline correctness claim: on every window the batched Newton
+        TCA solve agrees with the scipy oracle to <10 m miss, <50 ms TCA, and
+        <1 mm/s relative speed — i.e. the speedup costs nothing in accuracy."""
+        a, b, rows = self._windows()
+        assert len(rows) >= 2
+        batch = fine_filter_batch([a, b], rows, 60.0)
+        assert len(batch) == len(rows)
+
+        step_day = 60.0 / 86400.0
+        for (i, j, jd_flag, _d), got in zip(rows, batch):
+            ref = fine_filter(a, b, jd_flag - step_day, jd_flag + step_day)
+            assert got is not None
+            assert abs(got["miss_km"] - ref["miss_km"]) < 0.01          # 10 m
+            assert abs(got["jd_tca"] - ref["jd_tca"]) * 86400.0 < 0.05  # 50 ms
+            assert abs(got["rel_speed_km_s"] - ref["rel_speed_km_s"]) < 1e-3
+
+    def test_matches_brute_force_ground_truth(self):
+        """Independent ground-truth anchor — NOT via scipy. A 0.01 s brute-force
+        grid around the encounter is the truth; the batched Newton TCA must match
+        it to <50 ms / <10 m. This pins the new method to first principles so it
+        can never silently inherit an optimizer error from the oracle path."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        # 0.01 s grid spanning +-3 s of the approximate TCA (a, b share epoch).
+        t0 = CROSSER_TCA_MIN_APPROX - 0.05
+        times = [t0 + i * (0.01 / 60.0) for i in range(600)]
+        ta = orbitcore.propagate_batch([a] * len(times), times)
+        tb = orbitcore.propagate_batch([b] * len(times), times)
+        dists = [math.dist(ta[k][0], tb[k][0]) for k in range(len(times))]
+        k_min = dists.index(min(dists))
+        ref_tca_min, ref_miss = times[k_min], dists[k_min]
+
+        jd_flag = jd0 + CROSSER_TCA_MIN_APPROX / 1440.0
+        out = fine_filter_batch([a, b], [(0, 1, jd_flag, 0.0)], 60.0)
+        assert out[0] is not None
+        tca_min = (out[0]["jd_tca"] - jd0) * 1440.0
+        assert abs(tca_min - ref_tca_min) * 60.0 < 0.05   # <50 ms vs ground truth
+        assert abs(out[0]["miss_km"] - ref_miss) < 0.01    # <10 m vs ground truth
+
+    def test_returned_states_are_rtn_consistent(self):
+        """The returned TEME states must be self-consistent end to end: the
+        norm of (pos_a - pos_b) equals the reported miss (feeds teme_to_rtn)."""
+        a, b, rows = self._windows()
+        for got in fine_filter_batch([a, b], rows, 60.0):
+            assert got is not None
+            dr = [got["pos_a_teme"][k] - got["pos_b_teme"][k] for k in range(3)]
+            assert abs(math.sqrt(sum(x * x for x in dr)) - got["miss_km"]) < 1e-6
+
+    def test_empty_rows_returns_empty(self):
+        a, b = _crosser_pair()
+        assert fine_filter_batch([a, b], [], 60.0) == []
+
+    def test_result_aligns_with_rows(self):
+        """results[k] corresponds to rows[k] — the index contract run_screen
+        relies on to map (i, j) back to satellite identity."""
+        a, b, rows = self._windows()
+        batch = fine_filter_batch([a, b], rows, 60.0)
+        assert len(batch) == len(rows)
+        # every window for this fast, well-separated crosser refines cleanly
+        assert all(r is not None for r in batch)
+
+    def test_chunking_is_transparent(self, monkeypatch):
+        """Refining in tiny chunks gives the same per-window result as one big
+        pass — the chunk boundary mustn't drop, reorder, or misalign windows."""
+        import core.conjunctions as conj
+
+        a, b, rows = self._windows()
+        assert len(rows) >= 2
+        whole = fine_filter_batch([a, b], rows, 60.0)
+        monkeypatch.setattr(conj, "_FINE_CHUNK", 1)   # force one window/chunk
+        chunked = fine_filter_batch([a, b], rows, 60.0)
+        assert len(whole) == len(chunked) == len(rows)
+        for w, c in zip(whole, chunked):
+            assert (w is None) == (c is None)
+            if w is not None:
+                assert abs(w["miss_km"] - c["miss_km"]) < 1e-9
+                assert abs(w["jd_tca"] - c["jd_tca"]) < 1e-12
+
+    def test_co_moving_pair_is_finite_not_nan(self):
+        """A co-moving pair (|Δv|≈0) has no defined crossing; the Newton step
+        must stay put rather than divide by zero — a finite ~0 km miss, not
+        NaN. (Same elements twice => distance 0 for all time.)"""
+        a, _ = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        rows = [(0, 1, jd0 + 0.05, 0.0)]          # one synthetic window
+        out = fine_filter_batch([a, a], rows, 60.0)
+        assert len(out) == 1 and out[0] is not None
+        assert math.isfinite(out[0]["miss_km"])
+        assert out[0]["miss_km"] < 1e-6
+        assert out[0]["rel_speed_km_s"] < 1e-9
+
+    def test_decayed_window_returns_none(self):
+        """A pair that can't be propagated across its window (heavy-drag sat,
+        far-future time) comes back as None — the batched analogue of
+        fine_filter raising, so run_screen can drop just that window."""
+        good = _make_variant()
+        decayer = _make_variant(bstar=0.1)
+        jd0 = _iss_epoch_jd()
+        rows = [(0, 1, jd0 + 60.0 + 1.0 / 1440.0, 0.0)]   # ~60 days out
+        out = fine_filter_batch([good, decayer], rows, 60.0)
+        assert out == [None]
+
+    def test_edge_window_widens_and_recovers(self):
+        """A window whose sample sits a full step past the encounter lands the
+        minimum on the bracket edge; the one-shot widen recovers the true TCA
+        outside the original bracket — matching fine_filter's safety net."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        # jd_flag at ~125 min -> bracket [124,126] min; true TCA ~122.7 is below.
+        rows = [(0, 1, jd0 + 125.0 / 1440.0, 0.0)]
+        out = fine_filter_batch([a, b], rows, 60.0)
+        assert out[0] is not None
+        tca_min = (out[0]["jd_tca"] - jd0) * 1440.0
+        assert abs(tca_min - CROSSER_TCA_MIN_APPROX) < 0.1
+        assert out[0]["miss_km"] < 10.0
+
+
 # --- ConjunctionScreener / run_screen (Task 6.7) --------------------------
 
 def _crosser_meta():
@@ -338,9 +471,10 @@ class TestConjunctionScreener:
         """No satellites → no pairs → clean empty result, not an error."""
         assert run_screen([], [], _iss_epoch_dt(), 6.0, 50.0) == []
 
-    def test_fine_filter_failure_is_isolated(self):
-        """One window that fails fine_filter (e.g. a sat un-propagatable there)
-        is dropped; the rest of the screen survives and no exception escapes."""
+    def test_decayed_window_is_isolated(self):
+        """A window whose pair can't be propagated (decayed) comes back as None
+        from the batched fine stage; run_screen drops exactly that one and the
+        rest of the screen survives, with no exception escaping."""
         from unittest.mock import patch
 
         import core.conjunctions as conj
@@ -350,19 +484,21 @@ class TestConjunctionScreener:
         full = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
         assert len(full) >= 2  # crossing repeats → multiple windows
 
-        real_fine = conj.fine_filter
-        state = {"n": 0}
+        real_batch = conj.fine_filter_batch
 
-        def flaky(*args, **kwargs):
-            state["n"] += 1
-            if state["n"] == 1:
-                raise RuntimeError("simulated propagation failure")
-            return real_fine(*args, **kwargs)
+        def one_decayed(*args, **kwargs):
+            out = real_batch(*args, **kwargs)
+            # Null the closest approach (guaranteed to clear the report cut), as
+            # if that pair had decayed across its window — the real None path.
+            best = min((k for k, v in enumerate(out) if v is not None),
+                       key=lambda k: out[k]["miss_km"])
+            out[best] = None
+            return out
 
-        with patch.object(conj, "fine_filter", side_effect=flaky):
+        with patch.object(conj, "fine_filter_batch", side_effect=one_decayed):
             out = run_screen([a, b], meta, _iss_epoch_dt(), 6.0, 50.0)
 
-        assert len(out) == len(full) - 1  # exactly the one failed window dropped
+        assert len(out) == len(full) - 1  # exactly the one nulled window dropped
 
 
 class TestRunScreenTimings:

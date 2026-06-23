@@ -25,6 +25,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 from scipy.optimize import minimize_scalar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -45,6 +46,17 @@ _EDGE_TOL_MIN = 1e-3
 def _epoch_jd(satrec) -> float:
     """Absolute Julian date of a satrec's element epoch."""
     return satrec.jdsatepoch + satrec.jdsatepochF
+
+
+def _jd_to_utc(jd: float) -> datetime:
+    """Absolute Julian date (UTC) -> timezone-aware datetime.
+
+    invjday's seconds can hit exactly 60.0 at a minute rollover; routing the
+    minutes+seconds through timedelta handles every carry case cleanly.
+    """
+    year, mon, day, hr, minute, sec = orbitcore.invjday(jd, 0.0)
+    return (datetime(year, mon, day, hr, 0, 0, tzinfo=timezone.utc)
+            + timedelta(minutes=minute, seconds=sec))
 
 
 def fine_filter(satrec_a, satrec_b, jd_lo: float, jd_hi: float) -> dict:
@@ -127,15 +139,9 @@ def fine_filter(satrec_a, satrec_b, jd_lo: float, jd_hi: float) -> dict:
     (pa, va) = orbitcore.sgp4(satrec_a, (jd_tca - epoch_a) * 1440.0)
     (pb, vb) = orbitcore.sgp4(satrec_b, (jd_tca - epoch_b) * 1440.0)
 
-    # invjday seconds can hit exactly 60.0 at minute rollover; routing the
-    # minutes+seconds through timedelta handles all carry cases.
-    year, mon, day, hr, minute, sec = orbitcore.invjday(jd_tca, 0.0)
-    tca_utc = (datetime(year, mon, day, hr, 0, 0, tzinfo=timezone.utc)
-               + timedelta(minutes=minute, seconds=sec))
-
     return {
         "jd_tca": jd_tca,
-        "tca_utc": tca_utc,
+        "tca_utc": _jd_to_utc(jd_tca),
         "miss_km": float(res.fun),
         "rel_speed_km_s": math.dist(va, vb),
         "pos_a_teme": pa,
@@ -143,6 +149,172 @@ def fine_filter(satrec_a, satrec_b, jd_lo: float, jd_hi: float) -> dict:
         "pos_b_teme": pb,
         "vel_b_teme": vb,
     }
+
+
+# --- Batched fine stage (Phase 7.3) -----------------------------------------
+#
+# The per-window scipy.minimize_scalar above is exact and is kept as the
+# reference oracle, but at scale it dominates wall time (7.1 profile: 82-87%,
+# 1.43 M windows for the full Starlink catalog), because every objective
+# evaluation is two separate orbitcore.sgp4() Python->C++ crossings and every
+# window pays scipy's per-call Python overhead.
+#
+# fine_filter_batch() refines ALL windows together: each iteration evaluates one
+# trial time per window through ONE orbitcore.propagate_batch() crossing (GIL
+# released in C++), and the bookkeeping is vectorized in NumPy — so the per-call
+# boundary and the per-window scipy machinery are amortized away.
+#
+# The refinement is Newton's method on the relative RANGE-RATE, the standard
+# operational TCA solve: the time of closest approach is the instant the range
+# stops shrinking, i.e. where the relative position is perpendicular to the
+# relative velocity,
+#       g(t) = Δr·Δv = 0 ,   g'(t) = |Δv|² + Δr·Δa ≈ |Δv|²
+# so each step is  t <- t - (Δr·Δv) / |Δv|²  (seconds). Δa (gravity gradient)
+# is ~1e-4 of |Δv|² near an encounter, so this quasi-Newton step is effectively
+# full Newton and converges quadratically from the medium-filter sample, which
+# is already within one step of the TCA. The states propagate_batch returns
+# give Δr AND Δv, so no extra work buys the derivative. Co-moving pairs
+# (|Δv|≈0 — docked modules) don't step: any instant is equally close, and the
+# downstream co-located suppression handles them.
+_FINE_NEWTON_STEPS = 5        # converges in ~3; 5 for margin on a wide bracket
+_FINE_CHUNK = 20000           # windows per propagate_batch pass (caps memory)
+_EDGE_TOL_DAY = _EDGE_TOL_MIN / 1440.0       # bracket-edge tolerance, days
+
+
+def _states(out: list) -> tuple:
+    """(M, 3) positions and velocities from a propagate_batch result; a NaN row
+    for any satellite that failed to propagate (decayed)."""
+    pos = np.array(
+        [it[0] if it is not None else (np.nan, np.nan, np.nan) for it in out],
+        dtype=float)
+    vel = np.array(
+        [it[1] if it is not None else (np.nan, np.nan, np.nan) for it in out],
+        dtype=float)
+    return pos, vel
+
+
+def _pair_states(sat_a, sat_b, ep_a, ep_b, jd):
+    """Both satellites' TEME states at each window's time `jd` (absolute JD).
+    One propagate_batch crossing per side; NaN rows where a satellite decayed."""
+    pos_a, vel_a = _states(orbitcore.propagate_batch(
+        sat_a, ((jd - ep_a) * 1440.0).tolist()))
+    pos_b, vel_b = _states(orbitcore.propagate_batch(
+        sat_b, ((jd - ep_b) * 1440.0).tolist()))
+    return pos_a, vel_a, pos_b, vel_b
+
+
+def _minimize_tca(sat_a, sat_b, ep_a, ep_b, lo, hi):
+    """Vectorized TCA per window via Newton on the range-rate (see module note).
+
+    Starts at the bracket midpoint (the medium-filter sample) and steps toward
+    Δr·Δv = 0, clamped to [lo, hi] so a pathological window can't run away.
+    Tracks the best (min-distance) time evaluated, so the result is never worse
+    than a sample we took; NaN (decayed) distances never win.
+    """
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    t = 0.5 * (lo + hi)                       # = jd_flag, the medium sample
+    t_best = t.copy()
+    d2_best = np.full(t.shape, np.inf)
+
+    for _ in range(_FINE_NEWTON_STEPS):
+        pos_a, vel_a, pos_b, vel_b = _pair_states(sat_a, sat_b, ep_a, ep_b, t)
+        dr = pos_a - pos_b
+        dv = vel_a - vel_b
+        d2 = np.einsum("ij,ij->i", dr, dr)
+        d2 = np.where(np.isnan(d2), np.inf, d2)
+        better = d2 < d2_best
+        t_best = np.where(better, t, t_best)
+        d2_best = np.where(better, d2, d2_best)
+
+        g = np.einsum("ij,ij->i", dr, dv)     # range-rate * |Δr|,  km²/s
+        gprime = np.einsum("ij,ij->i", dv, dv)  # ≈ dg/dt,          km²/s²
+        # Step only where |Δv| is real and non-zero: co-moving pairs (|Δv|≈0)
+        # and decayed windows (NaN) keep step 0 — they don't move off the sample.
+        step_sec = np.divide(g, gprime, out=np.zeros_like(g),
+                             where=gprime > 1e-9)
+        t = np.clip(t - step_sec / 86400.0, lo, hi)
+
+    return t_best
+
+
+def fine_filter_batch(satrecs: list, rows: list, step_sec: float) -> list:
+    """Refine every medium-filter window at once; the batched fine stage.
+
+    Args:
+        satrecs:  the screen's index-aligned Satrec list.
+        rows:     medium_filter output, list of (i, j, jd_flag, d_flag). The
+                  bracket for each window is jd_flag +/- one step (the medium
+                  filter guarantees the true TCA lies within it).
+        step_sec: medium-filter step in seconds (sets the bracket half-width).
+
+    Returns:
+        A list aligned with `rows`; each entry is either None (a satellite in
+        the pair could not be propagated across the window — decayed) or a dict
+        matching fine_filter's geometry keys:
+            jd_tca, miss_km, rel_speed_km_s,
+            pos_a_teme, vel_a_teme, pos_b_teme, vel_b_teme
+        tca_utc is intentionally omitted: run_screen builds it (via _jd_to_utc)
+        only for the windows that survive the report cut, not all 1.4 M.
+    """
+    n = len(rows)
+    results: list = [None] * n
+    if n == 0:
+        return results
+
+    step_day = step_sec / 86400.0
+    for start in range(0, n, _FINE_CHUNK):
+        chunk = rows[start:start + _FINE_CHUNK]
+        sat_a = [satrecs[r[0]] for r in chunk]
+        sat_b = [satrecs[r[1]] for r in chunk]
+        ep_a = np.array([_epoch_jd(s) for s in sat_a], dtype=float)
+        ep_b = np.array([_epoch_jd(s) for s in sat_b], dtype=float)
+        jd_flag = np.array([r[2] for r in chunk], dtype=float)
+        lo = jd_flag - step_day
+        hi = jd_flag + step_day
+
+        t_star = _minimize_tca(sat_a, sat_b, ep_a, ep_b, lo, hi)
+
+        # Edge-widen (mirrors fine_filter): if the minimum landed on a bracket
+        # edge, the true TCA likely sits just outside — widen that window by its
+        # own width on that side and re-minimize once. Rare: the medium bracket
+        # normally contains the TCA (the velocity-aware no-skip bound), so this
+        # is a safety net for a pathological row, not a routine path.
+        at_lo = (t_star - lo) < _EDGE_TOL_DAY
+        at_hi = (hi - t_star) < _EDGE_TOL_DAY
+        edge = at_lo | at_hi
+        if edge.any():
+            idx = np.nonzero(edge)[0]
+            width = hi[idx] - lo[idx]
+            wlo = np.where(at_lo[idx], lo[idx] - width, lo[idx])
+            whi = np.where(at_hi[idx], hi[idx] + width, hi[idx])
+            t_star[idx] = _minimize_tca(
+                [sat_a[k] for k in idx], [sat_b[k] for k in idx],
+                ep_a[idx], ep_b[idx], wlo, whi)
+
+        # Authoritative states (position + velocity) at each refined TCA.
+        pos_a, vel_a, pos_b, vel_b = _pair_states(
+            sat_a, sat_b, ep_a, ep_b, t_star)
+        d = pos_a - pos_b
+        miss = np.sqrt(np.einsum("ij,ij->i", d, d))
+        dv = vel_a - vel_b
+        rel_speed = np.sqrt(np.einsum("ij,ij->i", dv, dv))
+
+        for k in range(len(chunk)):
+            if not math.isfinite(miss[k]):
+                continue  # decayed at TCA — drop, like fine_filter's RuntimeError
+            # Plain float tuples (not numpy scalars) to match fine_filter's
+            # output shape and stay clean through teme_to_rtn + JSON.
+            results[start + k] = {
+                "jd_tca": float(t_star[k]),
+                "miss_km": float(miss[k]),
+                "rel_speed_km_s": float(rel_speed[k]),
+                "pos_a_teme": tuple(float(x) for x in pos_a[k]),
+                "vel_a_teme": tuple(float(x) for x in vel_a[k]),
+                "pos_b_teme": tuple(float(x) for x in pos_b[k]),
+                "vel_b_teme": tuple(float(x) for x in vel_b[k]),
+            }
+    return results
 
 
 # Default coarse-to-fine screening parameters. The 60 s medium step is the
@@ -333,14 +505,14 @@ def run_screen(
         timings["n_windows"] = len(rows)
 
     _t = time.perf_counter()
-    step_day = step_sec / 86400.0
+    # Refine every window in one batched pass (Phase 7.3) rather than a per-window
+    # scipy call: fine[k] aligns with rows[k], or is None if the pair decayed
+    # across its window. This is the 7.1-profiled bottleneck (82-87% of wall time).
+    fine = fine_filter_batch(satrecs, rows, step_sec)
     events = []
     n_suppressed = 0
-    for (i, j, jd_flag, _d_flag) in rows:
-        try:
-            out = fine_filter(
-                satrecs[i], satrecs[j], jd_flag - step_day, jd_flag + step_day)
-        except RuntimeError:
+    for (i, j, _jd_flag, _d_flag), out in zip(rows, fine):
+        if out is None:
             # A satellite can't be propagated across this window (decayed):
             # drop the event, leave the rest of the screen intact.
             continue
@@ -374,7 +546,7 @@ def run_screen(
             "sat2_name": mj["name"],
             "sat2_object_type": mj["object_type"],
             "sat2_epoch_age_days": mj["epoch_age_days"],
-            "tca": out["tca_utc"].isoformat(),
+            "tca": _jd_to_utc(out["jd_tca"]).isoformat(),
             "miss_distance_km": out["miss_km"],
             "relative_speed_km_s": out["rel_speed_km_s"],
             "r_km": r_km,
