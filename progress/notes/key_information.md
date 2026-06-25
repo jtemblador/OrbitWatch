@@ -585,7 +585,16 @@ No authentication needed for CelesTrak. Space-Track requires login (optional `cd
 **SOCRATES-Plus (CelesTrak) — PRIMARY validation source. Open access, NO account.**
 
 - Computed with **SGP4 — the same propagator we use** → apples-to-apples, not a method mismatch.
-- Current run: ~14,000 primaries × ~29,600 secondaries → 108,000+ conjunctions, refreshed ~2×/day.
+  Specifically: **STK/CAT** (commercial) on STK's NORAD SGP4, via the **Alfano "smart sieve"**
+  (perigee-apogee → path → time filter → fine TCA) + Alfano MaxProb (fixed covariance).
+- Current run: all active payloads × full catalog → **148,008 conjunctions** (Jun 15, 2026), refreshed
+  **3×/day**, **7-day** forward window, flags everything **within 5 km at TCA**.
+- **How ours compares (Jun 24 research):** same SGP4, same perigee-apogee idea (`coarse_filter`), same
+  time-step + fine-TCA. We **lack the smart-sieve "path filter"** (orbit-geometry min-distance pre-cut)
+  — a *perf* gap (we time-step some pairs they skip), not a miss gap. We built our **own C++ SGP4 +
+  screening** (vs. buying STK) — a strength. SOCRATES = simple **5 km sphere**; we have **both** 5 km
+  Euclidean (matches SOCRATES) **and** SFS RTN-ellipsoid (matches 19 SDS) modes. We emit **no Pc**
+  (SOCRATES's MaxProb uses *assumed*, not measured, covariance → our narrowing is honest, not a gap).
 - **Query endpoint** (returns the table):
   ```
   https://celestrak.org/SOCRATES-Plus/table-socrates.php?CATNR=25544,&ORDER=MINRANGE&MAX=25
@@ -599,10 +608,16 @@ No authentication needed for CelesTrak. Space-Track requires login (optional `cd
 - **Storage:** mirror `tle_fetcher.py` — fetch on demand, Parquet cache, ~6–12 h TTL, atomic write,
   serve cache between refreshes. Do NOT fetch per-request (SOCRATES only updates ~2×/day).
 
-**⚠️ Epoch-matching gotcha (critical for fair comparison):** SOCRATES screens *near-future*
-windows from a specific TLE epoch. If we screen the same objects using TLEs from a *different*
-epoch, the TCA and miss distance will disagree from epoch drift alone — not from any real method
-difference. So Phase 8 must screen with GP data from the same time SOCRATES used.
+**⚠️ Epoch-matching gotcha — and the fix (`DSE`, Jun 24 research):** SOCRATES screens *near-future*
+windows from a specific TLE epoch (~3×/day). If we screen the same objects using TLEs from a
+*different* epoch, the TCA and miss distance disagree from epoch drift alone (~5–10 km/day) — not from
+any real method difference. **The fix is in SOCRATES's own output:** each conjunction reports
+**`DSE` (days-since-epoch)** = the age of the elements it used to that TCA. So we fetch current
+CelesTrak GP, compute *our* element's age at the SOCRATES TCA, and **compare to `DSE` → the epoch match
+is verified, not assumed** (zero auth; filter/segment to small-`DSE` for tight agreement). Backstop for
+the few that drift: **Space-Track `gp_history`** (138 M elsets, query by epoch; ⚠ "1/lifetime" throttle
+→ targeted top-N pulls only, never bulk). The agreement-vs-`DSE` degradation curve is itself a Phase-8
+finding (feeds the SGP4-uncertainty doc 8.4).
 
 **Space-Track `cdm_public` — OPTIONAL stretch (Phase 8.6). Account required (Jose has one).**
 

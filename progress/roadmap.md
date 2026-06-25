@@ -105,11 +105,15 @@ Make it run on a real, dense catalog and use industry-standard geometry.
 
 ## Phase 8: Validate Against SOCRATES (Jun 28 – Jul 4)
 The credibility anchor: prove our detections match reality. SOCRATES (now "SOCRATES-Plus") is
-**open access, no account**, and uses **SGP4 — the same method we do** (apples-to-apples).
+**open access, no account**, and uses **SGP4 — the same method we do** (apples-to-apples). **Confirmed
+parameters (research Jun 24):** SOCRATES screens **all active payloads vs the full catalog**, **3×/day**,
+**7 days forward**, flagging everything **within 5 km at TCA** (148,008 conjunctions as of Jun 15).
+**Epoch-matching — SOLVED, see Notes:** SOCRATES reports `DSE` (days-since-epoch) per object, so we can
+*verify* an epoch match against the free CelesTrak feed instead of assuming one.
 
-- [ ] **8.1 SOCRATES fetcher** — pull CelesTrak conjunctions via the open query endpoint or raw-CSV download (no auth). CSV columns: `NORAD_CAT_ID_1/2`, `OBJECT_NAME_1/2`, `DSE_1/2`, `TCA`, `TCA_RANGE` (miss km), `TCA_RELATIVE_SPEED`, `MAX_PROB`, `DILUTION`. We use the first 7 (objects + TCA + range + speed); ignore `MAX_PROB`/`DILUTION` (Pc-related, de-scoped). Cache to Parquet with a ~6–12 h TTL (SOCRATES updates ~2×/day) — same fetch/serve pattern as `tle_fetcher.py`.
-- [ ] **8.2 Comparison logic** — run our pipeline on the flagged objects and check: do we detect the same events? Compare our TCA vs theirs, our miss distance vs theirs. Track agreements, discrepancies, and false positives. **Epoch-match gotcha:** screen using GP data from the *same time* SOCRATES used, or epoch differences alone will cause TCA/miss-distance disagreement (see Notes).
-- [ ] **8.3 Validation report** — a short report/notebook with match rate and TCA / miss-distance deltas.
+- [ ] **8.1 SOCRATES fetcher** — pull CelesTrak conjunctions via the open `table-socrates.php` query endpoint (`CATNR`/`NAME`/`ORDER`/`MAX`; returns an HTML table) or the raw-CSV full-run download (no auth). CSV columns: `NORAD_CAT_ID_1/2`, `OBJECT_NAME_1/2`, `DSE_1/2`, `TCA`, `TCA_RANGE` (miss km), `TCA_RELATIVE_SPEED`, `MAX_PROB`, `DILUTION`. We use the first 8 (objects + **`DSE` — the epoch-match key** + TCA + range + speed); ignore `MAX_PROB`/`DILUTION` (Pc-related, de-scoped — note `MAX_PROB` uses *fixed assumed* covariance 100/300/100 m, not real covariance, so even SOCRATES isn't doing operational Pc). Cache to Parquet with a ~6–12 h TTL (SOCRATES updates 3×/day) — same fetch/serve pattern as `tle_fetcher.py`. **Verify at build:** exact bulk-CSV URL vs. per-object `table-socrates.php?CATNR=…&FORMAT=…` (a page-source check, not architectural).
+- [ ] **8.2 Comparison logic** — screen the flagged objects in **legacy Euclidean mode at 5 km / 7 days** (NOT the SFS-suppressed default, which would drop events SOCRATES lists; SFS stays a separate lens), and check: do we detect the same events? Compare our TCA vs theirs, our miss vs theirs, matched on unordered pair `{id1,id2}` + TCA proximity. **Epoch-match via `DSE` (the fix):** fetch current CelesTrak GP promptly, compute our element's age at the SOCRATES TCA, and confirm it equals their `DSE` → *verified* same-snapshot comparison, no auth. **Segment/report agreement by `DSE`** (fresh elements → tight agreement; the degradation-with-age curve IS a finding and feeds 8.4). `gp_history` backstop only for the few top-N objects that drift (see Notes).
+- [ ] **8.3 Validation report** — a short report/notebook with match rate and TCA / miss-distance deltas, **segmented by element age (`DSE`)**. Two slices: **top-N closest** (headline — tightest real conjunctions) and **Starlink constellation** (breadth — same engine, `NAME=starlink`).
 - [ ] **8.4 SGP4 uncertainty doc** — state limits plainly ("~1 km accuracy near epoch; suitable for screening, not operational collision avoidance").
 - [ ] **8.5 Tests** — fetcher parsing + comparison logic.
 - [ ] **8.6 (Stretch) Space-Track `cdm_public` cross-check** — *optional.* Fetch real operational CDMs (SP-pipeline, higher fidelity than SGP4) from the existing Space-Track account; check whether our SGP4 screener also flags those events. A *cross-method* "we catch real threats" signal. Detection-only — we do not use the `PC` field. Skip if time is tight.
@@ -129,6 +133,30 @@ Turn it into something a recruiter can run and watch.
 
 **✅ Done when:** one-command startup works, demo is recorded, repo reads as portfolio-ready.
 
+## Phase 10: Geometric Path Filter — Full-Catalog Performance (post-launch / long-term)
+**Built last, after the portfolio is shippable (Phases 8–9 done).** This is the one optimization the
+Jun 24 SOCRATES research surfaced: the **smart-sieve "path filter"** (Alfano 2002 / Hoots-Crawford-
+Roehrich 1984) — the orbit-geometry stage SOCRATES has and we don't. It attacks a weakness we measured
+ourselves (7.1 / `scaling_tracker #3` + `#8`): `coarse_filter` is **inclination-blind**, so on a dense
+constellation **49% of pairs survive** (25 M tuples, 4.5 GB) and the medium filter time-steps them all.
+
+> **Why it's worth doing (the rationale).** Most of those survivors are pairs whose *orbits never
+> actually approach* — they only share an altitude band. A geometric pre-cut drops them before the
+> expensive time-stepping, cutting **both** memory **and** wall time on the full catalog. In production
+> terms that's **less compute → lower cloud cost and faster screens** — the kind of measured efficiency
+> win an employer cares about. It's deferred to last (not a demo blocker; the top-N validation set in
+> Phase 8 is tiny) and is the **only remaining C++ change**, so it forces a `.so` rebuild → must be
+> verified inside the Phase-9.4 Docker image.
+
+- [ ] **10.1 Spec the no-skip geometric bound** — derive a **conservative lower bound** on the orbit-to-orbit minimum distance from relative inclination + nodal geometry (MOID-style), so the filter can *never* drop a pair the medium filter would flag. ⚠ **The hard part:** LEO nodes precess (~5°/day for Starlink), so the bound must hold across the whole 7-day window — mirror 6.3's velocity-aware no-skip discipline. Cite Hoots-Crawford-Roehrich + Alfano smart sieve.
+- [ ] **10.2 C++ `path_filter` + pybind11 binding** — new `orbitcore` function (orbital geometry → drop pairs whose orbits never approach within `threshold + precession margin`), inserted between `coarse_filter` and `medium_filter`. Keeps the cut inside C++ (no new Python materialization; complements `scaling_tracker #3`).
+- [ ] **10.3 Wire into `run_screen`** — new optional stage in the cascade; preserve the index-aligned `(i,j)` contract; gate behind a flag + profile hook so it's measurable and reversible.
+- [ ] **10.4 Validate + re-profile** — **no-skip equivalence:** assert the path filter drops **zero** pairs that the full medium→fine screen would have flagged (cross-check on the dense shell *and* the full 10,544-sat catalog). Then re-run `scripts/profile_screening.py` to quantify the survivor-count drop (target: well below 49%) and the wall-time / peak-RSS improvement vs the 7.1 baseline.
+- [ ] **10.5 Tests** — no-skip property test (the critical lock, mutation-checked) + a survivor-reduction regression + the existing scale-regression suite still byte-identical (the filter changes *speed*, never *results*).
+- [ ] **10.6 Docker verification + close** — rebuild the `.so` inside the Phase-9.4 image, run a full-catalog screen **in the container**, confirm it completes faster/lighter with identical event counts. Update `scaling_tracker #3`/`#8` → resolved, roadmap → Phase 10 done.
+
+**✅ Done when:** a full-catalog screen is measurably faster and lighter, **no real conjunction is dropped** (no-skip proven on the full catalog), and it's verified running inside the Docker image.
+
 ---
 
 ## Milestones
@@ -140,6 +168,7 @@ Turn it into something a recruiter can run and watch.
 | ✅ Jun 23 | **Phase 7:** full-catalog screening with industry **ellipsoidal** RTN screening volumes + measured perf numbers — batched fine stage, type filters, scale-regression locks, 432 tests | Yes |
 | Jul 4  | **Phase 8:** detections validated against CelesTrak SOCRATES | Yes |
 | Jul 10 | **Phase 9:** polished, Dockerized, demo recorded — portfolio-ready | Portfolio-ready |
+| post-Jul 10 | **Phase 10 (long-term):** geometric path filter — full-catalog screen faster & lighter (less compute → lower cost), no-skip proven, verified in Docker | Yes |
 
 ---
 
@@ -169,11 +198,46 @@ Turn it into something a recruiter can run and watch.
 > never Pc** (no covariance). Full model + page citations: `progress/week6and7_planning/sfs_handbook_summary.md`
 > (re-read addendum, Jun 22).
 
-> **Conjunction data sources (Phase 8).** SOCRATES-Plus = open/no-auth, SGP4-based (same method),
-> ~14,000 primaries × ~29,600 secondaries, 108,000+ conjunctions, refreshed ~2×/day. Query:
+> **Conjunction data sources (Phase 8) — updated Jun 24 after a research pass.** SOCRATES-Plus =
+> open/no-auth, SGP4-based (same method), all active payloads × full catalog, 148,008 conjunctions
+> (Jun 15), refreshed **3×/day**, **7-day** forward window, **5 km** screening at TCA. Query:
 > `https://celestrak.org/SOCRATES-Plus/table-socrates.php?CATNR=25544,&ORDER=MINRANGE&MAX=25`
 > (params: `NAME`|`CATNR`, `ORDER`=MINRANGE/MAXPROB/TCA/RELSPEED/SSC, `MAX`≤1000) — plus a raw-CSV
-> full-run download. **Epoch matching is essential**: SOCRATES screens near-future windows from a
-> specific TLE epoch; to compare fairly we must use GP data from the same time. Space-Track
-> `cdm_public` (account required) is an optional higher-fidelity SP cross-check — see Phase 8.6.
-> Full SOCRATES/Space-Track reference lives in `progress/notes/key_information.md`.
+> full-run download.
+
+> **Epoch-matching — the issue and the fix (Jun 24 research).** The worry: SOCRATES screens from
+> *its* recent TLE epoch (~3×/day); CelesTrak `gp.php` only serves the *latest* elements, so a late
+> fetch disagrees on TCA/miss from epoch drift alone (~5–10 km/day), not method. **The fix is in the
+> SOCRATES data itself:** every conjunction carries **`DSE` (days-since-epoch)** = the age of the
+> elements SOCRATES used to that TCA. So we fetch current CelesTrak GP, compute *our* element's age at
+> the same TCA, and **compare to `DSE` → the match is verified, not assumed** — zero auth, reuses our
+> fetcher. Layered solution, preference order: **(1) primary — CelesTrak `gp.php` + `DSE` verification**
+> (free; filter/segment to small-`DSE` for tight agreement); **(2) backstop — Space-Track `gp_history`**
+> (138 M historical elsets, queryable by epoch; Jose has the account) for the *few* top-N objects that
+> drift — ⚠ **"1/lifetime" throttle**, so small targeted pulls only, never bulk; **(3) bonus —
+> Space-Track `cdm_public`** = real operational CDMs (SP pipeline) for an optional *cross-method*
+> detection check (8.6, no `PC` field).
+
+> **How SOCRATES screens vs. how we do (Jun 24 research).** SOCRATES runs **STK/CAT** (commercial
+> Satellite Tool Kit Conjunction Analysis) on STK's NORAD **SGP4**, via the **Alfano "smart sieve"**
+> (2002): **perigee-apogee filter → path filter → time filter → fine TCA**, then Alfano **MaxProb**
+> (fixed covariance). Our pipeline = **coarse (altitude-band) → medium (time-stepped) → fine (Newton
+> TCA)** — same SGP4, same perigee-apogee idea (our `coarse_filter`), same time-step + fine-TCA stages.
+> **Differences (all citable, none a correctness gap):** (a) we **lack the smart-sieve "path filter"**
+> (orbit-geometry minimum-distance pre-cut that drops pairs whose *orbits* never approach regardless of
+> timing) — a *perf* gap, not a miss gap: we time-step some pairs SOCRATES skips, finding the same
+> events more slowly. (b) We **built our own C++/pybind11 SGP4 + screening** rather than buying STK — a
+> *strength* to highlight. (c) SOCRATES screens a **simple 5 km sphere**; we have **both** a 5 km
+> Euclidean mode (matches SOCRATES for validation) **and** the SFS **RTN-ellipsoid** mode (matches 19
+> SDS operational volumes) — we span both criteria. (d) We deliberately **emit no Pc** (SOCRATES's
+> MaxProb uses *assumed*, not measured, covariance — so this is an honest narrowing, not a deficiency).
+> The smart-sieve path filter is **now scheduled as Phase 10** (post-launch, long-term) — see below.
+
+> **Other validation sources surveyed (Jun 24) — SOCRATES still wins.** **TraCSS** (NOAA/Office of
+> Space Commerce civil SSA, 52 pilot users Jun 2026): CDMs still routed through Space-Track `cdm_public`
+> today, API gated to registered owner/operators — not a new open feed; one-line "where this is heading"
+> mention. **ESA DISCOSweb:** object-*characteristics* DB (sizes/launches), **not** a conjunction feed,
+> ESA-member-state accounts only. **CelesTrak historical archives** (`/NORAD/archives/request.php`):
+> email-request form, not an API — manual last-ditch only. SOCRATES remains the one source that is
+> simultaneously open, automatable, and method-aligned (SGP4). Full reference + URLs in
+> `progress/notes/key_information.md`.
