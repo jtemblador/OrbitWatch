@@ -620,25 +620,32 @@ class TestCacheOnlyGroup:
 
 
 class TestDownloader:
-    """_download(): requests-with-certifi primary, curl fallback on TLS/
-    connection failure, 4xx surfaced as urllib.error.HTTPError so fetch()'s
-    403/404 no-retry handling applies regardless of path."""
+    """GPFetcher._download delegates to the shared http_fetch.download_text:
+    requests-with-certifi primary, curl fallback on TLS/connection failure, 4xx
+    surfaced as urllib.error.HTTPError so fetch()'s 403/404 no-retry handling
+    applies regardless of path. (The logic now lives in core.http_fetch — patched
+    there — and is shared with the SOCRATES fetcher.)"""
 
     def setup_method(self):
         self.fetcher = GPFetcher(cache_dir=Path(tempfile.mkdtemp()))
 
+    # Patch the module that actually executes: tle_fetcher imports download_text
+    # from backend.core.http_fetch, so its internal _download_via_curl lookup
+    # resolves there (the core/ vs backend.core/ dual-instance hazard).
+    _MOD = "backend.core.http_fetch"
+
     def test_success_returns_text(self):
         from unittest.mock import MagicMock
         resp = MagicMock(status_code=200, text="HELLO")
-        with patch("core.tle_fetcher.requests.get", return_value=resp):
+        with patch(f"{self._MOD}.requests.get", return_value=resp):
             assert self.fetcher._download("https://x") == "HELLO"
 
     def test_4xx_raises_httperror_without_curl(self):
         import urllib.error
         from unittest.mock import MagicMock
         resp = MagicMock(status_code=404, reason="Not Found")
-        with patch("core.tle_fetcher.requests.get", return_value=resp), \
-             patch.object(self.fetcher, "_download_via_curl") as curl:
+        with patch(f"{self._MOD}.requests.get", return_value=resp), \
+             patch(f"{self._MOD}._download_via_curl") as curl:
             try:
                 self.fetcher._download("https://x")
                 assert False, "should have raised HTTPError"
@@ -648,10 +655,10 @@ class TestDownloader:
 
     def test_ssl_error_falls_back_to_curl(self):
         import requests
-        with patch("core.tle_fetcher.requests.get",
+        with patch(f"{self._MOD}.requests.get",
                    side_effect=requests.exceptions.SSLError("EOF")), \
-             patch.object(self.fetcher, "_download_via_curl",
-                          return_value="VIA_CURL") as curl:
+             patch(f"{self._MOD}._download_via_curl",
+                   return_value="VIA_CURL") as curl:
             assert self.fetcher._download("https://x") == "VIA_CURL"
         curl.assert_called_once()
 

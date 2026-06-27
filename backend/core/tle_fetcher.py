@@ -24,7 +24,6 @@ Usage:
 import json
 import math
 import os
-import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -32,7 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-import requests
+
+from backend.core.http_fetch import download_text
 
 # WGS-72 constants (must match SGP4 — see key_information.md)
 GM_EARTH = 398600.8  # km³/s² (WGS-72 value used by SGP4)
@@ -214,47 +214,13 @@ class GPFetcher:
     _USER_AGENT = "OrbitWatch/1.0"
 
     def _download(self, url: str) -> str:
-        """Download text from CelesTrak.
+        """Download text from CelesTrak (requests → curl TLS fallback).
 
-        Uses requests with proper certificate verification (certifi). Some
-        environments fail the raw-urllib TLS handshake to CelesTrak
-        (UNEXPECTED_EOF_WHILE_READING) — if requests hits an SSL/connection
-        error, fall back to the system `curl`, whose TLS stack tends to
-        succeed where Python's does not. 4xx responses are re-raised as
-        urllib.error.HTTPError so fetch()'s 403/404 no-retry handling applies
-        regardless of which path was used.
+        Thin wrapper over the shared `http_fetch.download_text` (the robust
+        downloader, also used by the SOCRATES fetcher); 4xx surfaces as
+        urllib.error.HTTPError so fetch()'s 403/404 no-retry handling applies.
         """
-        headers = {"User-Agent": self._USER_AGENT}
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code >= 400:
-                raise urllib.error.HTTPError(
-                    url, resp.status_code, resp.reason, hdrs=None, fp=None)
-            return resp.text
-        except (requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError) as e:
-            print(f"  requests fetch failed ({type(e).__name__}); retrying via curl…")
-            return self._download_via_curl(url)
-
-    def _download_via_curl(self, url: str) -> str:
-        """Fallback downloader using the system curl (robust TLS).
-
-        `-f` makes curl exit non-zero on HTTP >= 400; we surface those so the
-        caller treats them like other fetch failures (cache fallback).
-        """
-        try:
-            result = subprocess.run(
-                ["curl", "-fsS", "--max-time", "30",
-                 "-A", self._USER_AGENT, url],
-                capture_output=True, timeout=40, check=True,
-            )
-        except FileNotFoundError:
-            raise RuntimeError("curl not available for fallback download")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"curl download failed (exit {e.returncode}): "
-                f"{e.stderr.decode('utf-8', 'replace')[:200]}")
-        return result.stdout.decode("utf-8")
+        return download_text(url, self._USER_AGENT)
 
     @staticmethod
     def _derive_orbit_params(mean_motion: float, eccentricity: float) -> dict:

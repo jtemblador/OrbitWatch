@@ -595,23 +595,34 @@ No authentication needed for CelesTrak. Space-Track requires login (optional `cd
   screening** (vs. buying STK) — a strength. SOCRATES = simple **5 km sphere**; we have **both** 5 km
   Euclidean (matches SOCRATES) **and** SFS RTN-ellipsoid (matches 19 SDS) modes. We emit **no Pc**
   (SOCRATES's MaxProb uses *assumed*, not measured, covariance → our narrowing is honest, not a gap).
-- **Query endpoint** (returns the table):
-  ```
-  https://celestrak.org/SOCRATES-Plus/table-socrates.php?CATNR=25544,&ORDER=MINRANGE&MAX=25
-  https://celestrak.org/SOCRATES-Plus/table-socrates.php?NAME=starlink,flock&ORDER=MAXPROB&MAX=500
-  ```
-  Params: `NAME` or `CATNR` (1–2 objects, comma-separated), `ORDER` ∈ {MINRANGE, MAXPROB, TCA, RELSPEED, SSC}, `MAX` ≤ 1000.
-- **Raw CSV** of each full run is downloadable, **RFC-4180 with a header row** (parse with stdlib `csv`).
-  11 columns (verified Jun 24 vs CelesTrak `socrates-format.php`):
+- **Bulk CSV = the canonical source (what we use, 8.1).** Each full run is published as a static
+  **RFC-4180 CSV with a header row**: `https://celestrak.org/SOCRATES/sort-minRange.csv` (sorted closest
+  first; siblings `sort-maxProb.csv`, `sort-TCA.csv`, `sort-relSpeed.csv`, `sort-SSC.csv` are the same run,
+  re-sorted). One ~16 MB download = the entire ~148 k-row run; parse with `pd.read_csv`. 11 columns
+  (verified Jun 24 vs `socrates-format.php`):
   `NORAD_CAT_ID_1, OBJECT_NAME_1, DSE_1, NORAD_CAT_ID_2, OBJECT_NAME_2, DSE_2, TCA, TCA_RANGE, TCA_RELATIVE_SPEED, MAX_PROB, DILUTION`
+- **Query endpoint = useful *semantics*, not a transport we use.** `table-socrates.php?{Q}=…&ORDER=…&MAX=…`:
+  `NAME=a,b` (substrings; **two values = pairwise "between A and B"**, e.g. `starlink,flock`), `CATNR=id,`
+  (one object's conjunctions), `INTDES=yyyy-nnn` (by launch). `ORDER` ∈ {MINRANGE, MAXPROB, TCA, RELSPEED,
+  SSC}, **`MAX` ≤ 1000**. ⚠ **Returns HTML only — `FORMAT=csv` is ignored** (confirmed); one request per
+  slice. So we **don't query**: we download the bulk CSV once and reproduce the useful semantics locally —
+  `top_n` (MINRANGE head), `by_name`, **`by_catnr`** (= CATNR), **`between`** (= NAME=a,b pairwise). The
+  only thing **only** the query can do is **`INTDES` (launch filter)** — the intl-designator is **not a CSV
+  column** — and we don't need it.
 - ⚠ **`OBJECT_NAME` carries a bracketed operational-status suffix** (`[+]` active / `[-]` inactive / `[P]`
-  partial) — strip it for the clean name; it doubles as an active/inactive signal. `DSE` (per object) =
+  partial / also `[?]`, `[B]`, `[X]` seen live) — strip the **trailing** bracket for the clean name (keep
+  internal parens like `SHIYAN-21 (SY-21)`); it doubles as an active/inactive signal. `DSE` (per object) =
   *days from the GP epoch used to the TCA* (our epoch-match key). `TCA_RANGE` km, `TCA_RELATIVE_SPEED` km/s,
   `MAX_PROB` from a fixed 100/300/100 m covariance ellipse (confirmed — not real Pc), `DILUTION` km.
+- ⚠ **Object 1 / object 2 are POSITIONAL, not primary/secondary** (format doc: *"the first of the two
+  objects ... not what might be considered the primary"*). **Don't assume object 1 is the active payload** —
+  either side can be the debris. All our filters check both positions.
 - **We use:** both NORAD IDs, both `DSE`, `TCA`, `TCA_RANGE` (miss distance km), `TCA_RELATIVE_SPEED`.
   **We ignore:** `MAX_PROB`, `DILUTION` (Pc/covariance — deliberately out of scope).
-- **Storage:** mirror `tle_fetcher.py` — fetch on demand, Parquet cache, ~6–12 h TTL, atomic write,
-  serve cache between refreshes. Do NOT fetch per-request (SOCRATES only updates ~2×/day).
+- **Implemented (8.1):** `backend/core/socrates_fetcher.py` (`SOCRATESFetcher` — bulk CSV → Parquet cache,
+  **8 h TTL**, `top_n`/`by_name`/`by_catnr`/`between`), on the shared `backend/core/http_fetch.py`
+  downloader (requests→curl-TLS-fallback, also used by `GPFetcher`). Live: 147,814 conjunctions, 11.9 s
+  fetch / 0.03 s cached. Don't fetch per-request — SOCRATES only updates ~3×/day.
 
 **⚠️ Epoch-matching gotcha — and the fix (`DSE`, Jun 24 research):** SOCRATES screens *near-future*
 windows from a specific TLE epoch (~3×/day). If we screen the same objects using TLEs from a
