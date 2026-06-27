@@ -3,6 +3,7 @@ uvicorn
 scipy
 pandas
 numpy
+matplotlib
 xgboost
 requests
 spiceypy

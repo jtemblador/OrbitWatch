@@ -59,6 +59,30 @@ def _to_utc(ts) -> datetime:
     return dt
 
 
+def _mean_datetime(dts: list[datetime]) -> datetime:
+    """Average of tz-aware datetimes (via offsets from the first — no epoch math)."""
+    base = dts[0]
+    avg = sum((d - base).total_seconds() for d in dts) / len(dts)
+    return base + timedelta(seconds=avg)
+
+
+def build_epoch_targets(socrates_df: pd.DataFrame) -> dict:
+    """Per object, the element epoch SOCRATES screened from: TCA − DSE (days).
+
+    SOCRATES uses one element set per object per run, so an object's (TCA − DSE)
+    across its rows should agree; we average to absorb rounding. Feeds the Stage-B
+    `BulkGPAdapter`, which fetches each object's nearest-epoch gp_history elset to
+    reproduce SOCRATES on the SAME elements (lifting the epoch-drift degradation).
+    """
+    acc: dict = defaultdict(list)
+    for _, r in socrates_df.iterrows():
+        tca = _to_utc(r["tca"])
+        for nid, dse in ((int(r["norad_id_1"]), float(r["dse_1"])),
+                         (int(r["norad_id_2"]), float(r["dse_2"]))):
+            acc[nid].append(tca - timedelta(days=dse))
+    return {nid: _mean_datetime(epochs) for nid, epochs in acc.items()}
+
+
 def _stats(values: list) -> dict:
     """Magnitude stats (median / p95 / max of |value|) for a delta list."""
     if not values:

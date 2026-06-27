@@ -16,7 +16,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from core.socrates_compare import (  # noqa: E402
     _dse_bucket,
+    _mean_datetime,
     _stats,
+    build_epoch_targets,
     match_events,
 )
 
@@ -192,6 +194,69 @@ class TestHelpers:
 
     def test_stats_empty(self):
         assert _stats([]) == {"n": 0}
+
+
+class TestEpochTargets:
+    """build_epoch_targets: per object, the element epoch SOCRATES used = TCA − DSE."""
+
+    def test_target_is_tca_minus_dse(self):
+        soc = pd.DataFrame([_soc_row(1, 2, "2026-06-28 12:00:00", 1.0, dse1=2.0, dse2=3.0)])
+        t = build_epoch_targets(soc)
+        assert t[1] == pd.Timestamp("2026-06-26 12:00", tz="UTC")   # 2 d before TCA
+        assert t[2] == pd.Timestamp("2026-06-25 12:00", tz="UTC")   # 3 d before TCA
+
+    def test_averaged_across_rows(self):
+        # object 1 in two rows: (6/28 12:00 − 2d) and (6/29 12:00 − 3d) → both 6/26 12:00
+        soc = pd.DataFrame([
+            _soc_row(1, 2, "2026-06-28 12:00:00", 1.0, dse1=2.0, dse2=9.0),
+            _soc_row(1, 3, "2026-06-29 12:00:00", 1.0, dse1=3.0, dse2=9.0),
+        ])
+        assert build_epoch_targets(soc)[1] == pd.Timestamp("2026-06-26 12:00", tz="UTC")
+
+    def test_every_object_present(self):
+        soc = pd.DataFrame([_soc_row(10, 20, "2026-06-28 12:00:00", 1.0)])
+        assert set(build_epoch_targets(soc)) == {10, 20}
+
+    def test_mean_datetime_midpoint(self):
+        from datetime import datetime, timezone
+        a = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        b = datetime(2026, 6, 3, tzinfo=timezone.utc)
+        assert _mean_datetime([a, b]) == datetime(2026, 6, 2, tzinfo=timezone.utc)
+
+
+class TestEpochMatchedIntegration:
+    """Stage B end-to-end, offline: compare_against_socrates + the real
+    BulkGPAdapter over a synthetic gp_history frame (two epochs per object). The
+    adapter must pick the elset SOCRATES used (TCA − DSE), not the decoy — proven
+    via epoch_ok flipping True. Screen is mocked; no network."""
+
+    def test_adapter_selection_drives_epoch_ok(self, monkeypatch):
+        import core.socrates_compare as scmod
+        from core.demo_seed import build_synthetic_shell
+        from core.socrates_compare import build_epoch_targets, compare_against_socrates
+        from core.spacetrack_fetcher import BulkGPAdapter
+
+        shell = build_synthetic_shell(n=2)               # epoch 2026-06-01 00:00 UTC
+        a, b = (int(x) for x in shell["norad_cat_id"].tolist()[:2])
+
+        decoy = shell.copy()                             # a wrong-epoch elset 9 d later
+        decoy["epoch"] = pd.Timestamp("2026-06-10", tz="UTC")
+        history = pd.concat([shell, decoy], ignore_index=True)
+
+        tca = "2026-06-01 12:00:00"                       # 0.5 d after the true epoch
+        soc = pd.DataFrame([_soc_row(a, b, tca, 1.0, dse1=0.5, dse2=0.5)])
+        adapter = BulkGPAdapter(history, build_epoch_targets(soc))
+
+        def fake_screen(satrecs, meta, start, duration_hours, **kw):
+            return [{"sat1_norad_id": a, "sat2_norad_id": b,
+                     "tca": pd.Timestamp(tca, tz="UTC").isoformat(),
+                     "miss_distance_km": 1.0}]
+        monkeypatch.setattr(scmod, "run_screen", fake_screen)
+
+        out = compare_against_socrates(soc, adapter)
+        assert out["summary"]["n_matched"] == 1
+        # picked the 06-01 elset (not the 06-10 decoy) → our age 0.5 d == DSE 0.5
+        assert out["results"][0]["epoch_ok"] is True
 
 
 @pytest.mark.skip(reason="hits live CelesTrak (GP per object) — opt-in only")

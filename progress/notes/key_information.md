@@ -650,6 +650,37 @@ degrades with element age. **To lift reproduction: pull the exact older snapshot
 ⚠ "Extra" our-events (e.g. secondary-vs-secondary when screening a primary + its secondaries) are *other
 crossings*, NOT false positives. ⚠ object 1/2 are positional → matcher keys on a `frozenset`.
 
+**The `gp_history` epoch-matched lever — 8.3, IMPLEMENTED & it works.** `backend/core/spacetrack_fetcher.py`
+pulls each object's *epoch-matched* historical elset from Space-Track `gp_history` (the elset whose epoch
+≈ `TCA − DSE`, i.e. the one SOCRATES actually screened from), so we reproduce SOCRATES on the **same
+elements**. **Live, current-GP → epoch-matched (3 slices):** ISS 3/9 (33 %) → 8/9 (89 %); top-25-closest
+8/25 (32 %) → **25/25 (100 %)**; Starlink-40 8/40 (20 %) → **40/40 (100 %)** — and **every matched event
+agrees to ΔTCA = 0.000 s, Δmiss = 0.000 km** (byte-level same-method agreement — the headline Phase-8
+result). Current-feed reproduction is low *purely from epoch drift*; the by-`DSE` curve confirms it (at
+>3 d age current collapses while epoch-matched holds ~full). Key facts:
+- **Space-Track auth = cookie session, NO API KEY.** POST `identity=…&password=…` to
+  `https://www.space-track.org/ajaxauth/login`, reuse the cookie (`chocolatechip`). Creds from
+  **`SPACETRACK_USER` / `SPACETRACK_PASS`** in a **gitignored `.env`** (the runner has a tiny built-in
+  `.env` loader — quote-aware, strips unquoted `# inline comments`, never overrides a set env var). Never
+  logged, never committed. Rate limits **<30 req/min, <300/hr** (a min-interval throttle; one bulk query
+  per slice). `gp_history` is immutable → **Parquet-cache forever** ("1/lifetime" in their bandwidth table
+  = pull-once-and-cache, NOT a one-shot quota).
+- ⚠⚠ **Space-Track `format/json` encodes EVERY OMM field as a STRING** (`"MEAN_MOTION": "15.49"`), unlike
+  CelesTrak which sends real JSON numbers. `GPFetcher._parse_json` does numeric comparisons, so the
+  fetcher **must coerce** the numeric fields first (`_coerce_numeric`). The load-bearing one:
+  `EPHEMERIS_TYPE` arrives `"0"`, and `"0" != 0` is `True` → **without coercion every record is silently
+  dropped** (mutation-checked: 0 rows vs 1). Same field names/values otherwise (it IS the OMM standard),
+  so the coerced records feed `_parse_json` unchanged → identical GP-frame schema.
+- **`gp_history` query:** comma-delimited `NORAD_CAT_ID` **AND** a short `EPOCH/{d0}--{d1}` window (their
+  guideline — never an unbounded history pull) + `format/json`. One bulk request covers a whole slice.
+- **`BulkGPAdapter`** serves a pre-fetched frame through `compare_against_socrates`'s `fetch_by_catnr(nid)`
+  seam so the 8.2 orchestrator runs **unchanged**: with epoch targets → each object's *nearest-epoch* elset
+  (the lever); without → its *latest* (a Space-Track-sourced current baseline, the `--current-source
+  spacetrack` path — resilient when **CelesTrak's TLS is blocked**, e.g. on a VPN, which it was during dev).
+- **Runner:** `scripts/validate_socrates.py --epoch-matched [--current-source celestrak|spacetrack]`
+  produces `validation/socrates_report.md` + figures, three slices (ISS / top-N closest / Starlink), each
+  led by the current-vs-epoch-matched lift table + a grouped reproduction-by-`DSE` chart.
+
 **Space-Track `cdm_public` — OPTIONAL stretch (Phase 8.6). Account required (Jose has one).**
 
 - Real operational CDMs from the 18/19 SDS **SP (Special Perturbations)** pipeline — *higher
