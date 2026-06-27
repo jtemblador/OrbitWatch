@@ -601,9 +601,14 @@ No authentication needed for CelesTrak. Space-Track requires login (optional `cd
   https://celestrak.org/SOCRATES-Plus/table-socrates.php?NAME=starlink,flock&ORDER=MAXPROB&MAX=500
   ```
   Params: `NAME` or `CATNR` (1–2 objects, comma-separated), `ORDER` ∈ {MINRANGE, MAXPROB, TCA, RELSPEED, SSC}, `MAX` ≤ 1000.
-- **Raw CSV** of each full run is also downloadable. 11 columns:
+- **Raw CSV** of each full run is downloadable, **RFC-4180 with a header row** (parse with stdlib `csv`).
+  11 columns (verified Jun 24 vs CelesTrak `socrates-format.php`):
   `NORAD_CAT_ID_1, OBJECT_NAME_1, DSE_1, NORAD_CAT_ID_2, OBJECT_NAME_2, DSE_2, TCA, TCA_RANGE, TCA_RELATIVE_SPEED, MAX_PROB, DILUTION`
-- **We use:** both NORAD IDs, `TCA`, `TCA_RANGE` (miss distance km), `TCA_RELATIVE_SPEED`.
+- ⚠ **`OBJECT_NAME` carries a bracketed operational-status suffix** (`[+]` active / `[-]` inactive / `[P]`
+  partial) — strip it for the clean name; it doubles as an active/inactive signal. `DSE` (per object) =
+  *days from the GP epoch used to the TCA* (our epoch-match key). `TCA_RANGE` km, `TCA_RELATIVE_SPEED` km/s,
+  `MAX_PROB` from a fixed 100/300/100 m covariance ellipse (confirmed — not real Pc), `DILUTION` km.
+- **We use:** both NORAD IDs, both `DSE`, `TCA`, `TCA_RANGE` (miss distance km), `TCA_RELATIVE_SPEED`.
   **We ignore:** `MAX_PROB`, `DILUTION` (Pc/covariance — deliberately out of scope).
 - **Storage:** mirror `tle_fetcher.py` — fetch on demand, Parquet cache, ~6–12 h TTL, atomic write,
   serve cache between refreshes. Do NOT fetch per-request (SOCRATES only updates ~2×/day).
@@ -615,8 +620,8 @@ any real method difference. **The fix is in SOCRATES's own output:** each conjun
 **`DSE` (days-since-epoch)** = the age of the elements it used to that TCA. So we fetch current
 CelesTrak GP, compute *our* element's age at the SOCRATES TCA, and **compare to `DSE` → the epoch match
 is verified, not assumed** (zero auth; filter/segment to small-`DSE` for tight agreement). Backstop for
-the few that drift: **Space-Track `gp_history`** (138 M elsets, query by epoch; ⚠ "1/lifetime" throttle
-→ targeted top-N pulls only, never bulk). The agreement-vs-`DSE` degradation curve is itself a Phase-8
+the few that drift: **Space-Track `gp_history`** (query by epoch; ⚠ rate-limited **~30 req/min · 300/hr**,
+verified Jun 24 → batch with comma-delimited `CATNR`, targeted pulls only, never bulk). The agreement-vs-`DSE` degradation curve is itself a Phase-8
 finding (feeds the SGP4-uncertainty doc 8.4).
 
 **Space-Track `cdm_public` — OPTIONAL stretch (Phase 8.6). Account required (Jose has one).**
