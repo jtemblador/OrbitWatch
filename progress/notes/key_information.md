@@ -635,6 +635,21 @@ the few that drift: **Space-Track `gp_history`** (query by epoch; ⚠ rate-limit
 verified Jun 24 → batch with comma-delimited `CATNR`, targeted pulls only, never bulk). The agreement-vs-`DSE` degradation curve is itself a Phase-8
 finding (feeds the SGP4-uncertainty doc 8.4).
 
+**Comparison logic — `socrates_compare.py` (8.2) + the live finding.** Two layers: **`match_events`**
+(pure, reusable — Phase 9's badge) pairs our `run_screen` output to SOCRATES rows by `frozenset({id1,id2})`
++ TCA proximity (10-min match window; the reported Δ is the real agreement), → per-event TCA/miss deltas +
+reproduction rate **bucketed by `DSE`**; **`compare_against_socrates`** (orchestrator) fetches GP per
+object by `CATNR` (`max_objects=200` cap — `gp.php` has no multi-id, so a broad slice would fire thousands
+of requests), builds satrecs via `propagator.build_satrecs_and_meta(df)`, screens the slice's TCA window in
+**legacy 5 km Euclidean** (not SFS — SFS would suppress events SOCRATES lists), and sets `epoch_ok` per
+event (our element age at TCA == `DSE`, both objects). **Live ISS result (the honest finding):** 3/9
+reproduced; matched events agree **TCA <5 s / miss <0.32 km** (same-method SGP4 confirmed), but
+**`epoch_ok=0`** — current `gp.php` has *already rolled* the epochs SOCRATES used (their `DSE` was 2.5–5.3 d),
+so we can't byte-match the snapshot from the free feed. Misses cluster at higher `DSE` → reproduction
+degrades with element age. **To lift reproduction: pull the exact older snapshot via `gp_history`** (8.3).
+⚠ "Extra" our-events (e.g. secondary-vs-secondary when screening a primary + its secondaries) are *other
+crossings*, NOT false positives. ⚠ object 1/2 are positional → matcher keys on a `frozenset`.
+
 **Space-Track `cdm_public` — OPTIONAL stretch (Phase 8.6). Account required (Jose has one).**
 
 - Real operational CDMs from the 18/19 SDS **SP (Special Perturbations)** pipeline — *higher

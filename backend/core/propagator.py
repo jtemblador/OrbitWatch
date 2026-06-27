@@ -86,6 +86,56 @@ def omm_to_sgp4_params(row: pd.Series) -> dict:
     }
 
 
+def _row_screening_meta(row: pd.Series, now: datetime) -> dict:
+    """Build one conjunction-screening metadata dict from a GP DataFrame row.
+
+    Shared by SatellitePropagator.get_all_satrecs and build_satrecs_and_meta so
+    both produce the identical meta shape run_screen expects. epoch_age_days is
+    recomputed from `now` (the cached column is stamped at fetch time and goes
+    stale); periapsis/apoapsis/period/eccentricity/object_id are GP-derived.
+    """
+    epoch = row["epoch"]
+    if hasattr(epoch, "to_pydatetime"):
+        epoch = epoch.to_pydatetime()
+    if epoch.tzinfo is None:
+        epoch = epoch.replace(tzinfo=timezone.utc)
+    epoch_age_days = round((now - epoch).total_seconds() / 86400.0, 2)
+
+    return {
+        "norad_id": int(row["norad_cat_id"]),
+        "name": row["object_name"],
+        "object_type": row["object_type"] if pd.notna(row["object_type"]) else "UNKNOWN",
+        "epoch_age_days": epoch_age_days,
+        "periapsis_km": float(row["periapsis"]),
+        "apoapsis_km": float(row["apoapsis"]),
+        # 7.2 screening: object_id (intl designator, YYYY-DDDxxx) drives the
+        # shared-launch co-located guard; eccentricity + period pick the SFS
+        # screening-volume regime (screening_volumes.regime_for).
+        "object_id": str(row["object_id"]) if pd.notna(row["object_id"]) else "",
+        "eccentricity": float(row["eccentricity"]),
+        "period_min": float(row["period"]),
+    }
+
+
+def build_satrecs_and_meta(df: pd.DataFrame) -> tuple[list, list[dict]]:
+    """Build index-aligned (satrecs, meta) directly from a GP DataFrame — the
+    conjunction-pipeline input, without a propagator instance.
+
+    Standalone (no Satrec cache): one sgp4init per row, fresh each call. Used by
+    the SOCRATES validation (Phase 8.2), which screens an ad-hoc set of fetched
+    objects. The (satrecs, meta) pair is positionally aligned — the contract
+    medium_filter/run_screen rely on (a result index maps to meta[i]'s identity).
+    """
+    now = datetime.now(timezone.utc)
+    satrecs = []
+    meta = []
+    for i in range(len(df)):
+        row = df.iloc[i]
+        satrecs.append(orbitcore.sgp4init(**omm_to_sgp4_params(row)))
+        meta.append(_row_screening_meta(row, now))
+    return satrecs, meta
+
+
 class SatellitePropagator:
     """
     High-level satellite position predictor.
@@ -348,32 +398,9 @@ class SatellitePropagator:
         meta = []
         for i in range(len(df)):
             row = df.iloc[i]
-            satrec, _, _ = self._get_satrec(row)
+            satrec, _, _ = self._get_satrec(row)   # uses the per-sat cache
             satrecs.append(satrec)
-
-            # Recompute epoch age from current time (the cached column is
-            # stamped at fetch time and goes stale), matching the API layer.
-            epoch = row["epoch"]
-            if hasattr(epoch, "to_pydatetime"):
-                epoch = epoch.to_pydatetime()
-            if epoch.tzinfo is None:
-                epoch = epoch.replace(tzinfo=timezone.utc)
-            epoch_age_days = round((now - epoch).total_seconds() / 86400.0, 2)
-
-            meta.append({
-                "norad_id": int(row["norad_cat_id"]),
-                "name": row["object_name"],
-                "object_type": row["object_type"] if pd.notna(row["object_type"]) else "UNKNOWN",
-                "epoch_age_days": epoch_age_days,
-                "periapsis_km": float(row["periapsis"]),
-                "apoapsis_km": float(row["apoapsis"]),
-                # 7.2 screening: object_id (intl designator, YYYY-DDDxxx) drives
-                # the shared-launch co-located guard; eccentricity + period pick
-                # the SFS screening-volume regime (screening_volumes.regime_for).
-                "object_id": str(row["object_id"]) if pd.notna(row["object_id"]) else "",
-                "eccentricity": float(row["eccentricity"]),
-                "period_min": float(row["period"]),
-            })
+            meta.append(_row_screening_meta(row, now))
 
         return satrecs, meta
 
