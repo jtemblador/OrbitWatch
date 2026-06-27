@@ -161,3 +161,7 @@ _…10 more not shown._
 
 _…25 more not shown._
 
+## Limitations
+
+How accurate is this, and why is it *screening* rather than collision avoidance? See **[sgp4_uncertainty.md](sgp4_uncertainty.md)** — the error budget, our SGP4 cross-validation, and the measured epoch-drift effect.
+

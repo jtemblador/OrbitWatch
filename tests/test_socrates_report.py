@@ -152,3 +152,7 @@ class TestFormatReport:
     def test_caveats_present(self):
         out = format_report([], "T")
         assert "Same method" in out and "not collision avoidance" in out
+
+    def test_limitations_footer_links_uncertainty_doc(self):
+        out = format_report([], "T")
+        assert "## Limitations" in out and "sgp4_uncertainty.md" in out

@@ -212,4 +212,12 @@ def format_report(
             out.append("")
         out += [events_heading, "", events_to_markdown(results), ""]
 
+    out += [
+        "## Limitations",
+        "",
+        "How accurate is this, and why is it *screening* rather than collision "
+        "avoidance? See **[sgp4_uncertainty.md](sgp4_uncertainty.md)** — the error "
+        "budget, our SGP4 cross-validation, and the measured epoch-drift effect.",
+        "",
+    ]
     return "\n".join(out) + "\n"
