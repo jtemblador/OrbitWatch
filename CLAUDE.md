@@ -15,7 +15,7 @@ Jose Temblador — CS honors student (CSUDH, graduating May 2026) building this 
 - **Frontend:** Cesium.js (industry-standard 3D globe), vanilla JS
 - **Data:** CelesTrak (OMM/JSON format, not legacy TLE), Space-Track.org (CDM conjunction data)
 - **Storage:** Pandas, Parquet files
-- **Deployment:** Docker
+- **Deployment:** Static website — CI-built `snapshot.json` (active payloads ~11k, screened offline; debris deferred) on GitHub/Cloudflare Pages, client-side `satellite.js` propagation, + compressed snapshot archive (Docker dropped Jun 24; see roadmap Phase 9)
 
 ## Architecture
 ```
