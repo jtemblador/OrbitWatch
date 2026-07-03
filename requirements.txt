@@ -4,7 +4,6 @@ scipy
 pandas
 numpy
 matplotlib
-xgboost
 requests
 spiceypy
 sgp4

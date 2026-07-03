@@ -60,7 +60,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tighten in Week 8 Docker deployment
+    allow_origins=["*"],  # OK for local dev; the deployed site is a static export (no live API)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,19 +1,18 @@
 # OrbitWatch — AI Context
 
 ## What This Project Is
-A satellite orbit tracker and collision predictor. Fetches real satellite TLE data, propagates orbits using SGP4, visualizes them on a Cesium.js 3D globe, detects close approaches between satellites, and classifies collision risk using ML.
+A satellite orbit tracker and conjunction screener. Fetches real satellite GP/OMM data, propagates orbits using a from-scratch C++ SGP4 engine, visualizes them on a Cesium.js 3D globe, and detects close approaches between satellites — a geometric screener (TCA, miss distance, relative speed, RTN) **validated against CelesTrak SOCRATES to machine precision on epoch-matched elements**. Deliberately *not* operational collision avoidance: no probability-of-collision (needs covariance we don't have). (An ML risk classifier was the original plan; dropped Jun 11 — see the Pivot note below.)
 
 ## Who This Is For
 Jose Temblador — CS honors student (CSUDH, graduating May 2026) building this as a portfolio project to stand out when applying to aerospace/defense companies in the South Bay LA area (SpaceX, Northrop Grumman, Boeing, Aerospace Corp, K2 Space, Hadrian).
 
 ## Tech Stack
-- **Compute core:** C++ with pybind11 (SGP4 propagation + conjunction pair scanning)
+- **Compute core:** C++ with pybind11 (SGP4 propagation + conjunction cascade: coarse + medium + fine)
 - **Coordinate transforms:** GMST Z-rotation (TEME→ECEF) + SPICE recgeo (ECEF→geodetic)
-- **Conjunction validation:** Orekit (ESA/CNES standard, Python bindings)
+- **Conjunction validation:** CelesTrak **SOCRATES** (open, SGP4-based → same method) + Space-Track **`gp_history`** epoch-matching (`spacetrack_fetcher.py`). Orekit was evaluated and dropped — SOCRATES is the anchor.
 - **Backend:** Python, FastAPI, uvicorn
-- **ML:** XGBoost or CatBoost (collision risk classifier)
 - **Frontend:** Cesium.js (industry-standard 3D globe), vanilla JS
-- **Data:** CelesTrak (OMM/JSON format, not legacy TLE), Space-Track.org (CDM conjunction data)
+- **Data:** CelesTrak (OMM/JSON format, not legacy TLE) + Space-Track (`gp_history` for validation; `cdm_public` is the optional 8.6 stretch)
 - **Storage:** Pandas, Parquet files
 - **Deployment:** Static website — CI-built `snapshot.json` (active payloads ~11k, screened offline; debris deferred) on GitHub/Cloudflare Pages, client-side `satellite.js` propagation, + compressed snapshot archive (Docker dropped Jun 24; see roadmap Phase 9)
 
@@ -21,14 +20,13 @@ Jose Temblador — CS honors student (CSUDH, graduating May 2026) building this 
 ```
 Cesium.js Frontend (3D Globe)
         ↕ REST API (JSON)
-FastAPI Backend (Python)
-   ├── TLE Fetcher (CelesTrak / Space-Track)
+FastAPI Backend (Python)          [local dev; the deployed site is a static export]
+   ├── GP/OMM Fetcher (CelesTrak / Space-Track)
    ├── C++ Core (pybind11)
    │   ├── SGP4 Propagation Engine
-   │   └── Conjunction Pair Scanner (coarse + medium filter)
+   │   └── Conjunction Cascade (coarse + medium + fine → TCA/miss/RTN)
    ├── Coordinate Transforms (TEME → GMST rotation → ECEF → SPICE geodetic)
-   ├── Orekit Conjunction Validation
-   └── ML Risk Classifier (XGBoost/CatBoost)
+   └── SOCRATES Validation (offline: fetch SOCRATES → screen → match → epoch_ok via DSE)
 ```
 
 ## Dataset Scaling Path
@@ -81,7 +79,7 @@ FastAPI Backend (Python)
 - C++ and SPICE were chosen specifically to appeal to aerospace employers (SpaceX, K2 Space, Aerospace Corp, etc.)
 - **No Pc computation** — deliberately out of scope (needs covariance data we don't have). Output is geometric: TCA, miss distance, relative speed, RTN components. Honest "screening, not collision avoidance" framing.
 - Validation: CelesTrak SOCRATES is the primary anchor (open/no-auth, SGP4-based → same-method). Space-Track `cdm_public` is an optional Phase 8 stretch (SP-based cross-method check, detection-only). Orekit dropped.
-- Stale ML references still in PROJECT_PLAN.md / requirements.txt / week0 docs / 1plan.md — scheduled for Phase 9.3 cleanup, not yet done.
+- Stale ML/Orekit/Docker references cleaned from the current-facing docs + deps + memory in **9.1** (PROJECT_PLAN.md rewritten, `xgboost` dropped from requirements, `main.py` CORS comment, `week0_*` banner-flagged, `1plan.md`/`2build.md` memory fixed). The historical journal (task logs, week plans/notes, `critical_questions.md`) is intentionally left as-is; `README.md` is rewritten later in 9.7.
 - Data is fetched as OMM/JSON from CelesTrak (not legacy TLE format) — future-proofs against the NORAD 5-digit catalog number cap (~July 2026)
 - SPICE does NOT know the TEME frame — we handle TEME→ECEF via GMST Z-rotation, then SPICE for geodetic only
 - Phase 3 scaling items tracked in `progress/scaling_tracker.md` (C++ batch SGP4, background refresh, etc.)

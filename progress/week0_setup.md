@@ -1,5 +1,11 @@
 # Week 0–1 — Setup + C++ Foundation (Due: Apr 2, 2026)
 
+> ⚠ **Superseded (historical record).** Written at project start. The project has since
+> pivoted: the **ML risk classifier was dropped** (Jun 11 — the headline is now a conjunction
+> screener validated against CelesTrak SOCRATES, no Pc), **Orekit** was dropped (SOCRATES is
+> the validation anchor), and **Docker** was dropped for a **static-website** deploy (Jun 24).
+> Kept for the record; see `progress/roadmap.md` and `CLAUDE.md` for current state.
+
 ## Action Items
 
 ### Accounts to Create

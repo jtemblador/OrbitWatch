@@ -1,5 +1,10 @@
 # Week 0–1 Notes: Setup + C++ Foundation
 
+> ⚠ **Superseded (historical record).** Written at project start. Since then: **ML risk
+> classifier dropped** (Jun 11 — headline is now a conjunction screener validated against
+> CelesTrak SOCRATES, no Pc), **Orekit dropped** (SOCRATES is the anchor), **Docker dropped**
+> for a **static-website** deploy (Jun 24). Kept for the record; see `roadmap.md` / `CLAUDE.md`.
+
 **Date:** Mar 20–21, 2026
 **Focus:** Environment setup, C++ toolchain verification, SPICE configuration
 **Tasks covered:** 0.1 (Accounts), 0.2 (Project Setup), 0.3 (C++ Toolchain), 0.4 (SPICE Setup)

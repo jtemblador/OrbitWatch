@@ -1,6 +1,11 @@
-# OrbitWatch — Satellite Orbit Tracker + Collision Predictor
-**Status:** In Progress
-**Timeline:** 8 weeks (Mar 20 – May 15, 2026)
+# OrbitWatch — Satellite Orbit Tracker + Conjunction Screener
+**Status:** Final sprint — Phase 9 (deploy as a static website)
+**Timeline:** Mar 20 – Jul 10, 2026
+
+> **Note:** this is the original planning doc, updated to reflect the finalized shape.
+> The project is a **geometric conjunction screener validated against CelesTrak SOCRATES**,
+> not an ML collision predictor — the ML risk classifier, Orekit, and Docker were dropped
+> (see *Decisions Made*). `CLAUDE.md` → Key Files is the living file map.
 
 ---
 
@@ -16,8 +21,8 @@ A web-based dashboard that:
 1. Fetches real satellite orbit data (TLE) from public sources
 2. Propagates orbits to compute satellite positions at any point in time
 3. Renders satellites on an interactive Cesium.js 3D globe in real-time
-4. Detects and predicts close approaches (conjunctions) between satellites
-5. Classifies risk levels and generates alerts for dangerous passes
+4. Detects close approaches (conjunctions) between satellites
+5. Reports each conjunction's geometry — TCA, miss distance, relative speed, RTN — and validates it against CelesTrak SOCRATES *(a geometric screener; no collision-probability/ML — see Decisions)*
 6. Lets users search/filter by satellite name, type, orbit altitude, country
 
 ---
@@ -27,9 +32,10 @@ A web-based dashboard that:
 - **Visualization:** Cesium.js (industry-standard 3D globe, used by AGI/DoD)
 - **Compute core:** C++ with pybind11 bindings (orbit propagation + conjunction detection)
 - **Coordinate transforms:** NASA SPICE toolkit via spiceypy
-- **Conjunction validation:** Orekit (ESA/CNES standard astrodynamics library)
-- **Backend:** Python (FastAPI) serving orbital data to the Cesium.js frontend
-- **Deployment:** Docker
+- **Conjunction validation:** CelesTrak **SOCRATES** (open, SGP4-based → same method) + Space-Track `gp_history` epoch-matching *(Orekit was evaluated and dropped)*
+- **Backend:** Python (FastAPI) serving orbital data to the Cesium.js frontend *(local dev; the deployed site is a static export)*
+- **Deployment:** **Static website** — CI-built `snapshot.json` on GitHub Pages, client-side propagation *(Docker dropped Jun 24)*
+- **Scope (finalized Jun 11):** dropped the ML risk classifier and Pc computation — a real risk model needs operator-only CDM covariance (SSA agreement); the honest, higher-value headline is a **SOCRATES-validated geometric screener**
 - **Project name:** OrbitWatch
 - **Dataset scaling path:**
   - Phase 1: Space Stations (~30 objects) — ISS, Tiangong, crew vehicles, debris
@@ -53,10 +59,11 @@ A web-based dashboard that:
 └──────┬───────────┬──────────────┬───────────────────┘
        │           │              │
 ┌──────▼──┐ ┌──────▼─────────┐ ┌─▼────────────────────┐
-│  Data   │ │  C++ Core      │ │  ML Risk Classifier  │
-│  Layer  │ │  (pybind11)    │ │  (XGBoost/CatBoost)  │
-│ (TLE)   │ │  SGP4 + SPICE  │ │  + Orekit validation │
-└─────────┘ │  + Conjunction │ └──────────────────────┘
+│  Data   │ │  C++ Core      │ │  SOCRATES Validation │
+│  Layer  │ │  (pybind11)    │ │  (offline: fetch →   │
+│(GP/OMM) │ │  SGP4 + SPICE  │ │  screen → match →    │
+└─────────┘ │  + Conjunction │ │  epoch_ok via DSE)   │
+            │  cascade       │ └──────────────────────┘
             └────────────────┘
 ```
 
@@ -73,8 +80,8 @@ A web-based dashboard that:
   - `visual` — Brightest satellites (~150 objects) ← Phase 2
   - `starlink` — Starlink constellation (~6,000) ← Phase 3
   - `active` — All active satellites (~10,000) ← Phase 4
-- **Space-Track.org** — Official USSPACECOM source, free account required
-  - Conjunction Data Messages (CDMs) for ML training data
+- **Space-Track.org** — Official USSPACECOM source, free account (cookie auth, no API key)
+  - **`gp_history`** — historical elsets for epoch-matched validation (Phase 8.3). `cdm_public` (real operational CDMs) is an optional cross-method check (8.6 stretch)
 
 **Data Format (OMM/JSON, not legacy TLE):**
 We use CelesTrak's JSON/OMM format instead of legacy TLE because:
@@ -165,43 +172,30 @@ We use CelesTrak's JSON/OMM format instead of legacy TLE because:
 
 ---
 
-### Component 5: Conjunction Detection (C++) + Collision Prediction
-**What:** Identify when two satellites will pass dangerously close to each other.
+### Component 5: Conjunction Screening (C++ cascade)
+**What:** Identify when two satellites pass close, and report the geometry — TCA, miss distance, relative speed, RTN components. A *screener*, not collision avoidance (no probability of collision).
 
-**Algorithm:**
-1. **Coarse filter (C++):** Group satellites by orbital altitude band (LEO, MEO, GEO). Only check pairs in similar altitude ranges. Reduces O(n²) to manageable subsets.
-2. **Medium filter (C++):** For each time step (e.g., every 60 seconds over 24-72 hours), compute distance between satellite pairs in the same band. Flag any pair within threshold (e.g., 50 km).
-3. **Fine filter:** For flagged pairs, use `scipy.optimize.minimize_scalar` to find the exact time and minimum distance of closest approach.
-4. **Validation:** Cross-check results against **Orekit** conjunction analysis for accuracy.
-5. **Risk classification:** ML model classifies as LOW / MEDIUM / HIGH / CRITICAL.
+**Algorithm (the screening cascade):**
+1. **Coarse filter (C++):** altitude-band pre-cut — only check pairs whose perigee/apogee shells overlap. Reduces the O(n²) work.
+2. **Medium filter (C++, GIL-released):** time-step each surviving pair over the window with a **velocity-aware no-skip interval bound** — a fast crosser samples far from its true miss on a coarse grid, so plain distance thresholding would miss real conjunctions.
+3. **Fine filter:** Newton on the relative range-rate (`t ← t − (Δr·Δv)/|Δv|²`) to nail the exact TCA + minimum distance; `fine_filter_batch` steps all windows together (7.3). A scipy oracle is kept for cross-validation.
+4. **Validation:** reproduce **CelesTrak SOCRATES** on the same objects/window and check TCA/miss agreement, with the epoch match *verified* via `DSE` (Phase 8).
 
 **Tools:**
-- **C++ (pybind11)** — Coarse and medium filter pair scanning (the O(n²) hot path)
-- `scipy.optimize` — Closest approach time refinement (called only on flagged pairs)
-- **Orekit** — Cross-validates conjunction results against industry-standard astrodynamics
-- `XGBoost` or `CatBoost` — Risk classification model
+- **C++ (pybind11)** — coarse + medium filters (the O(n²) hot path, GIL released)
+- `numpy` (vectorized Newton) + `scipy.optimize` (oracle only) — fine-stage TCA refinement
+- **CelesTrak SOCRATES + Space-Track `gp_history`** — same-method validation anchor *(replaced the originally-planned Orekit cross-check)*
 
 ---
 
-### Component 6: ML Risk Classifier
-**What:** Predict collision risk level for detected conjunctions.
+### Component 6: Validation Against SOCRATES *(replaced the original ML risk classifier)*
+**What:** Prove the screener is correct by reproducing an established open service.
 
-**Training data:**
-- Space-Track CDM (Conjunction Data Message) historical data
-- If insufficient, generate synthetic conjunctions with known parameters
+**Why not ML:** the original plan here was an XGBoost/CatBoost collision-risk classifier. Dropped Jun 11 — a real risk model needs covariance / Pc from operational CDMs, which require an SSA Sharing Agreement (operators only). Without it, ML can't beat a distance threshold, and none of the target aerospace roles asked for it. The honest, higher-value headline is a **validated geometric screener**.
 
-**Features:**
-- Miss distance (km)
-- Relative velocity (km/s)
-- Object A size / type (payload, rocket body, debris)
-- Object B size / type
-- TLE age for both objects (older = more positional uncertainty)
-- Orbit type (LEO-LEO, LEO-debris, etc.)
-- Altitude of conjunction
+**What we built instead (Phase 8):** fetch the SOCRATES bulk run → run our screener on the same flagged objects/window → match by object-pair + TCA → report reproduction rate + TCA/miss deltas **segmented by element age (`DSE`)**, with the epoch match verified via `DSE` and lifted with Space-Track `gp_history`.
 
-**Target:** Risk level (LOW / MEDIUM / HIGH / CRITICAL) or collision probability
-
-**This ties the project to your ML resume strengths** — same pipeline pattern as the NFL project (feature engineering → model training → prediction → actionable output).
+**Result:** **100% reproduction on epoch-matched elements, ΔTCA / Δmiss = 0.000** (byte-level same-method agreement). See `validation/socrates_report.md`; honest limits in `validation/sgp4_uncertainty.md`.
 
 ---
 
@@ -229,18 +223,20 @@ We use CelesTrak's JSON/OMM format instead of legacy TLE because:
 |-------|------|---------|
 | Compute core | **C++ (pybind11)** | SGP4 propagation + conjunction pair scanning |
 | Coordinate transforms | **GMST rotation + SPICE** | TEME → ECEF (custom) → geodetic (SPICE recgeo) |
-| Conjunction validation | **Orekit** (Python bindings) | Cross-check results against ESA/CNES standard |
+| Conjunction validation | **CelesTrak SOCRATES** + Space-Track `gp_history` | Same-method reproduction check, epoch-matched via `DSE` |
 | Frontend | Cesium.js | 3D globe, orbit rendering, time animation |
-| Backend | FastAPI + uvicorn | REST API serving satellite data |
-| Data fetch | urllib (stdlib) | Pull OMM/JSON from CelesTrak / Space-Track |
+| Backend | FastAPI + uvicorn | REST API serving satellite data (local dev) |
+| Data fetch | requests → curl fallback (`http_fetch`) | Pull OMM/JSON from CelesTrak / Space-Track |
 | Data storage | pandas, Parquet | Satellite catalog and conjunction records |
-| Computation | scipy | Closest approach time refinement |
-| ML | XGBoost or CatBoost | Collision risk classification |
-| Deployment | **Docker** | Containerized app, one-command startup |
+| Computation | numpy + scipy | Vectorized fine-stage TCA (scipy oracle for cross-val) |
+| Reporting | matplotlib | Validation-report figures |
+| Deployment | **Static site** (GitHub Pages) | CI-built `snapshot.json`, client-side propagation |
 
 ---
 
 ## Project Structure
+
+*(Illustrative — see `CLAUDE.md` → Key Files for the current, maintained file map.)*
 
 ```
 OrbitWatch/
@@ -260,7 +256,7 @@ OrbitWatch/
 │   ├── routers/
 │   │   └── satellites.py          # All API endpoints (satellites, positions, refresh)
 │   ├── models/
-│   │   └── schemas.py            # 8 Pydantic response models (OpenAPI schema)
+│   │   └── schemas.py            # 10 Pydantic response models (OpenAPI schema)
 │   ├── core/
 │   │   ├── tle_fetcher.py         # GPFetcher — OMM/JSON from CelesTrak + Parquet cache
 │   │   ├── propagator.py          # SatellitePropagator — full pipeline orchestrator
@@ -278,20 +274,15 @@ OrbitWatch/
 │   └── notes/
 │       ├── week{N}_notes.md
 │       └── key_information.md     # Durable findings and gotchas
-└── tests/                          # 265 tests across 7 files
-    ├── test_api.py                # 82 tests — FastAPI endpoints + schema validation
-    ├── test_propagator.py         # 80 tests — full pipeline
-    ├── test_sgp4_cpp.py           # 54 tests — C++ engine + Vallado verification
-    ├── test_gp_fetcher.py         # 37 tests — data fetch + cache
-    ├── test_coordinate_transforms.py  # 26 tests — TEME→ECEF→geodetic
-    └── test_spice.py              # Kernel loading verification
+└── tests/                          # 541 tests across 14 files (SGP4, transforms, API,
+    │                               #   propagator, conjunctions, SOCRATES/Space-Track, …)
+    └── …                           # see CLAUDE.md → Tests for the current list
 ```
 
-**Files planned but not yet created:**
-- `backend/routers/conjunctions.py` — Week 6
-- `backend/core/conjunction_detector.py` — Week 6
-- `backend/ml/risk_classifier.py` — Week 7
-- `Dockerfile`, `docker-compose.yml` — Week 8
+*(The conjunction pipeline — `backend/core/conjunctions.py`, `screening_volumes.py`, the
+SOCRATES/Space-Track modules, `scripts/validate_socrates.py`, and `validation/` — all exist
+now; see `CLAUDE.md` → Key Files. The originally-planned `backend/ml/risk_classifier.py`,
+`Dockerfile`, and `docker-compose.yml` were **dropped** with the ML/Docker pivots.)*
 
 ---
 
@@ -317,7 +308,7 @@ OrbitWatch/
 | Computation time at scale (Phase 3-4) | C++ pair scanning + coarse altitude band filtering. Tracked in scaling_tracker.md | Week 6–8 |
 | TLE accuracy degrades over time | `epoch_age_days` surfaced in API responses. Auto-refresh via POST /api/refresh | ✅ Mitigated |
 | Cesium rendering performance at 6k+ objects | Use Cesium's `PointPrimitiveCollection` (GPU-accelerated) instead of individual entities | Week 5/8 |
-| ML training data for collision risk | Use Space-Track CDM data. Supplement with synthetic conjunctions if needed | Week 7 |
+| ~~ML training data for collision risk~~ | **Dropped (Jun 11)** — Pc/covariance needs operator-only CDMs (SSA agreement); pivoted to a SOCRATES-validated geometric screener | ✅ Resolved (pivot) |
 | Scope creep | Stick to the phase plan. Each phase is a working, demoable product | Ongoing |
 
 ---
@@ -329,7 +320,7 @@ OrbitWatch/
 - [x] Install Python dependencies: fastapi, uvicorn, scipy, pandas, spiceypy
 - [x] Download SPICE kernels (naif0012.tls, pck00011.tpc, earth_latest_high_prec.bpc)
 - [x] Build and test pybind11 C++ extension (orbitcore)
-- [ ] Create a free Space-Track.org account (needed for CDM historical data — Week 7)
-- [ ] Get a free Cesium Ion access token (for terrain/imagery tiles — Week 4)
-- [ ] Install Orekit Python wrapper (Week 6)
-- [ ] Install Docker (Week 8)
+- [x] Create a free Space-Track.org account (used for `gp_history` epoch-matched validation, Phase 8.3)
+- [ ] Get a free Cesium Ion access token + domain-restrict it (for the deployed globe — Phase 9.4)
+- [x] ~~Install Orekit Python wrapper~~ — **dropped** (SOCRATES is the validation anchor)
+- [x] ~~Install Docker~~ — **dropped** (static-website deploy, Phase 9)
