@@ -19,6 +19,7 @@ from core.screening_volumes import (  # noqa: E402
     LEO_4,
     ScreeningVolume,
     gross_threshold_km,
+    is_screenable,
     regime_for,
 )
 
@@ -55,6 +56,30 @@ class TestRegimeFor:
         # perigee > 2000 but not in the deep-space period band (e.g. MEO/GPS,
         # ~720 min): not in the table -> conservative fallback, never under-screen
         assert regime_for(20000.0, 0.01, 718.0) is LEO_1
+
+
+class TestIsScreenable:
+    """is_screenable(): True iff the orbit gets a GENUINE SFS volume (screen it),
+    False if it would hit the LEO-1 fallback (display only). This is the 9.2
+    line — screen only where the industry-standard handbook actually applies."""
+
+    def test_leo_is_screenable(self):
+        assert is_screenable(200.0, 0.001, 91.0) is True       # LEO 1
+        assert is_screenable(2000.0, 0.001, 127.0) is True     # LEO 4 upper edge
+
+    def test_geo_band_is_screenable(self):
+        # GEO gets the real deep-space volume, so it IS screened
+        assert is_screenable(35786.0, 0.0002, 1436.0) is True
+
+    def test_meo_gnss_not_screenable(self):
+        # GPS/GNSS: perigee > 2000 km but ~718 min period (outside the band) ->
+        # no genuine volume -> display, don't screen
+        assert is_screenable(20000.0, 0.01, 718.0) is False
+
+    def test_heo_not_screenable(self):
+        # ecc >= 0.25 -> outside the SFS regimes -> not screened
+        assert is_screenable(450.0, 0.3, 95.0) is False
+        assert is_screenable(35786.0, 0.7, 1436.0) is False
 
 
 class TestEllipsoidMembership:

@@ -115,6 +115,29 @@ def regime_for(
     return _FALLBACK
 
 
+def is_screenable(
+    perigee_km: float,
+    eccentricity: float,
+    period_min: float,
+) -> bool:
+    """True iff this orbit is covered by a GENUINE SFS Table-3 volume — i.e.
+    `regime_for` returns a real regime, not the LEO-1 `_FALLBACK`.
+
+    Covered: LEO 1-4 (perigee <= 2000 km, ecc < 0.25) and the deep-space band
+    (perigee > 2000 km, 1300 < period < 1800 min, ecc < 0.25 — GEO). NOT covered
+    (returns False): MEO/GNSS (perigee > 2000 km but period outside the band) and
+    HEO (ecc >= 0.25). Those get NO handbook volume, so we DISPLAY them but do not
+    screen them with a wrong-size LEO bubble — screening only where the industry
+    standard actually applies (Phase 9.2 decision).
+    """
+    if eccentricity < ECC_MAX:
+        if perigee_km <= 2000.0:
+            return True
+        if 1300.0 < period_min < 1800.0:
+            return True
+    return False
+
+
 def gross_threshold_km(volumes: list[ScreeningVolume]) -> float:
     """
     The single Euclidean gross threshold for a whole-catalog medium-filter scan:
