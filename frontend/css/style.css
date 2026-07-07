@@ -27,7 +27,7 @@ html, body, #cesiumContainer {
 #info-panel-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start; /* keep the × at top-right when the title wraps */
   padding: 8px 10px;
   border-bottom: 1px solid #333;
 }
@@ -36,9 +36,9 @@ html, body, #cesiumContainer {
   color: #4fc3f7;
   font-weight: bold;
   font-size: 14px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Wrap long names onto new lines instead of truncating with an ellipsis. */
+  white-space: normal;
+  overflow-wrap: anywhere;
   flex: 1;
   margin-right: 8px;
 }
@@ -127,6 +127,39 @@ html, body, #cesiumContainer {
 .control-toggle input {
   margin-right: 6px;
   accent-color: #4fc3f7;
+}
+
+/* Group filters — colored swatch + right-aligned count (9.x display rework) */
+.group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.group-toggle input {
+  accent-color: #4fc3f7;
+  margin: 0;
+}
+.group-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.group-name {
+  flex: 1;
+}
+.group-count {
+  color: #888;
+  font-variant-numeric: tabular-nums;
+}
+#controls-section-label {
+  padding: 6px 10px 2px;
+  color: #666;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* --- Time Bar (bottom-center overlay) --- */

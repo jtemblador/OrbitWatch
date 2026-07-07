@@ -20,7 +20,8 @@
 
 const BASE_REFRESH_MS = 5000;
 const MIN_REFRESH_MS = 500;  // floor — keeps the sim-time gap between batches small at speed
-const LERP_FRAME_MS = 50;    // ~20fps interpolation — saves CPU at scale
+const TARGET_FPS = 30;       // animation cap (was Cesium's uncapped ~60 → cooler/quieter)
+const FRAME_MS = 1000 / TARGET_FPS;
 const LABELS_ALL_MAX = 400;  // ≤ this many sats → label everything up front
 
 /**
@@ -72,6 +73,20 @@ const LABEL_STYLE = {
   // Fade out distant labels instead of shrinking them
   translucencyByDistance: new Cesium.NearFarScalar(5e6, 1.0, 1.5e7, 0.0),
 };
+
+// Group key -> Cesium point color (from SAT_GROUPS in snapshot-data.js), built
+// once so we don't re-parse the CSS hex per point.
+const GROUP_COLOR = new Map(
+  (typeof SAT_GROUPS !== "undefined" ? SAT_GROUPS : []).map(
+    (g) => [g.key, Cesium.Color.fromCssColorString(g.color)]
+  )
+);
+const DEFAULT_COLOR = Cesium.Color.fromCssColorString("#ff5a4a");
+
+function groupColor(noradId) {
+  const meta = satelliteMetadata.get(noradId);
+  return (meta && GROUP_COLOR.get(meta.group)) || DEFAULT_COLOR;
+}
 
 /** Create the label for one satellite if it doesn't exist yet (lazy at scale).
  *  Called by info-panel.js (selection) and conjunctions.js (pair labels). */
@@ -125,7 +140,7 @@ function updatePositions(batch) {
         point: pointCollection.add({
           position: scratchCartesian,
           pixelSize: 6,
-          color: Cesium.Color.RED,
+          color: groupColor(noradId), // colored by display group (9.x)
           id: noradId,
         }),
         label: null,
@@ -169,43 +184,63 @@ function updatePositions(batch) {
   if (typeof applyVisibilityState === "function") applyVisibilityState();
 }
 
-/**
- * preRender callback — interpolates satellite positions at ~20fps.
- * Throttled to avoid unnecessary work; bump LERP_FRAME_MS to increase.
- */
-function onPreRender() {
-  if (satOrder.length === 0) return;
-  if (simClock.isPaused()) return; // freeze positions while paused
+// --- Tab visibility: fully idle when the page isn't being looked at ---
+// A hidden tab shouldn't burn CPU/GPU. The browser already throttles rAF in
+// background tabs; this makes it explicit (no lerp, no render, no propagation)
+// and catches positions up on return.
+let tabVisible = !document.hidden;
+document.addEventListener("visibilitychange", () => {
+  tabVisible = !document.hidden;
+  if (tabVisible) {
+    lastFetchTime = performance.now(); // restart the lerp cleanly
+    refreshSatellites();               // catch up to the current sim time
+  }
+});
 
-  // Throttle: skip frame if less than LERP_FRAME_MS since last update
-  const now = performance.now();
-  if (now - lastLerpTime < LERP_FRAME_MS) return;
+/**
+ * Animation driver — a self-throttled ~30fps requestAnimationFrame loop that
+ * advances the lerp for VISIBLE satellites and asks Cesium to draw the frame.
+ *
+ * The viewer runs in requestRenderMode (app.js), so the GPU only draws when we
+ * call scene.requestRender(). This loop stops requesting whenever the clock is
+ * PAUSED or the tab is HIDDEN → the GPU goes idle (the fan-noise fix). Camera
+ * drags still redraw on their own via Cesium. Hidden satellites (a filtered-off
+ * group, or a sat that failed propagation) are skipped entirely — that's what
+ * makes a filter toggle stop real per-frame work.
+ */
+function animationTick(now) {
+  requestAnimationFrame(animationTick);
+  if (satOrder.length === 0) return;
+  if (simClock.isPaused() || !tabVisible) return; // idle: no work, no draw
+
+  if (now - lastLerpTime < FRAME_MS) return; // cap at TARGET_FPS
   lastLerpTime = now;
 
-  // Advance lerp factor based on elapsed time since last batch.
-  // Denominator must match the refresh interval so lerp reaches 1.0 just as
-  // the next batch arrives.
+  // Advance lerp factor based on elapsed time since the last batch, so it
+  // reaches 1.0 just as the next batch arrives.
   const elapsed = now - lastFetchTime;
   lerpFactor = Math.min(elapsed / getRefreshInterval(), 1.0);
 
   for (let i = 0; i < satOrder.length; i++) {
     const entry = satOrder[i];
+    if (!entry.point.show) continue; // hidden group / failed sat — no work
     Cesium.Cartesian3.lerp(entry.start, entry.target, lerpFactor, scratchCartesian);
     entry.point.position = scratchCartesian;
     if (entry.label) entry.label.position = scratchCartesian;
   }
+  viewer.scene.requestRender(); // draw this frame (requestRenderMode)
 }
-
-viewer.scene.preRender.addEventListener(onPreRender);
+requestAnimationFrame(animationTick);
 
 /**
  * Request a fresh position batch from the worker at the current sim time.
- * Skips if the previous batch is still computing (worker answers in ~13 ms at
- * 11k, so this almost never trips).
+ * Skips if the previous batch is still computing (worker answers in ~25 ms at
+ * 5k, so this almost never trips), or while paused / tab hidden (no point
+ * propagating frozen or unseen positions).
  */
 function refreshSatellites() {
   if (!propWorker || workerBusy) return;
-  if (simClock.isPaused()) return; // no work while paused — positions frozen
+  if (simClock.isPaused() || !tabVisible) return;
   workerBusy = true;
   propWorker.postMessage({ type: "compute", timeMs: simClock.getTimeMs() });
 }

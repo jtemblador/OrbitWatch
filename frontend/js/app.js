@@ -38,6 +38,17 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   fullscreenButton: false,
   infoBox: false,         // We'll build our own info panel (Task 4.3)
   selectionIndicator: false,
+
+  // Render on demand, not every frame. By default Cesium redraws the globe at
+  // ~60 fps forever (pinning the GPU + a core → fan noise) even when nothing
+  // moves. With requestRenderMode the scene only redraws when we call
+  // scene.requestRender() (satellites.js drives that at 30 fps while playing),
+  // when the camera moves, or when a scene property changes — so the GPU idles
+  // whenever the clock is paused or the tab is hidden. maximumRenderTimeChange
+  // is Infinity because we animate off our own simClock, not Cesium's clock, so
+  // Cesium must never auto-render on elapsed time.
+  requestRenderMode: true,
+  maximumRenderTimeChange: Infinity,
 });
 
 // Minimize credit display but keep it visible (Cesium Ion ToS requires attribution)
@@ -45,3 +56,7 @@ viewer.cesiumWidget.creditContainer.style.fontSize = "10px";
 
 // Cap pixel ratio at 1x — saves GPU fill on integrated graphics
 viewer.resolutionScale = 1.0;
+
+// Fog is per-frame GPU cost that mostly just hazes the limb — off is cheaper
+// and clearer for a satellite tracker.
+viewer.scene.fog.enabled = false;

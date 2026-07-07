@@ -841,6 +841,24 @@ The deployed frontend reads one file (`snapshot.json`) and propagates all sats i
 
 ---
 
+## Deploy + display rework (Phase 9.4)
+
+**Live at https://jtemblador.github.io/OrbitWatch/** — static, snapshot-driven, zero backend/CelesTrak calls per visit. Durable findings:
+
+**A Cesium page runs hot because of the RENDER LOOP, not the object count.** By default Cesium redraws the globe at ~60 fps forever (pins GPU + a core → fans), even when nothing moves and even while paused. Fix: `requestRenderMode: true` + `maximumRenderTimeChange: Infinity` (we animate off our own simClock, not Cesium's clock), driven by a self-throttled 30 fps `requestAnimationFrame` loop (`animationTick` in satellites.js) that calls `scene.requestRender()` **only while playing AND the tab is visible** → the GPU goes fully idle on pause / tab-hide (headless-verified: 0 renders while paused). An empty globe would run just as hot, so filters/culling are a *secondary* lever.
+
+**⚠ The `requestRenderMode` tax:** with on-demand rendering, ANY scene mutation that can happen while the animation loop isn't running (i.e. while paused) is NOT drawn unless something explicitly calls `viewer.scene.requestRender()` afterward. Every paused-time interaction needs one: select/deselect, group + label toggles, the trail checkbox, conjunction-focus clear. Camera drags and `flyTo` self-render. Two review rounds both circled missing-`requestRender` bugs — it's the easy one to miss.
+
+**Display groups (9.4b):** 5 mutually-exclusive groups classified at load in snapshot-data.js from name (Starlink / stations / GNSS) then orbit regime (`_regime` mirrors backend `screening_volumes`: ecc ≥ 0.25 → HEO, 1300 < period < 1800 → GEO, perigee > 2000 → MEO, else LEO). Hiding a group sets `point.show=false` and `animationTick` skips it → a filter is a real per-frame perf dial. The worker still propagates hidden groups (~25 ms/5 s, negligible) so re-show is instant; on the hidden→shown transition `applyVisibilityState` snaps the point to `lerp(start,target,lerpFactor)` because the animation loop (which writes `.position`) is skipped while hidden and doesn't run while paused.
+
+**CI screening capacity — the deploy's binding constraint.** The full active catalog is ~16k (15,913 fetched, ~12k screenable). The O(N²) SFS screen over that ran **20+ min at 24 h / 38+ min at 72 h on a shared 4-vCPU GitHub runner** — impractical for a repeating deploy. Capped at `--max-sats 5000 --hours 24` (5000 sats / 367 conj / 6.3 min / 0.32 MB gz), keeping **display == screen** so the "fully screened" claim stays complete. The lever to lift it is the **Phase-10 geometric path filter** (free, algorithmic — cuts the work, not just adds cores) or a self-hosted-runner cron; NOT a bigger Actions runner (self-hosted runners on a PUBLIC repo are a security hole — a fork PR can run code on your box).
+
+**Deploy workflow reuse-vs-rebuild.** `deploy.yml` defaults to REUSE: `curl -fsSL` the live `snapshot.json` into `frontend/` and redeploy (~1 min, no C++/screen) — right for a CSS/JS change. REBUILD (~8 min: build `.so` + fetch + screen) is explicit via `workflow_dispatch rebuild_snapshot=true`, or forced when the reuse curl fails (first deploy). `curl -f` fails on HTTP errors AND truncated transfers → a corrupt snapshot can't ship. 9.5's cron plugs into the rebuild path. **`pyarrow` must be in requirements.txt** (the Parquet cache engine) — it was only in the local venv, so the CI build failed on `df.to_parquet` until added. The snapshot build is **SPICE-kernel-free** (uses `teme_to_rtn`, numpy — verified with kernels hidden), so CI needs no kernels.
+
+**Cesium Ion token on a public site:** domain-restrict it to the bare **origin** (`https://jtemblador.github.io`), NOT a path (`.../OrbitWatch`) — browsers send only the origin as the cross-origin `Referer`, so path-scoping 401s. Inject from a repo secret at build time (env var, not string-interpolation). In practice Ion is never hit (base layer = CartoDB, terrain off), so any non-placeholder token renders — a domain-restricted token even works on localhost.
+
+---
+
 ## Cesium CallbackProperty for Real-Time Tracking
 
 **Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.

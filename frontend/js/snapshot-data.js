@@ -23,6 +23,21 @@
 const GM_EARTH = 398600.8;  // km³/s²
 const R_EARTH = 6378.135;   // km equatorial
 
+// Display groups — each satellite belongs to EXACTLY ONE (mutually exclusive),
+// assigned by _classifyGroup at load. Order = render/legend order. `color` is a
+// CSS hex used for both the globe point and the filter swatch. Toggling a group
+// off stops its per-frame animation work (satellites.js) — the heat lever.
+const SAT_GROUPS = [
+  { key: "starlink",   label: "Starlink",         color: "#ff8c3a" },
+  { key: "stations",   label: "Space Stations",   color: "#ffe14a" },
+  { key: "navigation", label: "Navigation / MEO", color: "#4ade80" },
+  { key: "leo",        label: "Other LEO",        color: "#4fc3f7" },
+  { key: "geo",        label: "GEO / high orbit", color: "#c084fc" },
+];
+// Name-prefix matchers (word-boundary so "COSMOS" isn't caught by a stray token).
+const _STATION_RE = /\b(ISS|ZARYA|TIANHE|TIANGONG|MENGTIAN|WENTIAN|CSS)\b/;
+const _GNSS_RE = /\b(GPS|NAVSTAR|GLONASS|GALILEO|BEIDOU)\b/;
+
 // Populated by loadSnapshot(); consumed as globals by the other modules
 // (matches the project's existing plain-globals style).
 const satelliteMetadata = new Map(); // norad_id -> derived metadata (see below)
@@ -59,20 +74,45 @@ function _epochMs(omm) {
   return Date.parse(omm.EPOCH);
 }
 
+/** Orbit regime from period / perigee / eccentricity — mirrors the backend's
+ *  screening_volumes classification (ecc gate, GEO period band, LEO ≤ 2000 km). */
+function _regime(periapsis_km, period_min, ecc) {
+  if (ecc >= 0.25) return "HEO";
+  if (period_min > 1300 && period_min < 1800) return "GEO";
+  if (periapsis_km > 2000) return "MEO";
+  return "LEO";
+}
+
+/** Assign one mutually-exclusive display group. Priority: constellation by name
+ *  first (Starlink / stations / GNSS), then fall back to orbit regime. */
+function _classifyGroup(name, regime) {
+  const n = (typeof name === "string" ? name : "").toUpperCase();
+  if (n.includes("STARLINK")) return "starlink";
+  if (_STATION_RE.test(n)) return "stations";
+  if (_GNSS_RE.test(n) || regime === "MEO") return "navigation";
+  if (regime === "GEO" || regime === "HEO") return "geo";
+  return "leo";
+}
+
 /** Derive the display metadata the old /api/satellites endpoint provided.
  *  Same math as GPFetcher._derive_orbit_params (Kepler's 3rd law, WGS-72). */
 function _deriveMetadata(omm) {
   const n_rad_s = (omm.MEAN_MOTION * 2.0 * Math.PI) / 86400.0;
   const a = Math.cbrt(GM_EARTH / (n_rad_s * n_rad_s)); // semimajor axis, km
+  const period_min = 1440.0 / omm.MEAN_MOTION;
+  const periapsis_km = a * (1.0 - omm.ECCENTRICITY) - R_EARTH;
+  const regime = _regime(periapsis_km, period_min, omm.ECCENTRICITY);
   return {
     name: omm.OBJECT_NAME,
     object_type: omm.OBJECT_TYPE || "UNKNOWN",
     epoch: omm.EPOCH,
     epochMs: _epochMs(omm),
-    period_min: 1440.0 / omm.MEAN_MOTION,
+    period_min,
     inclination_deg: omm.INCLINATION,
     apoapsis_km: a * (1.0 + omm.ECCENTRICITY) - R_EARTH,
-    periapsis_km: a * (1.0 - omm.ECCENTRICITY) - R_EARTH,
+    periapsis_km,
+    regime,
+    group: _classifyGroup(omm.OBJECT_NAME, regime),
   };
 }
 

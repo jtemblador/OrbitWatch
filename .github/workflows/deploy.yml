@@ -1,28 +1,35 @@
 # Deploy OrbitWatch as a static site to GitHub Pages (Phase 9.4).
 #
-# The site is a snapshot-driven static export: this job builds the C++ SGP4
-# extension, runs the real conjunction screen over the active-payload catalog
-# offline (CelesTrak is reachable from the runner), bakes the result into one
-# `snapshot.json`, injects the domain-restricted Cesium Ion token from a repo
-# secret, and publishes `frontend/` to Pages. The browser then propagates every
-# satellite client-side (satellite.js) from that one file — zero upstream calls
-# per visit.
+# The site is a snapshot-driven static export: the browser propagates every
+# satellite client-side (satellite.js) from one cached `snapshot.json`, so there
+# are zero upstream calls per visit. This workflow publishes `frontend/` to Pages
+# and injects the domain-restricted Cesium Ion token from a repo secret.
 #
-# Trigger: manual (workflow_dispatch) + pushes that touch the build/site.
-# Phase 9.5 adds a `schedule:` cron + a snapshot archive to keep it fresh.
+# Two modes, because the conjunction screen is the expensive part:
+#   • REUSE (default, ~1 min) — redeploy the site while keeping the snapshot
+#     that's already live. This is what a frontend/CSS/JS change wants: no need
+#     to re-fetch + re-screen the catalog just to ship a UI tweak.
+#   • REBUILD (~8 min) — build the C++ SGP4 extension, fetch the active catalog,
+#     run the real SFS screen, and bake a fresh snapshot. Triggered explicitly
+#     (manual dispatch with rebuild_snapshot=true) or when there's no live
+#     snapshot to reuse yet. Phase 9.5 adds a `schedule:` cron that rebuilds a
+#     few×/day to keep the data fresh.
 
 name: Deploy to GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      rebuild_snapshot:
+        description: "Re-fetch + re-screen the catalog (~8 min). Off = redeploy reusing the live snapshot (~1 min)."
+        type: boolean
+        default: false
   push:
     branches: [main]
+    # Only the deployed site + this workflow. A push here REUSES the live
+    # snapshot (fast) — data refreshes come from a manual rebuild or the 9.5 cron.
     paths:
       - "frontend/**"
-      - "backend/**"
-      - "orbitcore/**"
-      - "scripts/build_snapshot.py"
-      - "requirements.txt"
       - ".github/workflows/deploy.yml"
 
 # Pages deployment needs these; id-token lets deploy-pages authenticate.
@@ -36,23 +43,54 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+# The snapshot that's currently live — reused unless we're rebuilding.
+env:
+  LIVE_SNAPSHOT_URL: https://jtemblador.github.io/OrbitWatch/snapshot.json
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Decide reuse vs rebuild. Reuse = download the live snapshot into
+      # frontend/. If that fetch fails (e.g. the very first deploy, before any
+      # snapshot exists), fall back to a full rebuild so we never ship an empty
+      # site. `rebuild` output gates the heavy Python/C++ steps below.
+      - name: Decide snapshot source
+        id: decide
+        run: |
+          REBUILD=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "${{ github.event.inputs.rebuild_snapshot }}" = "true" ]; then
+            REBUILD=true
+            echo "Rebuild requested (manual dispatch)."
+          fi
+          if [ "$REBUILD" = "false" ]; then
+            if curl -fsSL -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL"; then
+              echo "Reusing live snapshot ($(wc -c < frontend/snapshot.json) bytes) — no re-screen."
+            else
+              echo "::warning::No live snapshot to reuse — forcing a rebuild."
+              rm -f frontend/snapshot.json
+              REBUILD=true
+            fi
+          fi
+          echo "rebuild=$REBUILD" >> "$GITHUB_OUTPUT"
+
       - name: Set up Python 3.12
+        if: steps.decide.outputs.rebuild == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install Python dependencies (+ pybind11 for the C++ build)
+        if: steps.decide.outputs.rebuild == 'true'
         run: pip install -r requirements.txt pybind11
 
       # Build the pybind11 SGP4 module and drop the .so where the screen imports
       # it (backend/). pybind11's CMake config ships with the pip package.
       - name: Build the C++ SGP4 extension
+        if: steps.decide.outputs.rebuild == 'true'
         run: |
           cd orbitcore
           mkdir -p build && cd build
@@ -65,12 +103,12 @@ jobs:
       #
       # --max-sats 5000: the O(N²) screen over the FULL active catalog (~16k, ~12k
       # screenable) is the heaviest op in the project and takes 20+ min on a shared
-      # 4-vCPU runner — impractical for a deploy that repeats (and reruns a few×/day
-      # in 9.5). Capping keeps display == screen so the "fully screened" claim stays
-      # honest (complete over what it shows). The Phase-10 geometric path filter is
-      # the real lever to lift this cap; a self-hosted runner is the other.
+      # 4-vCPU runner. Capping keeps display == screen so the "fully screened" claim
+      # stays honest (complete over what it shows). The Phase-10 geometric path
+      # filter is the real lever to lift this cap; a self-hosted runner is the other.
       # --hours 24: a standard conjunction horizon; 72 h is ~3× the compute.
       - name: Build snapshot.json (fetch active + screen offline)
+        if: steps.decide.outputs.rebuild == 'true'
         run: python scripts/build_snapshot.py --group active --max-sats 5000 --hours 24
 
       # Inject the Ion token from the repo secret into the gitignored config.js.

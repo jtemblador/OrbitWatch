@@ -38,7 +38,15 @@ let conjTrails = [];                       // [{teme, positions, entity}] both o
 let conjTrailTimer = null;                 // re-rotates trails as time advances
 let conjLabeled = [];                      // [{id, offset}] saved label offsets
 let focusedKey = null;                     // which event is highlighted
+let focusedPair = null;                    // [id1, id2] of the focused event (filter teardown)
 let selectedConjNorad = null;              // satellite whose conjunctions are shown
+
+/** True if the currently-focused conjunction involves this satellite — the group
+ *  filters use it to tear down an orphaned focus when a participant is hidden. */
+function focusedConjunctionInvolves(noradId) {
+  return focusedPair !== null &&
+    (focusedPair[0] === noradId || focusedPair[1] === noradId);
+}
 
 // --- DOM: top-left list + bottom-right detail panel ---
 const conjPanel = document.createElement("div");
@@ -144,6 +152,11 @@ function clearOrb() {
  */
 function focusConjunction(e) {
   focusedKey = eventKey(e);
+  focusedPair = [e.sat1_norad_id, e.sat2_norad_id];
+  // The list shows all close approaches regardless of the display filters, so a
+  // participant may be in a hidden group — reveal both groups (both first, then
+  // one apply) so the encounter is actually visible, not an orphaned orb/trail.
+  if (typeof revealGroups === "function") revealGroups(focusedPair);
   if (selectedConjNorad !== null) showConjunctionsFor(selectedConjNorad);
   renderConjunctionList();
 
@@ -199,13 +212,32 @@ function focusConjunction(e) {
   });
 }
 
-function clearConjunctionFocus() {
+/** Remove the focus VISUALS (orb, both trails, label offsets, row highlight) but
+ *  leave any satellite selection + its detail panel intact. */
+function clearConjunctionVisuals() {
   clearOrb();
   clearTrails();
   restoreLabels();
   focusedKey = null;
+  focusedPair = null;
+  viewer.scene.requestRender(); // clear the orb/trails now even if paused
+}
+
+/** Full teardown — the focus visuals plus the selected-satellite detail panel.
+ *  Used on deselect / LIVE. */
+function clearConjunctionFocus() {
+  clearConjunctionVisuals();
   selectedConjNorad = null;
   detailPanel.style.display = "none";
+}
+
+/** A satellite's display group was just hidden (controls.js). If it's part of
+ *  the focused conjunction, drop only the focus visuals — keep any active
+ *  selection and its conjunction list (refreshed to drop the stale highlight). */
+function handleParticipantHidden(noradId) {
+  if (!focusedConjunctionInvolves(noradId)) return;
+  clearConjunctionVisuals();
+  if (selectedConjNorad !== null) showConjunctionsFor(selectedConjNorad);
 }
 
 // --- Top-left list (global closest approaches) ---

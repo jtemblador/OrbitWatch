@@ -73,6 +73,7 @@ document.getElementById("trail-checkbox").addEventListener("change", function ()
   for (const p of trailPrimitives) {
     p.show = trailVisible;
   }
+  viewer.scene.requestRender(); // reflect the toggle now even if paused (requestRenderMode)
 });
 
 
@@ -99,6 +100,8 @@ function selectSatellite(noradId) {
 
   // Show this satellite's conjunctions (conjunctions.js, if loaded)
   if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
+
+  viewer.scene.requestRender(); // show the selection now even if paused (requestRenderMode)
 }
 
 function deselectSatellite() {
@@ -109,6 +112,7 @@ function deselectSatellite() {
   clearNadirLine();
   clearSelectionIndicator();
   if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
+  viewer.scene.requestRender(); // clear the selection visuals now even if paused
 }
 
 // --- Selection Indicator (highlight selected satellite's point) ---
@@ -383,7 +387,10 @@ viewer.scene.preRender.addEventListener(() => {
 // Self-scheduling loop — adapts interval to clock speed (mirrors satellites.js pattern).
 (function schedulePanelRefresh() {
   setTimeout(() => {
-    if (selectedNoradId !== null && !simClock.isPaused()) {
+    // Gate on tabVisible too (satellites.js) so a backgrounded tab goes fully
+    // idle — matches refreshSatellites / animationTick.
+    const visible = typeof tabVisible === "undefined" || tabVisible;
+    if (selectedNoradId !== null && !simClock.isPaused() && visible) {
       refreshPanelData(selectedNoradId);
 
       // Recompute trail at speed-scaled interval so it stays centered at high speeds
