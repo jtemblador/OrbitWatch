@@ -61,13 +61,17 @@ jobs:
           cp orbitcore*.so ../../backend/
 
       # Fetch the active-payload catalog, run the real SFS screen, write
-      # frontend/snapshot.json (~16k sats; screens only handbook-covered orbits).
-      # 24 h window: the O(N²) screen over the full active catalog is the heaviest
-      # op in the project; 24 h is a standard conjunction horizon and keeps a
-      # repeated CI deploy practical (72 h is ~3× the compute). The Phase-10 path
-      # filter is the real lever for a longer SOCRATES-style 7-day window.
+      # frontend/snapshot.json (screens only handbook-covered orbits).
+      #
+      # --max-sats 5000: the O(N²) screen over the FULL active catalog (~16k, ~12k
+      # screenable) is the heaviest op in the project and takes 20+ min on a shared
+      # 4-vCPU runner — impractical for a deploy that repeats (and reruns a few×/day
+      # in 9.5). Capping keeps display == screen so the "fully screened" claim stays
+      # honest (complete over what it shows). The Phase-10 geometric path filter is
+      # the real lever to lift this cap; a self-hosted runner is the other.
+      # --hours 24: a standard conjunction horizon; 72 h is ~3× the compute.
       - name: Build snapshot.json (fetch active + screen offline)
-        run: python scripts/build_snapshot.py --group active --hours 24
+        run: python scripts/build_snapshot.py --group active --max-sats 5000 --hours 24
 
       # Inject the Ion token from the repo secret into the gitignored config.js.
       # Passed via env (not string-interpolated into the script) so a token with
