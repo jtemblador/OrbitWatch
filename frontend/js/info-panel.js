@@ -23,9 +23,9 @@ function getTrailRefreshInterval() {
 // Near-side: depth test ON, bright (0.8 alpha) — only camera-facing arc visible.
 // Far-side: depth test OFF, faint (0.2 alpha) — full ring visible as a ghost.
 // This makes the ring structure clear: bright arc in front, faint arc behind the globe.
-// API returns TEME (inertial) positions — orbit is a clean near-ellipse in TEME.
+// Track points are TEME (inertial, raw SGP4 output) — orbit is a clean near-ellipse.
 // One GMST rotation places all points in the current ECEF frame for Cesium.
-// Client-side densification (360 API pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
+// Client-side densification (360 pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
 let trailPrimitives = [];
 
 // Nadir line — vertical line from sub-satellite ground point to satellite at altitude.
@@ -78,26 +78,24 @@ document.getElementById("trail-checkbox").addEventListener("change", function ()
 
 // --- Selection Logic ---
 
-async function selectSatellite(noradId) {
+function selectSatellite(noradId) {
   selectedNoradId = noradId;
   panel.style.display = "block";
 
-  // Show name immediately from the satellites map
-  const entry = satellites.get(noradId);
-  const name = entry ? entry.label.text : `NORAD ${noradId}`;
-  document.getElementById("info-panel-title").textContent = name;
+  document.getElementById("info-panel-title").textContent = getSatName(noradId);
+  ensureLabel(noradId); // labels are lazy at scale — the selected sat gets one
 
   // Highlight selected satellite with a cyan ring
   updateSelectionIndicator(noradId);
 
-  // Fetch fresh position + show panel data
-  await refreshPanelData(noradId);
+  // Compute fresh position + show panel data
+  refreshPanelData(noradId);
 
-  // Fetch and render orbit trail + nadir line
+  // Compute and render orbit trail + nadir line
   trailVisible = true;
   document.getElementById("trail-checkbox").checked = true;
   createNadirLine(noradId);
-  await fetchAndRenderTrail(noradId);
+  computeAndRenderTrail(noradId);
 
   // Show this satellite's conjunctions (conjunctions.js, if loaded)
   if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
@@ -142,11 +140,12 @@ function clearSelectionIndicator() {
   }
 }
 
-async function refreshPanelData(noradId) {
+function refreshPanelData(noradId) {
   try {
-    const resp = await fetch(`/api/positions/${noradId}?time=${simClock.getTime()}`);
-    if (!resp.ok) return;
-    const pos = await resp.json();
+    // Client-side single-sat propagation (snapshot-data.js) — float64, so the
+    // readout is exact even though the dots render from float32 batches.
+    const pos = computePositionGd(noradId, simClock.getTimeMs());
+    if (!pos) return; // propagation failed at this time (decayed elements)
 
     const meta = satelliteMetadata.get(noradId);
 
@@ -175,7 +174,7 @@ async function refreshPanelData(noradId) {
       .join("");
 
   } catch (err) {
-    console.error("Failed to fetch position for panel:", err);
+    console.error("Failed to compute position for panel:", err);
   }
 }
 
@@ -189,7 +188,9 @@ function createNadirLine(noradId) {
     polyline: {
       positions: new Cesium.CallbackProperty(() => {
         const entry = satellites.get(noradId);
-        if (!entry) return [];
+        // ok=false → the dot is hidden (propagation failed this batch); the
+        // nadir line must vanish with it, not point at a stale position.
+        if (!entry || entry.ok === false) return [];
         const satPos = entry.point.position;
         // Project to surface: normalize to unit vector, scale to Earth radius
         const surface = new Cesium.Cartesian3();
@@ -250,7 +251,7 @@ function computeGmst(simMs) {
 }
 
 // Cache for client-side trail re-rotation — avoids API call when only Earth has rotated.
-// Stores ~3600 densified TEME Cartesian3 (meters). Set by fetchAndRenderTrail,
+// Stores ~3600 densified TEME Cartesian3 (meters). Set by computeAndRenderTrail,
 // cleared on deselect or new selection.
 let cachedDenseTEME = null;
 let lastTrailRotation = 0;
@@ -340,7 +341,7 @@ function renderTrailFromCache() {
   lastTrailRotation = performance.now();
 }
 
-async function fetchAndRenderTrail(noradId) {
+function computeAndRenderTrail(noradId) {
   clearTrail();
   cachedDenseTEME = null;
 
@@ -349,28 +350,21 @@ async function fetchAndRenderTrail(noradId) {
     const meta = satelliteMetadata.get(noradId);
     const durationMin = meta ? Math.ceil(meta.period_min) : 93; // one full orbit
     const simNowMs = simClock.getTimeMs();
-    const startTime = new Date(simNowMs - (durationMin / 2) * 60 * 1000).toISOString();
+    const startMs = simNowMs - (durationMin / 2) * 60 * 1000;
 
-    const resp = await fetch(
-      `/api/positions/${noradId}/track?duration_min=${durationMin}&steps=360&time=${startTime}`
-    );
-    if (!resp.ok) return;
-    const data = await resp.json();
-
-    if (selectedNoradId !== noradId) return; // selection changed during fetch
-
+    // Client-side SGP4 over one period (snapshot-data.js) — 360 single-sat
+    // propagations, well under a millisecond; no fetch, no worker needed.
     // Single-GMST rotation: all TEME points rotated by the same angle so the
     // trail forms a clean closed orbital ring. Re-rotation via renderTrailFromCache()
     // keeps it aligned with the satellite at accelerated speeds.
-    const rawTEME = data.track.map(pt =>
-      new Cesium.Cartesian3(pt.teme_x * 1000, pt.teme_y * 1000, pt.teme_z * 1000)
-    );
+    const rawTEME = computeTrackTEME(noradId, startMs, durationMin, 360);
+    if (rawTEME.length < 2) return;
     cachedDenseTEME = densifyPositions(rawTEME, 10);
 
     renderTrailFromCache();
     lastTrailRefresh = performance.now();
   } catch (err) {
-    console.error("Failed to fetch orbit trail:", err);
+    console.error("Failed to compute orbit trail:", err);
   }
 }
 
@@ -388,14 +382,14 @@ viewer.scene.preRender.addEventListener(() => {
 // --- Auto-refresh panel data + trail ---
 // Self-scheduling loop — adapts interval to clock speed (mirrors satellites.js pattern).
 (function schedulePanelRefresh() {
-  setTimeout(async () => {
+  setTimeout(() => {
     if (selectedNoradId !== null && !simClock.isPaused()) {
-      await refreshPanelData(selectedNoradId);
+      refreshPanelData(selectedNoradId);
 
-      // Re-fetch trail at speed-scaled interval so it stays centered at high speeds
+      // Recompute trail at speed-scaled interval so it stays centered at high speeds
       const now = performance.now();
       if (trailVisible && now - lastTrailRefresh > getTrailRefreshInterval()) {
-        await fetchAndRenderTrail(selectedNoradId);
+        computeAndRenderTrail(selectedNoradId);
       }
     }
     schedulePanelRefresh();

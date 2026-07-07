@@ -3,10 +3,11 @@
  *
  * Top-right panel with checkboxes to show/hide satellite labels and
  * filter by object type. Type filters only shown when multiple meaningful
- * types exist (Phase 2+). Reads satelliteMetadata for type grouping.
+ * types exist. Reads satelliteMetadata for type grouping.
  *
- * Depends on: satellites, satelliteMetadata (from satellites.js),
- *             selectedNoradId, deselectSatellite (from info-panel.js)
+ * Depends on: satellites (from satellites.js), satelliteMetadata (from
+ *             snapshot-data.js), selectedNoradId, deselectSatellite
+ *             (from info-panel.js)
  */
 
 // --- Toggle State ---
@@ -79,8 +80,11 @@ function applyVisibilityState() {
     const meta = satelliteMetadata.get(noradId);
     const typeVisible = meta ? toggleState.types[meta.object_type] !== false : true;
 
-    entry.point.show = typeVisible;
-    entry.label.show = typeVisible && toggleState.labels;
+    // Fold in the propagation ok-mask (a decayed/diverged sat has no valid
+    // position this batch — mirrors propagate_batch's per-sat sentinels).
+    const show = typeVisible && entry.ok !== false;
+    entry.point.show = show;
+    if (entry.label) entry.label.show = show && toggleState.labels; // labels are lazy at scale
 
     // If hiding the currently selected satellite, deselect it
     if (!typeVisible && selectedNoradId === noradId) {

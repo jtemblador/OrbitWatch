@@ -238,6 +238,21 @@ html, body, #cesiumContainer {
   padding: 4px 0;
 }
 
+/* Freshness line — snapshot age + validation-report link (9.3) */
+#conjunction-freshness {
+  padding: 6px 10px;
+  border-top: 1px solid #333;
+  font-size: 11px;
+  color: #888;
+}
+#conjunction-freshness a {
+  color: #4fc3f7;
+  text-decoration: none;
+}
+#conjunction-freshness a:hover {
+  text-decoration: underline;
+}
+
 .conjunction-row {
   padding: 6px 10px;
   border-bottom: 1px solid #222;

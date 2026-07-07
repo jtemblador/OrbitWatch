@@ -1,23 +1,27 @@
 /**
- * OrbitWatch — Conjunction visualization (Phase 9.1 UX pass).
+ * OrbitWatch — Conjunction visualization (Phase 9.1 UX pass; 9.3 snapshot-driven).
  *
- * Fetches /api/conjunctions once and makes the results interactive:
+ * Renders the snapshot's pre-computed conjunction list (the heavy SFS screen
+ * runs offline in scripts/build_snapshot.py) and makes it interactive:
  *   • top-left list of the closest approaches (click a row → focus it)
  *   • selecting a satellite shows ITS conjunctions in a bottom-right panel
  *   • focusing a conjunction fast-travels the clock to TCA, flies the camera
  *     to the close-approach point, and drops a marker there — so the two
  *     satellites visibly converge (instead of a straight line through Earth)
- *   • header shows "<N> conjunctions · <M> satellites" for context
+ *   • header shows "<N> conjunctions · <M> satellites" + a freshness line
+ *     ("updated X ago" from meta.generated_at) linking the validation report
  *
- * Depends on: viewer (app.js), simClock (clock.js), satellites +
- *   satelliteMetadata (satellites.js). Loaded last (after info-panel.js).
+ * Depends on: viewer (app.js), simClock (clock.js), snapshotReady +
+ *   snapshotConjunctions + compute helpers (snapshot-data.js), satellites +
+ *   ensureLabel (satellites.js). Loaded last (after info-panel.js).
  */
 
-const CONJ_DURATION_HOURS = 24;
-// 7.2: the backend now screens with the SFS per-regime RTN ellipsoids, suppresses
-// co-located / docked clusters, and de-dupes to unique pairs — so the client just
-// renders its events (no client-side threshold or min-miss floor needed anymore).
+// The screen already applied the SFS per-regime RTN ellipsoids, suppressed
+// co-located / docked clusters, and de-duped to unique pairs — the client just
+// renders its events (no client-side threshold or min-miss floor needed).
 const CONJ_LIST_MAX = 12;
+const VALIDATION_REPORT_URL =
+  "https://github.com/jtemblador/OrbitWatch/blob/main/validation/socrates_report.md";
 const CONJ_COLOR = Cesium.Color.ORANGE;
 // Start the clock this far BEFORE TCA (at 1x) so the full approach + closest
 // pass + separation play out on screen, rather than snapping to the instant.
@@ -27,8 +31,7 @@ const TRAIL_BLUE = Cesium.Color.fromCssColorString("#4fc3f7").withAlpha(0.35);
 
 // State
 let conjEvents = [];                       // meaningful events, closest-first
-let conjTotalCount = 0;                     // at-risk pairs (server de-duped)
-let conjSuppressedCount = 0;                // co-located/docked pairs suppressed
+let conjTotalCount = 0;                    // unique at-risk pairs (from meta)
 const conjByNorad = new Map();             // norad_id -> [events involving it]
 let conjOrb = null;                        // translucent yellow orb at the approach
 let conjTrails = [];                       // [{teme, positions, entity}] both orbits
@@ -75,18 +78,15 @@ function temeToEcef(temePts, simMs) {
     c * p.x + s * p.y, -s * p.x + c * p.y, p.z));
 }
 
-async function addTrail(noradId, centerMs) {
+function addTrail(noradId, centerMs) {
   const meta = (typeof satelliteMetadata !== "undefined")
     ? satelliteMetadata.get(noradId) : null;
   const durationMin = meta ? Math.ceil(meta.period_min) : 95;
-  const start = new Date(centerMs - durationMin * 30000).toISOString(); // centered
+  const startMs = centerMs - durationMin * 30000; // centered on the encounter
   try {
-    const r = await fetch(`/api/positions/${noradId}/track`
-      + `?duration_min=${durationMin}&steps=120&time=${start}`);
-    if (!r.ok) return;
-    const d = await r.json();
-    const teme = d.track.map(p =>
-      new Cesium.Cartesian3(p.teme_x * 1000, p.teme_y * 1000, p.teme_z * 1000));
+    // Client-side SGP4 over one period (snapshot-data.js) — no fetch.
+    const teme = computeTrackTEME(noradId, startMs, durationMin, 120);
+    if (teme.length < 2) return;
     const t = { teme, positions: temeToEcef(teme, simClock.getTimeMs()) };
     t.entity = viewer.entities.add({
       polyline: {
@@ -113,10 +113,11 @@ function clearTrails() {
 function offsetLabels(idA, idB) {
   restoreLabels();
   const place = (id, offset) => {
-    const entry = (typeof satellites !== "undefined") ? satellites.get(id) : null;
-    if (!entry) return;
-    conjLabeled.push({ id, offset: entry.label.pixelOffset.clone() });
-    entry.label.pixelOffset = offset;
+    // Labels are lazy at scale — make sure the pair has them before nudging.
+    const label = (typeof ensureLabel === "function") ? ensureLabel(id) : null;
+    if (!label) return;
+    conjLabeled.push({ id, offset: label.pixelOffset.clone() });
+    label.pixelOffset = offset;
   };
   place(idA, new Cesium.Cartesian2(14, -22));  // one name above
   place(idB, new Cesium.Cartesian2(14, 16));   // the other below
@@ -125,7 +126,7 @@ function offsetLabels(idA, idB) {
 function restoreLabels() {
   for (const { id, offset } of conjLabeled) {
     const entry = (typeof satellites !== "undefined") ? satellites.get(id) : null;
-    if (entry) entry.label.pixelOffset = offset;
+    if (entry && entry.label) entry.label.pixelOffset = offset;
   }
   conjLabeled = [];
 }
@@ -141,33 +142,28 @@ function clearOrb() {
  * (so the approach and separation are visible), fly to the close-approach area,
  * mark it with a translucent orb, and draw both satellites' orbit trails.
  */
-async function focusConjunction(e) {
+function focusConjunction(e) {
   focusedKey = eventKey(e);
   if (selectedConjNorad !== null) showConjunctionsFor(selectedConjNorad);
   renderConjunctionList();
 
-  // Close-approach location = either object's position at TCA. 'Z' timestamp —
-  // a literal '+' in the query would decode to a space.
-  const tcaIso = new Date(e.tca).toISOString();
-  let pos;
-  try {
-    const r = await fetch(`/api/positions/${e.sat1_norad_id}?time=${tcaIso}`);
-    if (!r.ok) throw new Error(`positions ${r.status}`);
-    pos = await r.json();
-  } catch (err) {
-    console.error("Could not locate conjunction:", err);
+  // Close-approach location = either object's position at TCA, propagated
+  // client-side (snapshot-data.js) — try the partner if the first one fails.
+  const tcaMs = Date.parse(e.tca);
+  const cart = computeEcefAt(e.sat1_norad_id, tcaMs)
+    || computeEcefAt(e.sat2_norad_id, tcaMs);
+  if (!cart) {
+    console.error("Could not locate conjunction: propagation failed at TCA");
     return;
   }
 
   // Rewind to the lead-in and play at 1x so the whole encounter unfolds.
-  const tcaMs = Date.parse(e.tca);
   simClock.setTime(tcaMs - CONJ_LEAD_MIN * 60000);
   simClock.setSpeed(1);
   if (simClock.isPaused()) simClock.togglePause();
   if (typeof refreshSatellites === "function") refreshSatellites();
 
   // Yellow orb marking the conjunction area.
-  const cart = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, pos.alt_km * 1000);
   clearOrb();
   conjOrb = viewer.entities.add({
     position: cart,
@@ -188,10 +184,8 @@ async function focusConjunction(e) {
 
   // Both orbits in thin blue; re-rotate as time advances so they track the dots.
   clearTrails();
-  await Promise.all([
-    addTrail(e.sat1_norad_id, tcaMs),
-    addTrail(e.sat2_norad_id, tcaMs),
-  ]);
+  addTrail(e.sat1_norad_id, tcaMs);
+  addTrail(e.sat2_norad_id, tcaMs);
   conjTrailTimer = setInterval(() => {
     const ms = simClock.getTimeMs();
     for (const t of conjTrails) t.positions = temeToEcef(t.teme, ms);
@@ -219,10 +213,8 @@ function clearConjunctionFocus() {
 function renderConjunctionList() {
   const satCount = (typeof satelliteMetadata !== "undefined")
     ? satelliteMetadata.size : "—";
-  const suffix = conjSuppressedCount
-    ? ` · ${conjSuppressedCount} co-located hidden` : "";
   document.getElementById("conjunction-header").textContent =
-    `Conjunctions · ${conjTotalCount} pairs · ${satCount} sats${suffix}`;
+    `Conjunctions · ${conjTotalCount} pairs · ${satCount} sats`;
 
   const body = document.getElementById("conjunction-body");
   if (!conjEvents.length) {
@@ -250,14 +242,14 @@ function renderConjunctionList() {
 function showConjunctionsFor(noradId) {
   selectedConjNorad = noradId;
   const events = conjByNorad.get(noradId) || [];
-  const name = (typeof satellites !== "undefined" && satellites.get(noradId))
-    ? satellites.get(noradId).label.text : `NORAD ${noradId}`;
+  const name = getSatName(noradId);
+  const windowH = snapshotMeta ? Math.round(snapshotMeta.screen.window_hours) : 72;
 
   if (!events.length) {
     detailPanel.innerHTML =
       `<div id="conjunction-detail-header">${name}</div>` +
-      `<div class="conjunction-empty">No conjunctions in the next ` +
-      `${CONJ_DURATION_HOURS} h.</div>`;
+      `<div class="conjunction-empty">No conjunctions in the ` +
+      `${windowH} h screening window.</div>`;
     detailPanel.style.display = "block";
     return;
   }
@@ -285,35 +277,42 @@ function showConjunctionsFor(noradId) {
   });
 }
 
-// --- Fetch ---
+// --- Freshness line: "updated X ago" + the validation report link ---
 
-async function fetchConjunctions() {
-  try {
-    // No threshold_km → the backend's SFS ellipsoid volumes (the default).
-    const url = `/api/conjunctions?time=${simClock.getTime()}`
-      + `&duration_hours=${CONJ_DURATION_HOURS}`;
-    const resp = await fetch(url);
-    if (!resp.ok) {
-      console.error("Failed to fetch conjunctions:", resp.status);
-      return;
-    }
-    const data = await resp.json();
+const freshnessLine = document.createElement("div");
+freshnessLine.id = "conjunction-freshness";
+conjPanel.appendChild(freshnessLine);
 
-    conjTotalCount = data.count;
-    conjSuppressedCount = data.suppressed_count || 0;
-    conjEvents = data.events;   // already SFS-filtered, suppressed, de-duped
-    conjByNorad.clear();
-    for (const e of conjEvents) {
-      for (const id of [e.sat1_norad_id, e.sat2_norad_id]) {
-        if (!conjByNorad.has(id)) conjByNorad.set(id, []);
-        conjByNorad.get(id).push(e);
-      }
-    }
-    renderConjunctionList();
-  } catch (err) {
-    console.error("Failed to fetch conjunctions:", err);
-  }
+/** Human age of the snapshot, from real wall-clock time (not the sim clock —
+ *  freshness is about the data, not where the user scrubbed the view). */
+function formatAge(generatedAtIso) {
+  const mins = Math.max(0, (Date.now() - Date.parse(generatedAtIso)) / 60000);
+  if (mins < 60) return `${Math.round(mins)} min`;
+  if (mins < 48 * 60) return `${(mins / 60).toFixed(1)} h`;
+  return `${(mins / 1440).toFixed(1)} d`;
 }
 
-// Fetch shortly after startup so satellite metadata + points exist.
-setTimeout(fetchConjunctions, 2500);
+function renderFreshness() {
+  if (!snapshotMeta) return;
+  freshnessLine.innerHTML =
+    `data updated ${formatAge(snapshotMeta.generated_at)} ago · ` +
+    `<a href="${VALIDATION_REPORT_URL}" target="_blank" rel="noopener"` +
+    ` title="Screening validated against CelesTrak SOCRATES">validation ↗</a>`;
+}
+
+// --- Load: events come pre-computed in the snapshot (screened offline) ---
+
+snapshotReady.then(() => {
+  conjTotalCount = snapshotMeta.n_conjunctions;
+  conjEvents = snapshotConjunctions; // SFS-screened, suppressed, de-duped, closest-first
+  conjByNorad.clear();
+  for (const e of conjEvents) {
+    for (const id of [e.sat1_norad_id, e.sat2_norad_id]) {
+      if (!conjByNorad.has(id)) conjByNorad.set(id, []);
+      conjByNorad.get(id).push(e);
+    }
+  }
+  renderConjunctionList();
+  renderFreshness();
+  setInterval(renderFreshness, 60000); // the age ticks while the tab stays open
+}).catch(() => { /* load failure already reported + shown by satellites.js */ });

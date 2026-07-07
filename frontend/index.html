@@ -9,20 +9,27 @@
   <script src="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Cesium.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Widgets/widgets.css">
 
-  <!-- App styles -->
-  <link rel="stylesheet" href="/css/style.css">
+  <!-- satellite.js (pinned) — in-browser SGP4 from the snapshot's OMM elements.
+       Cross-validated against our C++ engine (0.00 m on identical elements);
+       the worker (js/propagation-worker.js) importScripts the same pinned URL. -->
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@6.0.1/dist/satellite.min.js"></script>
+
+  <!-- App styles (relative paths — the site deploys under a GitHub Pages subpath) -->
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
   <div id="cesiumContainer"></div>
 
   <!-- Config (gitignored — contains Cesium Ion token) -->
-  <script src="/js/config.js"></script>
-  <!-- App modules (load order matters: app → clock → satellites → info-panel → controls → conjunctions) -->
-  <script src="/js/app.js"></script>
-  <script src="/js/clock.js"></script>
-  <script src="/js/satellites.js"></script>
-  <script src="/js/info-panel.js"></script>
-  <script src="/js/controls.js"></script>
-  <script src="/js/conjunctions.js"></script>
+  <script src="js/config.js"></script>
+  <!-- App modules (load order matters:
+       app → clock → snapshot-data → satellites → info-panel → controls → conjunctions) -->
+  <script src="js/app.js"></script>
+  <script src="js/clock.js"></script>
+  <script src="js/snapshot-data.js"></script>
+  <script src="js/satellites.js"></script>
+  <script src="js/info-panel.js"></script>
+  <script src="js/controls.js"></script>
+  <script src="js/conjunctions.js"></script>
 </body>
 </html>

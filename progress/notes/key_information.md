@@ -819,6 +819,28 @@ data.track.map(pt => {
 
 ---
 
+## Static-Site Frontend — client-side SGP4 (Phase 9.3)
+
+The deployed frontend reads one file (`snapshot.json`) and propagates all sats in-browser with **satellite.js 6.0.1** (pinned CDN) — **no `/api/*` calls per visit**. Local FastAPI stays a dev/CI tool. Durable findings:
+
+**satellite.js `json2satrec(omm)` ≡ our C++ SGP4 to 0.00 m** on identical elements (same Vallado math). `computePositionGd` (satellite.js `eciToGeodetic`) ≡ the backend's C+++SPICE pipeline to ~2 m lat/lon, 0.0 m alt, 0.00 mm/s speed. So the two engines are interchangeable for display; conjunctions are precomputed offline by the C++ engine (the authoritative one).
+
+**⚠ WebKit/Safari `Date` rejects non-3-digit fractional seconds → silent NaN epochs.** The snapshot ships **6-digit-µs** timestamps (python-sgp4's strict OMM loader requires the fractional field). Safari desktop + **all iOS browsers** (WebKit-bound) return `Invalid Date` for any fractional-second count ≠ 3 digits — and **satellite.js `json2satrec` parses `EPOCH` with `new Date` internally**. Result: every satrec inits with a NaN epoch, the globe is empty, and **no error is thrown** (`propagate` returns a truthy object full of NaNs, so `!pv.position` null-checks DON'T catch it). **V8/Chrome is lenient → invisible in local dev.** Fix: `_isoToEcma` in `snapshot-data.js` truncates EPOCH/tca/generated_at to strict 3-digit ECMA at load (≤ 1 ms ≈ ≤ 8 m along-track, sub-pixel). Any new `Date.parse` on snapshot timestamps must go through it.
+
+**`propagate()` returns null for decayed/diverged sats but NOT for NaN-epoch satrecs** (returns NaN-filled object). Null-checks guard the former; timestamp hygiene is the only guard for the latter.
+
+**Web worker for the catalog batch.** `propagation-worker.js` propagates all N sats off-thread → **transferable Float32Array** ECEF (zero-copy) + Uint8 ok-mask. Main thread keeps the old speed-adaptive lerp; the worker just replaces `fetch`. **~25 ms per 11k batch** (167 ms one-time init). Float32 (~0.5 m) is deliberate for dots (sub-pixel); info-panel/trails/orb recompute in **float64** on the main thread. Worker≡main ECEF agreement = 0.2 m (the float32 quantum) confirms the split.
+
+**A worker-zero-filled failed slot must NOT enter the lerp.** On propagation failure the worker leaves that sat's 3 floats at (0,0,0). Copying that into lerp targets makes a recovered dot **sweep from Earth's center**. `updatePositions` keeps last-good on `ok=0` and snaps on recovery; the nadir line's `CallbackProperty` checks `entry.ok` (normalizing (0,0,0) is a divide-by-zero).
+
+**Lazy labels above 400 sats.** `PointPrimitiveCollection` does 11k points in one draw call, but `LabelCollection` rasterizes glyphs per-label and tanks at scale. So `ensureLabel(noradId)` creates labels on demand (selected + conjunction pairs only); the Labels toggle governs those. **Measured: 11k sats = 36 fps steady on Intel UHD 620, animation overhead unmeasurable** (paused FPS == animating FPS → the ceiling is Cesium's base globe render, not our code). The roadmap's "show fewer if choppy" lever went unused.
+
+**Relative asset paths are mandatory for GitHub Pages.** A project site serves under `user.github.io/OrbitWatch/`, so absolute `/js/app.js` 404s — must be `js/app.js` (and `snapshot.json`, not `/snapshot.json`).
+
+**opsmode mismatch is harmless for LEO display.** Our C++ engine runs AFSPC `'a'`; satellite.js defaults to `'i'` (improved). Empirically 0.00 m on our LEO shell; would diverge (~km) for deep-space, but display-vs-screen agreement isn't load-bearing (conjunctions precomputed).
+
+---
+
 ## Cesium CallbackProperty for Real-Time Tracking
 
 **Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.
