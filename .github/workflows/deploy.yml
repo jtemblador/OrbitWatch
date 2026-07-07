@@ -1,0 +1,98 @@
+# Deploy OrbitWatch as a static site to GitHub Pages (Phase 9.4).
+#
+# The site is a snapshot-driven static export: this job builds the C++ SGP4
+# extension, runs the real conjunction screen over the active-payload catalog
+# offline (CelesTrak is reachable from the runner), bakes the result into one
+# `snapshot.json`, injects the domain-restricted Cesium Ion token from a repo
+# secret, and publishes `frontend/` to Pages. The browser then propagates every
+# satellite client-side (satellite.js) from that one file — zero upstream calls
+# per visit.
+#
+# Trigger: manual (workflow_dispatch) + pushes that touch the build/site.
+# Phase 9.5 adds a `schedule:` cron + a snapshot archive to keep it fresh.
+
+name: Deploy to GitHub Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - "orbitcore/**"
+      - "scripts/build_snapshot.py"
+      - "requirements.txt"
+      - ".github/workflows/deploy.yml"
+
+# Pages deployment needs these; id-token lets deploy-pages authenticate.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; don't cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies (+ pybind11 for the C++ build)
+        run: pip install -r requirements.txt pybind11
+
+      # Build the pybind11 SGP4 module and drop the .so where the screen imports
+      # it (backend/). pybind11's CMake config ships with the pip package.
+      - name: Build the C++ SGP4 extension
+        run: |
+          cd orbitcore
+          mkdir -p build && cd build
+          cmake -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" ..
+          make -j"$(nproc)"
+          cp orbitcore*.so ../../backend/
+
+      # Fetch the active-payload catalog, run the real SFS screen, write
+      # frontend/snapshot.json (~11k sats; screens only handbook-covered orbits).
+      - name: Build snapshot.json (fetch active + screen offline)
+        run: python scripts/build_snapshot.py --group active
+
+      # Inject the Ion token from the repo secret into the gitignored config.js.
+      # Passed via env (not string-interpolated into the script) so a token with
+      # shell metacharacters can't break out. GitHub masks the value in logs.
+      - name: Inject Cesium Ion token
+        env:
+          ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
+        run: |
+          if [ -z "$ION_TOKEN" ]; then
+            echo "::error::CESIUM_ION_TOKEN secret is empty — set it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          printf 'const CESIUM_ION_TOKEN = "%s";\n' "$ION_TOKEN" > frontend/js/config.js
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
