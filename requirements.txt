@@ -2,6 +2,7 @@ fastapi
 uvicorn
 scipy
 pandas
+pyarrow
 numpy
 matplotlib
 requests
