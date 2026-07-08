@@ -1,121 +1,96 @@
 # OrbitWatch
 
-A real-time satellite orbit tracker and collision prediction system. Fetches live TLE data from CelesTrak, propagates orbits using a custom C++ SGP4 engine, and visualizes satellite positions on an interactive 3D globe — with conjunction detection and ML-based collision risk classification in progress.
+**Live site: https://jtemblador.github.io/OrbitWatch/**
 
-> **Status:** Active development — Weeks 0–5 complete (core engine, backend API, 3D globe), Week 6+ targeting conjunction detection and ML risk scoring.
+A satellite conjunction screener built from scratch: a C++ SGP4 propagation engine,
+an industry-standard screening cascade, and a self-refreshing 3D globe that
+screens **5,000 satellites for close approaches, 3×/day** — validated against
+CelesTrak SOCRATES to **0.000 km agreement** on epoch-matched elements.
 
----
+[![OrbitWatch — live conjunction view](docs/img/live-conjunction-view.png)](https://jtemblador.github.io/OrbitWatch/)
 
-## What It Does
+## What it is
 
-- **Tracks real satellites** — fetches OMM/JSON data from CelesTrak (space stations, visual sats, Starlink constellation)
-- **Propagates orbits in C++** — Vallado SGP4 engine compiled via pybind11 for fast batch position computation
-- **Converts coordinates** — TEME → ECEF (GMST rotation) → geodetic lat/lon/alt (NASA SPICE toolkit)
-- **Serves a REST API** — FastAPI backend with endpoints for satellite metadata, current positions, and orbit trail data
-- **Renders a 3D globe** — Cesium.js viewer with satellite points, labels, orbit trails at correct altitude, ground tracks, and time animation controls
-- **Detects conjunctions** *(in progress)* — C++ pair scanning with altitude-band coarse filter + time-stepped medium filter + scipy fine filter
-- **Classifies collision risk** *(planned)* — XGBoost/CatBoost model trained on conjunction geometry features
+- **Geometric conjunction screening**: time of closest approach (TCA), miss
+  distance, relative speed, and the miss split into radial / along-track /
+  cross-track (**RTN**) — using the 19 SDS **RTN screening ellipsoids** (SFS
+  Handbook), not a naive distance sphere.
+- **Not collision avoidance**: no probability of collision. Pc needs covariance
+  data only satellite operators have; claiming it from public elements would be
+  dishonest. This is screening on public GP data, and says so.
 
----
-
-## Architecture
+## How it works
 
 ```
-Cesium.js Frontend (3D Globe)
-        ↕ REST API (JSON)
-FastAPI Backend (Python)
-   ├── TLE Fetcher          — CelesTrak OMM/JSON, Parquet cache
-   ├── C++ Core (pybind11)
-   │   ├── SGP4 Propagator  — batch position computation
-   │   └── Conjunction Scanner (coarse + medium filter) [Week 6]
-   ├── Coordinate Transforms — TEME → ECEF → geodetic (SPICE)
-   ├── Orekit Validation    — ESA/CNES cross-validation [Week 6]
-   └── ML Risk Classifier   — XGBoost/CatBoost [Week 7]
+GitHub Actions robot job (3×/day cron)
+  fetch CelesTrak active catalog → C++ SGP4 screen (24 h window) → snapshot.json
+        → publish to GitHub Pages  (+ append archive to a data branch)
+
+Browser (static site — zero backend, zero per-visit upstream calls)
+  snapshot.json → satellite.js SGP4 in a web worker → Cesium.js globe
 ```
 
----
+The screening cascade: **coarse** altitude-band filter → **medium** time-stepped
+C++ scan with a velocity-aware no-skip bound → **fine** batched Newton solve on
+the relative range-rate (the standard operational TCA method) → RTN geometry.
+The browser propagates every satellite client-side from orbital elements —
+cross-validated at **0.00 m** against the C++ engine.
 
-## Tech Stack
+![Focused conjunction — two orbits, TCA marker, ground point](docs/img/conjunction-focus.png)
 
-| Layer | Technology |
+## Validation
+
+Screened events are compared against **CelesTrak SOCRATES** (same method — SGP4 —
+so agreement is measurable). Run twice per slice: once with today's element feed,
+once with the **exact element vintage SOCRATES used** (Space-Track `gp_history`):
+
+| Slice | Current elements | Epoch-matched elements |
+|---|---|---|
+| ISS (all partners) | 3/9 reproduced · median Δmiss 1.13 km | **8/9 · Δ 0.000 km** |
+| Top-25 closest approaches | 8/25 · median Δmiss 2.58 km | **25/25 · Δ 0.000 km** |
+| Starlink top-40 | 8/40 · median Δmiss 2.51 km | **40/40 · Δ 0.000 km** |
+
+**The exact zeros are the point**: SGP4 is deterministic, so on identical inputs a
+correct implementation must agree exactly; any residual would be our bug. The
+left column measures **element-epoch drift** (km-scale in a day), which the
+comparison isolates from method error. Engine accuracy: **< 1 m** vs. the
+Vallado reference implementation.
+
+📄 [Full validation report](validation/socrates_report.md) ·
+[SGP4 accuracy & limits](validation/sgp4_uncertainty.md)
+
+## Tech
+
+| | |
 |---|---|
-| Orbital engine | C++ (Vallado SGP4) + pybind11 |
-| Coordinate transforms | Custom GMST rotation + NASA SPICE (spiceypy) |
-| Backend | Python, FastAPI, uvicorn |
-| Data | CelesTrak OMM/JSON, pandas, Parquet |
-| ML | XGBoost, scipy |
-| Frontend | Cesium.js, vanilla JS |
-| Validation | Orekit (ESA/CNES Python bindings) |
-| Deployment | Docker *(planned Week 8)* |
+| Propagation + screening | **C++** (from-scratch Vallado SGP4, pybind11), NumPy |
+| Frames & transforms | TEME → ECEF via GMST, SPICE geodetics, RTN frame |
+| Data | CelesTrak (OMM/JSON), Space-Track `gp_history` (validation) |
+| Frontend | Cesium.js globe, satellite.js in a web worker, vanilla JS |
+| Automation | GitHub Actions: build → screen → deploy + snapshot archive |
+| Tests | **563 passing** — offline, deterministic, mutation-checked locks |
 
----
-
-## Features Completed
-
-- C++ SGP4 propagation engine with pybind11 Python bindings
-- Full coordinate transform pipeline: TEME → ECEF → geodetic via GMST + SPICE
-- FastAPI backend with 6 REST endpoints and full Pydantic OpenAPI schema
-- Interactive Cesium.js globe: satellite points, labels, click info panel, selection indicator
-- Orbit trail visualization reconstructed from TEME positions at real orbital altitude
-- Nadir line (satellite ground track point) with real-time tracking
-- Simulated clock: play/pause/speed controls, adaptive refresh based on simulation rate
-- Display controls panel: toggle labels, trails, nadir lines
-- 279 automated tests across 7 test files (82 API + 197 backend/engine)
-
----
-
-## Project Structure
-
-```
-orbitcore/          C++ SGP4 engine (CMake + pybind11)
-backend/
-  main.py           FastAPI app entry point
-  routers/          API route handlers
-  core/             Propagator, TLE fetcher, coordinate transforms
-  models/           Pydantic schemas
-frontend/
-  index.html        Cesium.js viewer
-  js/               app.js, clock.js, satellites.js, info-panel.js, controls.js
-tests/              pytest suite (7 files, 279 tests)
-progress/           Weekly plans, task logs, roadmap, notes
-```
-
----
-
-## Running Locally
+## Run locally
 
 ```bash
-# Install Python dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt pybind11
 
-# Build the C++ extension
-cd orbitcore && mkdir build && cd build
-cmake .. && make
-cp orbitcore*.so ../../backend/
+# Build the C++ engine
+cd orbitcore && mkdir -p build && cd build
+cmake -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" .. && make -j
+cp orbitcore*.so ../../backend/ && cd ../..
 
-# Start the backend
-cd backend && uvicorn main:app --reload
+# Screen the catalog → the one data file the site reads
+python scripts/build_snapshot.py --group active --max-sats 500 --hours 24
 
-# Open frontend/index.html in a browser (requires a Cesium ion token)
+# Cesium token: copy frontend/js/config.example.js → config.js (free Ion account)
+python -m http.server -d frontend 8000    # → http://localhost:8000
 ```
 
----
+A FastAPI backend (`python backend/main.py`) exists for local development;
+the deployed site is fully static.
 
-## Dataset Scaling Path
+## Project journal
 
-| Phase | Catalog | Objects |
-|---|---|---|
-| 1 (current) | Space stations | ~30 |
-| 2 (next) | Visual/brightest | ~150 |
-| 3 | Starlink | ~6,000 |
-| 4 | Full catalog + debris | 10,000+ |
-
----
-
-## Roadmap
-
-- **Week 6** — Conjunction detection: C++ coarse + medium filter, Python fine filter (scipy), `/api/conjunctions` endpoint
-- **Week 7** — ML risk classifier: feature engineering from conjunction geometry, XGBoost/CatBoost training
-- **Week 8** — Docker deployment, portfolio cleanup, final demo
-
-Portfolio target: **May 15, 2026**
+Built Mar–Jul 2026. Every phase is logged — decisions, dead ends, measured
+results, adversarial review rounds — in [`progress/`](progress/roadmap.md).
