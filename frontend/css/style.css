@@ -7,6 +7,37 @@ html, body, #cesiumContainer {
   overflow: hidden;
 }
 
+/* Dark, minimal scrollbars on the overlay panels so they match the theme
+   (Firefox: thin + grey; WebKit/Chrome: a slim grey thumb on a clear track). */
+#conjunction-list,
+#conjunction-detail,
+#info-panel {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a44 transparent;
+}
+#conjunction-list::-webkit-scrollbar,
+#conjunction-detail::-webkit-scrollbar,
+#info-panel::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+#conjunction-list::-webkit-scrollbar-track,
+#conjunction-detail::-webkit-scrollbar-track,
+#info-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+#conjunction-list::-webkit-scrollbar-thumb,
+#conjunction-detail::-webkit-scrollbar-thumb,
+#info-panel::-webkit-scrollbar-thumb {
+  background: #3a3a44;
+  border-radius: 4px;
+}
+#conjunction-list::-webkit-scrollbar-thumb:hover,
+#conjunction-detail::-webkit-scrollbar-thumb:hover,
+#info-panel::-webkit-scrollbar-thumb:hover {
+  background: #55555f;
+}
+
 /* --- Info Panel (bottom-left overlay) --- */
 #info-panel {
   position: fixed;
@@ -260,8 +291,13 @@ html, body, #cesiumContainer {
 }
 
 #conjunction-header {
+  /* Hanging header — stays pinned at the top while the list scrolls under it. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
   padding: 8px 10px;
   border-bottom: 1px solid #333;
+  background: rgba(10, 10, 20, 0.97);
   color: #ff9800;
   font-weight: bold;
   font-size: 13px;
@@ -320,6 +356,11 @@ html, body, #cesiumContainer {
   color: #ff9800;
 }
 
+/* Conjunction time — red to flag "this is the moment to watch" (list + detail). */
+.conjunction-tca {
+  color: #ff5252;
+}
+
 .conjunction-empty {
   padding: 10px;
   color: #888;
@@ -343,11 +384,70 @@ html, body, #cesiumContainer {
 }
 
 #conjunction-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid #333;
   color: #ff9800;
   font-weight: bold;
   font-size: 13px;
+}
+/* Satellite name on its own line, conjunction count underneath. */
+.cd-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cd-satname {
+  color: #ff9800;
+  font-weight: bold;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.cd-count {
+  color: #888;
+  font-weight: normal;
+  font-size: 11px;
+}
+
+/* "Jump to TCA" — jumps the clock to the selected sat's closest approach. */
+#jump-to-tca {
+  flex: none;
+  background: none;
+  border: 1px solid #ff5252;
+  border-radius: 4px;
+  color: #ff5252;
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+#jump-to-tca:hover {
+  background: rgba(255, 82, 82, 0.14);
+}
+
+/* "Show more" — reveals the next batch of conjunctions in the list. */
+#conj-show-more {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 6px 10px 8px;
+  background: none;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #aaa;
+  font-family: monospace;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+#conj-show-more:hover {
+  border-color: #ff9800;
+  color: #ccc;
 }
 
 .cd-row {
@@ -374,4 +474,127 @@ html, body, #cesiumContainer {
 .cd-rtn {
   margin-top: 2px;
   color: #6aa6c8;
+}
+
+/* --- "Only display conjunctions" buttons (in the Display panel) --- */
+#conj-only-buttons {
+  display: flex;
+  gap: 6px;
+  padding: 2px 10px 8px;
+}
+.conj-only-btn {
+  flex: 1;
+  background: none;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #888;
+  font-family: monospace;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 6px;
+}
+.conj-only-btn:hover {
+  border-color: #ff9800;
+  color: #ccc;
+}
+.conj-only-btn.active {
+  border-color: #ff9800;
+  color: #ff9800;
+  background: rgba(255, 152, 0, 0.12);
+}
+
+/* --- Editable HH:MM:SS in the time bar --- */
+#time-date {
+  color: #e0e0e0;
+}
+#time-utc {
+  color: #888;
+  margin-left: 4px;
+}
+.time-colon {
+  color: #e0e0e0;
+}
+.time-edit {
+  color: #e0e0e0;
+  padding: 0 1px;
+  border-radius: 3px;
+  cursor: text;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.time-edit:hover {
+  background: rgba(79, 195, 247, 0.15);
+}
+.time-edit:focus {
+  background: rgba(79, 195, 247, 0.25);
+  color: #fff;
+}
+
+/* --- Search bar (top-center overlay) --- */
+#search-bar {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 300px;
+  max-width: 40vw;
+  z-index: 100;
+  font-family: monospace;
+}
+#search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(10, 10, 20, 0.9);
+  border: 1px solid #4fc3f7;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-family: monospace;
+  font-size: 13px;
+  padding: 7px 12px;
+  outline: none;
+}
+#search-input::placeholder {
+  color: #778;
+}
+#search-input:focus {
+  border-color: #7fd4ff;
+  box-shadow: 0 0 0 2px rgba(79, 195, 247, 0.2);
+}
+#search-results {
+  display: none;
+  margin-top: 4px;
+  background: rgba(10, 10, 20, 0.96);
+  border: 1px solid #4fc3f7;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.search-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #ccc;
+}
+.search-result:hover,
+.search-result.highlighted {
+  background: rgba(79, 195, 247, 0.15);
+}
+.search-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+.search-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #e0e0e0;
+}
+.search-id {
+  color: #888;
+  font-variant-numeric: tabular-nums;
 }

@@ -221,28 +221,73 @@ function animationTick(now) {
   const elapsed = now - lastFetchTime;
   lerpFactor = Math.min(elapsed / getRefreshInterval(), 1.0);
 
+  let moved = false;
   for (let i = 0; i < satOrder.length; i++) {
     const entry = satOrder[i];
     if (!entry.point.show) continue; // hidden group / failed sat — no work
     Cesium.Cartesian3.lerp(entry.start, entry.target, lerpFactor, scratchCartesian);
     entry.point.position = scratchCartesian;
     if (entry.label) entry.label.position = scratchCartesian;
+    moved = true;
   }
-  viewer.scene.requestRender(); // draw this frame (requestRenderMode)
+  // Only ask Cesium to redraw if something visible actually moved. An empty globe
+  // (all filters off, nothing selected) then costs ZERO GPU while playing, rather
+  // than re-rendering the whole scene at 30fps for nothing — the Chrome fan/heat
+  // issue. When dots are visible they move every frame, so this always renders.
+  if (moved) viewer.scene.requestRender();
 }
 requestAnimationFrame(animationTick);
+
+// Cached "which sats are conjunction participants" mask, in worker-index order.
+// Built once (participants don't change) and reused to skip non-participant
+// propagation in the "All" conjunction view.
+let _participantMask = null;
+function participantMask() {
+  if (_participantMask) return _participantMask;
+  const n = snapshotSatellites.length;
+  const mask = new Uint8Array(n);
+  if (typeof isConjunctionParticipant === "function") {
+    for (let i = 0; i < n; i++) {
+      if (isConjunctionParticipant(snapshotSatellites[i].NORAD_CAT_ID)) mask[i] = 1;
+    }
+  }
+  _participantMask = mask;
+  return mask;
+}
 
 /**
  * Request a fresh position batch from the worker at the current sim time.
  * Skips if the previous batch is still computing (worker answers in ~25 ms at
  * 5k, so this almost never trips), or while paused / tab hidden (no point
  * propagating frozen or unseen positions).
+ *
+ * In the "All" conjunction view, sends a participant mask so the worker skips
+ * the thousands of non-participant sats entirely — they cost nothing in the
+ * background (the real fix for the All-view lag).
  */
-function refreshSatellites() {
-  if (!propWorker || workerBusy) return;
-  if (simClock.isPaused() || !tabVisible) return;
+// A forced refresh that arrives while a batch is in flight must not be lost —
+// while PAUSED nothing else will re-request it (review round 2: two mode
+// toggles within the worker's ~25 ms roundtrip). Remember it; the positions
+// handler re-fires it as soon as the in-flight batch lands.
+let pendingForcedRefresh = false;
+
+function refreshSatellites(force) {
+  if (!propWorker || workerBusy) {
+    if (force) pendingForcedRefresh = true;
+    return;
+  }
+  // While paused, positions don't change → normally skip. `force` overrides for
+  // MODE changes (enter/exit the "All" conjunction view): the mask makes masked-
+  // out sats ok=false, so exiting the mode while paused needs one unmasked batch
+  // at the frozen sim time or re-enabled groups would stay invisible until
+  // unpause (the batch itself is valid at any fixed time).
+  if ((simClock.isPaused() && !force) || !tabVisible) return;
   workerBusy = true;
-  propWorker.postMessage({ type: "compute", timeMs: simClock.getTimeMs() });
+  const msg = { type: "compute", timeMs: simClock.getTimeMs() };
+  if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "all") {
+    msg.mask = participantMask();
+  }
+  propWorker.postMessage(msg);
 }
 
 // --- Startup: load snapshot → spin up the worker → start the refresh loop ---
@@ -258,6 +303,10 @@ snapshotReady
       } else if (msg.type === "positions") {
         updatePositions(msg);
         workerBusy = false;
+        if (pendingForcedRefresh) {   // a mode change arrived mid-batch — honor it
+          pendingForcedRefresh = false;
+          refreshSatellites(true);
+        }
       }
     };
     propWorker.onerror = (err) => {

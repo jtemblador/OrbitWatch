@@ -16,7 +16,10 @@
  * Protocol:
  *   in : {type:'init', satellites: [OMM…]}
  *   out: {type:'ready', n, nFailed}
- *   in : {type:'compute', timeMs}
+ *   in : {type:'compute', timeMs, mask?: Uint8Array(N)}
+ *          mask (optional): only propagate sats where mask[i]=1 (the rest stay
+ *          ok=0 → hidden). The "All" conjunction view uses it to skip the
+ *          thousands of non-participant sats — no wasted background propagation.
  *   out: {type:'positions', timeMs, positions: Float32Array(3N) ECEF meters,
  *         ok: Uint8Array(N)}   — ok[i]=0 → propagation failed (decayed etc.),
  *                                mirrors propagate_batch's per-sat sentinels
@@ -50,12 +53,14 @@ self.onmessage = (e) => {
 
   if (msg.type === "compute") {
     const n = satrecs.length;
+    const mask = msg.mask; // optional: only propagate where mask[i]=1
     const date = new Date(msg.timeMs);
     const gmst = satellite.gstime(date); // one GMST for the whole batch
     const positions = new Float32Array(3 * n);
     const ok = new Uint8Array(n);
 
     for (let i = 0; i < n; i++) {
+      if (mask && !mask[i]) continue; // masked out (e.g. non-participant in "All")
       const sr = satrecs[i];
       if (!sr) continue;
       const pv = satellite.propagate(sr, date);

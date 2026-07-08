@@ -19,14 +19,16 @@ function getTrailRefreshInterval() {
   return Math.max(Math.floor(BASE_TRAIL_REFRESH_MS / simClock.getSpeed()), 5000);
 }
 
-// Orbit trail — TWO Primitives with PolylineGeometry at orbital altitude.
-// Near-side: depth test ON, bright (0.8 alpha) — only camera-facing arc visible.
-// Far-side: depth test OFF, faint (0.2 alpha) — full ring visible as a ghost.
-// This makes the ring structure clear: bright arc in front, faint arc behind the globe.
+// Orbit trail — ONE depth-tested Primitive (PolylineGeometry) at orbital altitude.
+// The globe occludes the far side, so only the camera-facing arc shows — no faint
+// behind-Earth ghost cluttering the view (it obscured the conjunction trails).
 // Track points are TEME (inertial, raw SGP4 output) — orbit is a clean near-ellipse.
 // One GMST rotation places all points in the current ECEF frame for Cesium.
 // Client-side densification (360 pts × 10 = ~3600 pts) keeps chords <12 km (<1 m sag).
 let trailPrimitives = [];
+// Trail color for the current selection — set to the sat's display-group color
+// so its orbit matches its dot (falls back to blue).
+let _trailColor = new Cesium.Color(0.31, 0.76, 0.97, 1);
 
 // Nadir line — vertical line from sub-satellite ground point to satellite at altitude.
 // Uses a Cesium Entity with CallbackProperty to track the interpolated position every frame.
@@ -57,6 +59,9 @@ const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 
 handler.setInputAction(function (click) {
   const picked = viewer.scene.pick(click.position);
+
+  // A conjunction arc (Top-20 view) → focus that conjunction, reveal both sats.
+  if (typeof handleConjArcPick === "function" && handleConjArcPick(picked)) return;
 
   if (Cesium.defined(picked) && Cesium.defined(picked.primitive) &&
       picked.primitive.id !== undefined && satellites.has(picked.primitive.id)) {
@@ -272,7 +277,9 @@ function buildTrailPrimitives(positions) {
   clearTrail();
   if (positions.length < 2) return;
 
-  const nearInstance = new Cesium.GeometryInstance({
+  // Single depth-tested polyline: default renderState keeps depthTest ON, so the
+  // globe (which writes depth) occludes the far side — only the near arc renders.
+  const instance = new Cesium.GeometryInstance({
     geometry: new Cesium.PolylineGeometry({
       positions: positions,
       width: 2.5,
@@ -281,37 +288,11 @@ function buildTrailPrimitives(positions) {
     }),
   });
 
-  const farInstance = new Cesium.GeometryInstance({
-    geometry: new Cesium.PolylineGeometry({
-      positions: positions.slice(),
-      width: 1.5,
-      arcType: Cesium.ArcType.NONE,
-      vertexFormat: Cesium.PolylineMaterialAppearance.VERTEX_FORMAT,
-    }),
-  });
-
-  // Add far (faint) first, near (bright) second — rendering order
-  const farPrim = viewer.scene.primitives.add(new Cesium.Primitive({
-    geometryInstances: farInstance,
+  const prim = viewer.scene.primitives.add(new Cesium.Primitive({
+    geometryInstances: instance,
     appearance: new Cesium.PolylineMaterialAppearance({
       material: Cesium.Material.fromType("Color", {
-        color: new Cesium.Color(0.31, 0.76, 0.97, 0.2),
-      }),
-      translucent: true,
-      renderState: {
-        depthTest: { enabled: false },
-        depthMask: false,
-      },
-    }),
-    asynchronous: false,
-    show: trailVisible,
-  }));
-
-  const nearPrim = viewer.scene.primitives.add(new Cesium.Primitive({
-    geometryInstances: nearInstance,
-    appearance: new Cesium.PolylineMaterialAppearance({
-      material: Cesium.Material.fromType("Color", {
-        color: new Cesium.Color(0.31, 0.76, 0.97, 0.8),
+        color: _trailColor.withAlpha(0.85),
       }),
       translucent: true,
     }),
@@ -319,7 +300,7 @@ function buildTrailPrimitives(positions) {
     show: trailVisible,
   }));
 
-  trailPrimitives = [farPrim, nearPrim];
+  trailPrimitives = [prim];
 }
 
 /**
@@ -348,6 +329,8 @@ function renderTrailFromCache() {
 function computeAndRenderTrail(noradId) {
   clearTrail();
   cachedDenseTEME = null;
+  _trailColor = (typeof groupColor === "function")
+    ? groupColor(noradId) : new Cesium.Color(0.31, 0.76, 0.97, 1);
 
   try {
     // Use the satellite's actual orbital period so the trail forms one complete loop.

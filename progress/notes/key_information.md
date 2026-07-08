@@ -879,6 +879,24 @@ The scheduled CI job that keeps the site fresh and archives every published snap
 
 ---
 
+## Live-QA UI round (Phase 9.6)
+
+User QA of the live site drove a big frontend round (search, conjunction-first views, heat fix #2). Durable findings:
+
+**`requestRenderMode` ladder, rung 2 — gate `requestRender()` on actual visible change.** The 9.4 fix (30 fps rAF loop that idles on pause/tab-hide) is NOT enough: calling `requestRender()` on frames where nothing visible moved still redraws the whole globe — an **empty globe ran the fans hot on Chrome while playing** (Firefox is more forgiving). `animationTick` now sets a `moved` flag in the lerp loop and only requests a render if some visible point advanced. Measured: empty globe ≈ 1 render/1.5 s (was 30/s); with sats visible, normal. The full heat ladder: (1) requestRenderMode + idle on pause/hide → (2) render only on visible change.
+
+**Masked worker batches × the ok-sentinel — three interacting gotchas.** The propagation worker takes an optional `mask` (Uint8Array) to skip sats (used by the "All conjunctions" view: 4,999→557 propagations/batch). But a masked-out sat comes back `ok=0`, indistinguishable from a decayed one, and `show = groupVisible && entry.ok !== false` — so: (1) **every mode *exit* must request one unmasked batch or re-enabled sats stay invisible**; (2) that request must go through **even while paused** (`refreshSatellites(force)` — propagating at a frozen sim time is valid and cheap); (3) a forced request arriving while `workerBusy` must be **queued, not dropped** (`pendingForcedRefresh`, re-fired when the in-flight batch lands) or a paused double-toggle strands stale `ok` until unpause. All three were review findings with repro-verified fixes.
+
+**`contenteditable` Escape-cancel needs a flag consumed in the blur handler.** blur always fires (and commits); restoring the field *before* blur is gated off by the same `document.activeElement` check that prevents the ticker from fighting the user's typing. Escape sets `cancelTimeEdit=true` + blurs; the blur handler consumes the flag and restores instead of committing.
+
+**Every view-mode transition must tear down cross-mode visuals symmetrically.** `setConjOnly` clears any active conjunction-focus visuals on *every* transition — the round-1 bug (enter Top-20 with a focus active → orb/trails float over the arcs) is the same class as 9.4's narrow-teardown lesson, in the enter direction instead of exit.
+
+**Batched `Primitive` picking:** give each `GeometryInstance` an `id` object (`{conjEvent: e}`) → `scene.pick()` returns it → ~40 clickable arcs in ONE draw call. And **a single depth-tested polyline gets Earth occlusion for free** — the old two-primitive near/far "ghost ring" trail (depth-test-off far side) was clutter and cost; the globe's own depth buffer hides the far arc.
+
+**Verification workflow that worked:** serve an isolated copy of `frontend/` + the *live* `snapshot.json` on `127.0.0.1`, drive it with **Playwright MCP** (`browser_evaluate` on the app's own globals — `satellites`, `conjEvents`, `setConjOnly` — plus screenshots for the visual calls), user eyeballs the same URL between rounds. Feature checks, perf counters (renders/s, propagations/batch), a 7-state mode-transition matrix, and a primitive-leak sweep all ran against the real data with zero test scaffolding in the repo.
+
+---
+
 ## Cesium CallbackProperty for Real-Time Tracking
 
 **Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.
