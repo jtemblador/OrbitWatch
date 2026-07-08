@@ -859,6 +859,26 @@ The deployed frontend reads one file (`snapshot.json`) and propagates all sats i
 
 ---
 
+## Robot job + snapshot archive (Phase 9.5)
+
+The scheduled CI job that keeps the site fresh and archives every published snapshot. All in `deploy.yml`. Durable findings:
+
+**`git fetch origin <branch>` does NOT create `refs/remotes/origin/<branch>` under a narrow refspec** — which is exactly what `actions/checkout@v4` leaves (it fetches only the triggering ref). So `git worktree add -B data … origin/data` fails with "invalid reference." **Base the worktree on `FETCH_HEAD`** (a fetch of an explicit ref always sets it). ⚠ This bug is **invisible to a single smoke test** — the first run creates the branch (orphan path), and only the *second* run (branch now exists) hits the broken `origin/data` path. Reproduced locally with a narrow-refspec clone before trusting the fix.
+
+**`git ls-remote --exit-code`: `0` = ref found, `2` = query OK but no such ref, anything else = a real error** (network/auth/DNS). Branch on all three — do NOT collapse "absent" and "error", or a transient blip is treated as "first run", fabricates a fresh orphan, and the no-force push is rejected as non-fast-forward. The error branch aborts (`exit 1`) with git's captured stderr (`err=$(git ls-remote … 2>&1 >/dev/null)` — the `2>&1 >/dev/null` order captures stderr while discarding the ref list).
+
+**Orphan branch, version-portably:** `git worktree add --detach "$WT"` then `git -C "$WT" checkout --orphan data` + `git rm -rf .` — creates a true orphan (no `main` history → the append-only archive never bloats the code branch) without touching the main checkout's `frontend/`. (`git worktree add --orphan` only exists on git ≥ 2.42; the runner has it, local 2.39 didn't — the detach+checkout form works on both.) The archive filename is the snapshot's own `meta.generated_at` with colons→dashes (Windows-safe).
+
+**A secondary/archival step must never gate the primary deliverable.** The archive is `continue-on-error: true` so a transient `data`-push failure can't block the live-site refresh (the good snapshot still ships). Decouple with `continue-on-error`, **not** step ordering — a failed job skips `deploy` (`needs: build`) regardless of where the step sits. A `continue-on-error` failure is *masked* (`conclusion: success`); surface it by gating a follow-up step on `steps.<id>.outcome == 'failure'` → `::warning::`.
+
+**Scheduled-workflow gotchas:** (1) `schedule:` triggers fire **only from the workflow file on the default branch** — the cron does nothing until merged to `main`. (2) Cron is **UTC and best-effort**; **avoid `:00`** (GitHub's most-congested/most-delayed minute) — offset to `:17` etc. (3) GitHub **auto-disables** a repo's scheduled workflows after **60 days with no commits** — *silently* (no failed run). (4) A `GITHUB_TOKEN` push to a **non-default** branch (our `data`) does **not** re-trigger the workflow → no infinite loop.
+
+**Job-level `permissions` REPLACE the top-level set** (they don't merge). Top-level `contents: read`; the `build` job re-lists `contents: write` + `pages: write` + `id-token: write` (least privilege — the `deploy` job inherits read-only). **Public repo = unlimited Actions minutes** (private = 2,000/mo, which 3×/day × ~8 min would blow) — a second reason the repo stays public.
+
+**SOCRATES cadence for scheduling:** SOCRATES screens the same GP catalog we do **3×/day** (historically documented runs ~01:30 / 12:30 UTC; current exact times aren't published and CelesTrak is VPN-blocked locally). We trail it — the "Log SOCRATES run time" step curls the SOCRATES CSV's `Last-Modified` header each rebuild so the slots can be tuned to SOCRATES's *actual* observed upload times once the CI logs accumulate. The runner can reach CelesTrak (the local block was the VPN).
+
+---
+
 ## Cesium CallbackProperty for Real-Time Tracking
 
 **Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.

@@ -1,4 +1,4 @@
-# Deploy OrbitWatch as a static site to GitHub Pages (Phase 9.4).
+# Deploy OrbitWatch as a static site to GitHub Pages (Phase 9.4 deploy + 9.5 robot job).
 #
 # The site is a snapshot-driven static export: the browser propagates every
 # satellite client-side (satellite.js) from one cached `snapshot.json`, so there
@@ -10,10 +10,20 @@
 #     that's already live. This is what a frontend/CSS/JS change wants: no need
 #     to re-fetch + re-screen the catalog just to ship a UI tweak.
 #   • REBUILD (~8 min) — build the C++ SGP4 extension, fetch the active catalog,
-#     run the real SFS screen, and bake a fresh snapshot. Triggered explicitly
-#     (manual dispatch with rebuild_snapshot=true) or when there's no live
-#     snapshot to reuse yet. Phase 9.5 adds a `schedule:` cron that rebuilds a
-#     few×/day to keep the data fresh.
+#     run the real SFS screen, and bake a fresh snapshot. Triggered by the
+#     `schedule:` cron below (the Phase 9.5 robot job), a manual dispatch with
+#     rebuild_snapshot=true, or when there's no live snapshot to reuse yet.
+#
+# Phase 9.5 — the robot job + archive:
+#   • The `schedule:` cron rebuilds 3×/day so the site refreshes itself and
+#     upstream (CelesTrak) is hit on a schedule, never per visit. The times
+#     trail CelesTrak's SOCRATES runs (it screens the SAME GP catalog we do,
+#     3×/day) so each rebuild uses freshly-refreshed elements — see the "Log
+#     SOCRATES run time" step, which records SOCRATES's live upload time so the
+#     slots can be tuned against the actual observed cadence.
+#   • Every rebuild ARCHIVES the fresh snapshot as snapshots/<ISO-ts>.json.gz on
+#     an orphan `data` branch (append-only; NEVER merged into main → no history
+#     bloat on the code branch). That archive backs the 9.10 evolution view.
 
 name: Deploy to GitHub Pages
 
@@ -24,15 +34,28 @@ on:
         description: "Re-fetch + re-screen the catalog (~8 min). Off = redeploy reusing the live snapshot (~1 min)."
         type: boolean
         default: false
+  # The robot job: rebuild the snapshot 3×/day (UTC). Spaced ~8 h; the 13:17 slot
+  # trails the confirmed ~12:10 UTC SOCRATES upload by ~1 h, a margin that absorbs
+  # both SOCRATES jitter and GitHub cron's best-effort delay. The :17 offset
+  # dodges the top-of-hour, which GitHub's docs flag as the most-congested (and
+  # most-delayed/-dropped) minute for scheduled jobs. The other two keep the site
+  # fresh on an even cadence; tune them once the "Log SOCRATES run time" output
+  # reveals SOCRATES's actual morning/evening upload times.
+  schedule:
+    - cron: "17 13 * * *"   # 13:17 UTC — after the midday SOCRATES run
+    - cron: "17 21 * * *"   # 21:17 UTC
+    - cron: "17 5 * * *"    # 05:17 UTC
   push:
     branches: [main]
     # Only the deployed site + this workflow. A push here REUSES the live
-    # snapshot (fast) — data refreshes come from a manual rebuild or the 9.5 cron.
+    # snapshot (fast) — data refreshes come from a manual rebuild or the cron.
     paths:
       - "frontend/**"
       - ".github/workflows/deploy.yml"
 
-# Pages deployment needs these; id-token lets deploy-pages authenticate.
+# Least privilege by default: read-only contents. Only the `build` job bumps
+# `contents: write` (for the archive push to the `data` branch) — the `deploy`
+# job inherits this read-only set, since it only needs pages/id-token.
 permissions:
   contents: read
   pages: write
@@ -50,6 +73,13 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Job-level override: this job (and only this job) needs `contents: write` for
+    # the archive push. Job permissions REPLACE the top-level set, so pages/
+    # id-token are re-listed (configure-pages / upload-pages-artifact need them).
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +91,13 @@ jobs:
         id: decide
         run: |
           REBUILD=false
+          # The scheduled robot job (Phase 9.5) always rebuilds — that's its job:
+          # re-fetch + re-screen so the site stays fresh and upstream is hit on a
+          # schedule, not per visit.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            REBUILD=true
+            echo "Rebuild forced (scheduled robot job)."
+          fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
              && [ "${{ github.event.inputs.rebuild_snapshot }}" = "true" ]; then
             REBUILD=true
@@ -76,6 +113,19 @@ jobs:
             fi
           fi
           echo "rebuild=$REBUILD" >> "$GITHUB_OUTPUT"
+
+      # Record when CelesTrak last uploaded a SOCRATES run vs. when this rebuild
+      # started. SOCRATES screens the same GP catalog we do (3×/day), so its
+      # upload time is a proxy for "the elements just refreshed." Reading this
+      # across the first few days shows SOCRATES's actual morning/evening upload
+      # times so the cron slots above can be tuned to trail them precisely.
+      - name: Log SOCRATES run time (schedule alignment check)
+        if: steps.decide.outputs.rebuild == 'true'
+        run: |
+          LM=$(curl -fsSI --max-time 30 https://celestrak.org/SOCRATES/sort-minRange.csv 2>/dev/null \
+               | grep -i '^last-modified:' | sed 's/[^:]*: //' | tr -d '\r' || true)
+          echo "SOCRATES sort-minRange.csv last uploaded: ${LM:-unknown}"
+          echo "This rebuild started at:                  $(date -u '+%a, %d %b %Y %H:%M:%S GMT')"
 
       - name: Set up Python 3.12
         if: steps.decide.outputs.rebuild == 'true'
@@ -110,6 +160,87 @@ jobs:
       - name: Build snapshot.json (fetch active + screen offline)
         if: steps.decide.outputs.rebuild == 'true'
         run: python scripts/build_snapshot.py --group active --max-sats 5000 --hours 24
+
+      # Archive the fresh snapshot to the `data` branch as
+      # snapshots/<ISO-ts>.json.gz (append-only). The `data` branch is an ORPHAN
+      # (no shared history with main) so the growing archive never bloats the
+      # code branch. Done in a linked git worktree under $RUNNER_TEMP so the main
+      # checkout's frontend/ (uploaded to Pages below) is untouched. The pushed
+      # snapshot.json goes live via the normal Pages deploy — this is the durable
+      # record of what each run published (backs the 9.10 evolution view).
+      #
+      # The top-level `concurrency: pages` group serializes in-progress runs, so
+      # two archive pushes never overlap (a queued run can still be superseded —
+      # that just skips one refresh cycle, harmless).
+      #
+      # continue-on-error: the archive is a SECONDARY record (backs the 9.10
+      # evolution view). The PRIMARY goal is refreshing the live site, so a
+      # transient git/network failure here must NOT block the deploy of a
+      # perfectly good snapshot. On failure the job keeps going (site still
+      # ships) and the next step annotates a visible warning; the next scheduled
+      # run retries the archive.
+      - name: Archive snapshot to the data branch
+        id: archive
+        if: steps.decide.outputs.rebuild == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Windows-safe ISO timestamp from the snapshot's own generated_at
+          # (colons -> dashes so the filename is portable).
+          TS=$(python -c "import json; print(json.load(open('frontend/snapshot.json'))['meta']['generated_at'].replace(':','-'))")
+          echo "Archiving snapshot $TS to the data branch."
+
+          git config user.name  "orbitwatch-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Does the `data` branch already exist on the remote? `ls-remote
+          # --exit-code` returns 0 = found, 2 = query OK but no such ref, and
+          # anything else = a real error (network/auth). We MUST NOT treat that
+          # error as "first run" — that would create a bogus orphan and the
+          # no-force push would be rejected as non-fast-forward. So fail loudly.
+          # Capture stderr (discard the ref list on stdout) so the abort path
+          # below can report WHY ls-remote failed, not just the exit code.
+          set +e
+          err=$(git ls-remote --exit-code --heads origin data 2>&1 >/dev/null)
+          rc=$?
+          set -e
+
+          WT="$RUNNER_TEMP/data-wt"
+          if [ "$rc" -eq 0 ]; then
+            # Extend the existing archive. Base the worktree on FETCH_HEAD, not
+            # origin/data: checkout@v4's narrow refspec doesn't create a
+            # refs/remotes/origin/data tracking ref, but a fetch of an explicit
+            # ref always sets FETCH_HEAD (verified locally).
+            git fetch --depth=1 origin data
+            git worktree add -B data "$WT" FETCH_HEAD
+          elif [ "$rc" -eq 2 ]; then
+            # First run: create the orphan `data` branch (detach + checkout
+            # --orphan is portable across git versions; `worktree add --orphan`
+            # only exists on newer git).
+            echo "First archive run — creating the orphan data branch."
+            git worktree add --detach "$WT"
+            git -C "$WT" checkout --orphan data
+            git -C "$WT" rm -rf --quiet . 2>/dev/null || true
+          else
+            echo "::error::git ls-remote failed (exit $rc): ${err:-no stderr} — aborting so a transient error can't overwrite the archive with a bogus orphan."
+            exit 1
+          fi
+
+          mkdir -p "$WT/snapshots"
+          gzip -c frontend/snapshot.json > "$WT/snapshots/${TS}.json.gz"
+          git -C "$WT" add "snapshots/${TS}.json.gz"
+          git -C "$WT" commit -q -m "Archive snapshot ${TS}"
+          git -C "$WT" push origin data
+          git worktree remove --force "$WT"
+          echo "Archived snapshots/${TS}.json.gz ($(gzip -c frontend/snapshot.json | wc -c) bytes gz)."
+
+      # Surface an archive failure loudly WITHOUT failing the run (the site still
+      # shipped). continue-on-error masks the red X, so annotate a warning that's
+      # visible on the run summary; the next scheduled run retries the archive.
+      - name: Warn if the snapshot archive failed
+        if: steps.archive.outcome == 'failure'
+        run: |
+          echo "::warning::Snapshot archive to the data branch FAILED this run — the live site still refreshed (the archive is a secondary record). See the 'Archive snapshot to the data branch' step log; the next scheduled run will retry."
 
       # Inject the Ion token from the repo secret into the gitignored config.js.
       # Passed via env (not string-interpolated into the script) so a token with
