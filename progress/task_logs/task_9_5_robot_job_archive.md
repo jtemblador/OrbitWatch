@@ -1,8 +1,14 @@
 # Task 9.5 — Robot job (scheduled cron) + snapshot archive
 
 **Date:** Jul 7, 2026
-**Status:** DONE (code) — cron *activates* once the workflow is on `main`; real-CI
-firing is confirmed post-merge (see Validation).
+**Status:** DONE — **cron confirmed firing in production (Jul 8):** a `schedule`
+run succeeded at 07:41 UTC (the 05:17 slot, ~2.4 h late — GitHub cron is
+best-effort under load; harmless, the SOCRATES-trailing margin has slack),
+rebuilt + published a fresh snapshot (07:42, 329 conj), and appended the second
+archive file to the `data` branch — which also exercised the **FETCH_HEAD
+extend path in real CI** (the round-1 review fix) for the first time. A later
+frontend push correctly REUSED the cron's snapshot. All 9.5 acceptance criteria
+met.
 **Tests:** no pytest surface (a CI workflow file). Verified by local git simulation
 of the exact archive logic + two adversarial review rounds. 563 passing unchanged.
 
