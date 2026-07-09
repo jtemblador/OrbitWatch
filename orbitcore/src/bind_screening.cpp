@@ -218,13 +218,15 @@ The GIL is released during the scan.
 )doc"
     );
 
-    // --- screen_pairs: fused coarse + medium screen (stage 1a) ---
+    // --- screen_pairs: fused coarse + medium screen (stage 1a + 10.2 sieve) ---
     m.def("screen_pairs",
         [](py::sequence satrecs,
            const std::vector<double>& periapsis_km,
            const std::vector<double>& apoapsis_km,
            double pad_km, double jd_start, double jd_end,
-           double step_sec, double threshold_km) -> py::tuple
+           double step_sec, double threshold_km,
+           bool time_filter, double sieve_u_margin_deg,
+           double sieve_osc_margin_km) -> py::tuple
         {
             const size_t n = py::len(satrecs);
             if (periapsis_km.size() != n || apoapsis_km.size() != n) {
@@ -262,6 +264,11 @@ The GIL is released during the scan.
                     + std::to_string(step_sec) + " s)");
             }
 
+            if (sieve_u_margin_deg < 0.0 || sieve_osc_margin_km < 0.0) {
+                throw py::value_error(
+                    "screen_pairs: sieve margins must be >= 0");
+            }
+
             std::vector<elsetrec*> sats = extract_satrecs(satrecs, "screen_pairs");
 
             std::vector<std::pair<size_t, size_t>> P;
@@ -281,8 +288,33 @@ The GIL is released during the scan.
                 // runs — the fused stage is those two calls back to back.
                 P = screening::build_coarse_pairs(
                     periapsis_km, apoapsis_km, pad_km);
-                results = screening::run_medium_scan(
-                    sats, P, jd_start, jd_end, step_sec, threshold_km);
+
+                if (time_filter) {
+                    // Phase 10.2 time sieve: precompute per-pair scan intervals
+                    // from the validated 10.1b construction (3 propagations/sat
+                    // -> chord-anchored elements -> node-window crossing times),
+                    // then scan each pair only inside them. Same EVENTS after
+                    // the fine stage + report cut (the 10.1b contract).
+                    std::vector<char> used(sats.size(), 0);
+                    for (const auto& pr : P) {
+                        used[pr.first] = 1; used[pr.second] = 1;
+                    }
+                    screening::AnchorSet anchors = screening::build_anchors(
+                        sats, used, jd_start, jd_end);
+                    screening::SieveParams params;
+                    params.u_margin_rad =
+                        sieve_u_margin_deg * 3.14159265358979323846 / 180.0;
+                    params.osc_margin_km = sieve_osc_margin_km;
+                    screening::SieveIndex sieve = screening::build_sieve_index(
+                        anchors, P, jd_start, jd_end, step_sec, threshold_km,
+                        params);
+                    results = screening::run_medium_scan(
+                        sats, P, jd_start, jd_end, step_sec, threshold_km,
+                        &sieve);
+                } else {
+                    results = screening::run_medium_scan(
+                        sats, P, jd_start, jd_end, step_sec, threshold_km);
+                }
             } // GIL reacquired here
 
             py::list out;
@@ -301,6 +333,9 @@ The GIL is released during the scan.
         py::arg("jd_end"),
         py::arg("step_sec"),
         py::arg("threshold_km"),
+        py::arg("time_filter") = false,
+        py::arg("sieve_u_margin_deg") = 0.5,
+        py::arg("sieve_osc_margin_km") = 10.0,
         R"doc(
 Fused coarse + medium conjunction screen (stage 1a) — a drop-in replacement
 for coarse_filter() followed by medium_filter(), producing byte-identical rows.
@@ -312,6 +347,15 @@ tuples versus ~0.8 GB as a C++ vector here. (The whole screen's peak RSS is
 dominated by the later fine stage, not this list; this removes the pair-list
 share — measured ~2 GB at 10k. Same screening result either way.)
 
+time_filter=True adds the Phase-10.2 TIME SIEVE (the H-C-R Filter III
+construction validated no-skip on 1.4M real events — see
+progress/week10_planning/stage1b_timefilter_spec.md): per-pair scan intervals
+are precomputed around the mutual-node crossings, and each pair is evaluated
+only inside them (~2.5% of pair-steps at the production catalog). Rows for
+evaluated windows are byte-identical; windows entirely outside every interval
+(the medium bound's spurious far-distance flags) are never produced — the
+EVENT list after the fine stage + report cut is identical.
+
 satrecs:      sequence of Satrec (passed by reference; t/error mutate).
 periapsis_km: per-satellite perigee altitude, km (index-aligned with satrecs).
 apoapsis_km:  per-satellite apogee altitude, km, same indexing.
@@ -319,16 +363,61 @@ pad_km:       coarse altitude-band margin (>= 0); see coarse_filter.
 jd_start/end: scan window as absolute Julian Dates (UTC), end > start.
 step_sec:     medium time step in seconds (> 0).
 threshold_km: medium flag distance in km (> 0).
+time_filter:  enable the time sieve (default False = classic full scan).
+sieve_u_margin_deg: sieve base angular margin, deg (validated 0.25; ship 0.5).
+sieve_osc_margin_km: mean-vs-osculating pad on the sieve's D_eff (km).
 
 Returns: (n_pairs, rows) where
   n_pairs — number of coarse survivors (for profiling; the pairs themselves
             are never returned).
-  rows    — list of (i, j, jd, distance_km), identical to medium_filter's
-            output for the same coarse survivors (see medium_filter for the
-            no-skip detection criterion and row semantics).
-Raises: ValueError (bad lengths/pad/window/step/threshold),
+  rows    — list of (i, j, jd, distance_km); see medium_filter for the no-skip
+            detection criterion and row semantics. With time_filter=True the
+            rows are a subset (spurious far-distance windows dropped) whose
+            post-fine EVENTS are identical.
+Raises: ValueError (bad lengths/pad/window/step/threshold/margins),
         TypeError (non-Satrec item, named by index).
-The GIL is released during both the coarse cut and the scan.
+The GIL is released during the coarse cut, sieve build, and scan.
+)doc"
+    );
+
+    // --- _sieve_anchors: internal, for oracle cross-validation ---
+    m.def("_sieve_anchors",
+        [](py::sequence satrecs, double jd0, double jd1) -> py::dict
+        {
+            std::vector<elsetrec*> sats =
+                extract_satrecs(satrecs, "_sieve_anchors");
+            std::vector<char> used(sats.size(), 1);
+            screening::AnchorSet a;
+            {
+                py::gil_scoped_release release;
+                a = screening::build_anchors(sats, used, jd0, jd1);
+            }
+            py::dict out;
+            out["ok"] = std::vector<int>(a.ok.begin(), a.ok.end());
+            out["inc"] = a.inc;
+            out["raan0"] = a.raan0;
+            out["raan_dot"] = a.raan_dot;
+            out["lam0"] = a.lam0;
+            out["lam_rate"] = a.lam_rate;
+            out["m_rate"] = a.m_rate;
+            out["ecc"] = a.ecc;
+            out["rp"] = a.rp;
+            out["u0"] = a.u0;
+            out["curv"] = a.curv;
+            return out;
+        },
+        py::arg("satrecs"), py::arg("jd0"), py::arg("jd1"),
+        R"doc(
+INTERNAL — the time sieve's per-satellite anchored elements (Phase 10.2).
+
+Exposed so tests can lock the C++ anchor construction against the Python
+oracle (progress/week10_planning/time_filter_gate.py) element-by-element:
+same 3 propagations, same rv2coe, same equinoctial chord rates + curvature
+margins. Not part of the public screening API.
+
+Returns: dict of per-satellite lists (index-aligned with satrecs):
+  ok, inc, raan0, raan_dot, lam0, lam_rate, m_rate, ecc, rp, u0, curv
+  (angles rad, rates rad/day, rp km).
 )doc"
     );
 }

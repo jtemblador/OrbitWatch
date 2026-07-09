@@ -383,6 +383,7 @@ def run_screen(
     volumes: list | None = None,
     suppress: bool = True,
     fused: bool = False,
+    sieve: bool = False,
 ) -> list[dict]:
     """
     Run the full conjunction cascade over an index-aligned satellite set and
@@ -423,6 +424,14 @@ def run_screen(
                          (Phase 10.1a — the memory lever for the full catalog).
                          Byte-identical events to the default two-call path;
                          default False keeps the exact Phase-6/7 path.
+        sieve:           when True (requires fused=True), enable the Phase-10.2
+                         TIME SIEVE inside screen_pairs: each pair is scanned
+                         only inside precomputed intervals around its mutual-
+                         node crossings (the 10.1b construction, validated
+                         no-skip on 1.4M real events) — ~40x less medium-scan
+                         pair-step work at the production catalog. Events are
+                         identical; the medium's spurious far-distance windows
+                         (which the fine stage discards anyway) are skipped.
         step_sec:        medium-filter time step in seconds.
         pad_km:          coarse-filter altitude-band margin. Defaults to the
                          Euclidean gross threshold (threshold_km, or the largest
@@ -447,6 +456,10 @@ def run_screen(
         raise ValueError(
             "run_screen: provide threshold_km (legacy Euclidean) or volumes "
             "(SFS ellipsoids)")
+    if sieve and not fused:
+        raise ValueError(
+            "run_screen: sieve=True requires fused=True (the time sieve lives "
+            "inside the fused C++ stage)")
 
     # Index alignment IS the screening contract: medium_filter returns (i, j)
     # positions, and we map them back to identity via meta[i]/meta[j]. A length
@@ -490,7 +503,7 @@ def run_screen(
         _t = time.perf_counter()
         n_pairs, rows = orbitcore.screen_pairs(
             satrecs, periapsis, apoapsis, pad_km,
-            jd_start, jd_end, step_sec, gross_km)
+            jd_start, jd_end, step_sec, gross_km, time_filter=sieve)
         if timings is not None:
             timings["n_sats"] = len(satrecs)
             timings["n_pairs"] = n_pairs
@@ -592,7 +605,12 @@ def run_screen(
     if use_volumes:
         # One row per unique pair (the closest approach) so count = at-risk pairs.
         events = _dedupe_to_unique_pairs(events)
-    events.sort(key=lambda e: e["miss_distance_km"])
+    # Total order (miss, then identity, then time): byte-equal miss distances
+    # DO occur on symmetric geometry (e.g. the synthetic test shell), and a
+    # miss-only sort would then leak the scan's internal row order into the
+    # output — the sieved and unsieved paths must produce identical lists.
+    events.sort(key=lambda e: (e["miss_distance_km"], e["sat1_norad_id"],
+                               e["sat2_norad_id"], e["tca"]))
     if timings is not None:
         timings["t_fine"] = time.perf_counter() - _t
         timings["n_events"] = len(events)

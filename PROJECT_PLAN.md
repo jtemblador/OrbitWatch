@@ -246,10 +246,16 @@ OrbitWatch/
 ├── orbitcore/                       # C++ extension module (source)
 │   ├── CMakeLists.txt              # Build config for pybind11
 │   ├── src/
-│   │   ├── SGP4.cpp               # Vallado's SGP4 implementation (3,247 lines)
-│   │   └── bindings.cpp           # pybind11 Python bindings
+│   │   ├── SGP4.cpp               # Vallado's SGP4 implementation (third-party)
+│   │   ├── screening.cpp          # Conjunction-screening engine (pure C++)
+│   │   ├── bindings.cpp           # pybind11 module entry (calls the binders)
+│   │   ├── bind_satrec.cpp        # Bindings: satellite record + init
+│   │   ├── bind_propagation.cpp   # Bindings: propagation + time conversion
+│   │   └── bind_screening.cpp     # Bindings: the conjunction screen boundary
 │   └── include/
-│       └── SGP4.h
+│       ├── SGP4.h
+│       ├── screening.h
+│       └── bindings.h
 ├── backend/
 │   ├── main.py                     # FastAPI app entry point
 │   ├── orbitcore.cpython-312-*.so  # Compiled C++ extension

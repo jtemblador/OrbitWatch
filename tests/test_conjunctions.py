@@ -1018,3 +1018,131 @@ class TestFusedStage:
                 assert False, f"should have raised {exc.__name__}"
             except exc:
                 pass
+
+
+class TestTimeSieve:
+    """Phase 10.2 — the C++ time sieve inside screen_pairs.
+
+    The sieve precomputes per-pair scan intervals around the mutual-node
+    crossings (the 10.1b construction, validated no-skip on 1.4M real events)
+    and evaluates each pair only inside them. The contract is IDENTICAL EVENTS
+    to the unsieved fused path — the sieve skips only the medium bound's
+    spurious far-distance windows, which the fine stage discards anyway."""
+
+    def test_sieve_requires_fused(self):
+        a, b = _crosser_pair()
+        try:
+            run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 3.0,
+                       threshold_km=5.0, fused=False, sieve=True)
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_cpp_anchors_match_python_oracle(self):
+        """The C++ anchor construction (_sieve_anchors) reproduces the 10.1b
+        Python oracle element-by-element on the synthetic shell — same 3
+        propagations, same rv2coe, same equinoctial chord rates + curvature
+        margins. This is the permanent lock that the C++ sieve geometry stays
+        the validated geometry (measured agreement ~1e-11 on the real CI
+        catalog; 1e-8 here leaves float-association headroom)."""
+        import numpy as np
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(__file__), "..", "progress", "week10_planning"))
+        from time_filter_gate import anchor_at
+
+        sats, meta, start = _shell_satrecs(120)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        cpp = orbitcore._sieve_anchors(sats, jd0, jd0 + 1.0)
+        ora = anchor_at(sats, jd0, jd0 + 1.0)
+
+        assert (np.asarray(cpp["ok"], bool) == np.asarray(ora["ok"], bool)).all()
+        ok = np.asarray(cpp["ok"], bool)
+        for field, wrap in (("inc", False), ("raan0", True), ("raan_dot", False),
+                            ("lam0", True), ("lam_rate", False),
+                            ("m_rate", False), ("ecc", False), ("rp", False),
+                            ("curv", False)):
+            d = np.asarray(cpp[field])[ok] - np.asarray(ora[field])[ok]
+            if wrap:
+                d = np.mod(d + np.pi, 2 * np.pi) - np.pi
+            assert np.abs(d).max() < 1e-8, f"{field}: {np.abs(d).max()}"
+
+    def test_sieve_events_identical_at_shell_scale(self):
+        """The whole point: run_screen(sieve=True) == run_screen(sieve=False)
+        event-for-event on the dense shell (>1000 real Euclidean events — a
+        non-vacuous lock). On a SINGLE shell every medium flag genuinely sits
+        near a node crossing (flag-run width and window width both scale with
+        1/sin I_R), so the row set itself comes out identical — the sieve's
+        win there is scan work, not dropped rows (see the two-shell test for
+        the spurious-window drop)."""
+        sats, meta, start = _shell_satrecs(300)
+        tm_off: dict = {}
+        tm_on: dict = {}
+        off = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                         fused=True, sieve=False, timings=tm_off)
+        on = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                        fused=True, sieve=True, timings=tm_on)
+        assert len(off) > 1000
+        assert off == on                                   # identical events
+        assert tm_on["n_windows"] <= tm_off["n_windows"]
+        assert tm_on["n_pairs"] == tm_off["n_pairs"]       # coarse unchanged
+
+    def test_sieve_skips_spurious_windows_across_shells(self):
+        """Two shells 90 km apart: cross-shell pairs still coarse-survive
+        (gap < pad) and their node crossings are real approaches (~90 km <
+        D_eff), but the medium bound ALSO flags them far from the node line
+        (a fast pair within threshold + v_rel*dt/2 — hundreds of km — of a
+        sample). Those spurious windows lie outside the sieve's intervals and
+        are skipped: fewer windows, identical events — the sieve provably
+        bites, at the row level."""
+        import tempfile
+        from pathlib import Path
+
+        import pandas as pd
+
+        from core.demo_seed import build_synthetic_shell
+        from core.propagator import SatellitePropagator
+        from core.tle_fetcher import GPFetcher
+
+        lo = build_synthetic_shell(n=150, mean_motion=15.05)
+        hi = build_synthetic_shell(n=150, base_norad=8100000,
+                                   mean_motion=15.35, inclination_deg=97.0)
+        df = pd.concat([lo, hi], ignore_index=True)
+        with tempfile.TemporaryDirectory() as d:
+            df.to_parquet(Path(d) / "twoshell.parquet", index=False)
+            prop = SatellitePropagator(
+                group="twoshell", fetcher=GPFetcher(cache_dir=Path(d)))
+            sats, meta = prop.get_all_satrecs()
+        start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+        tm_off: dict = {}
+        tm_on: dict = {}
+        off = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                         fused=True, sieve=False, timings=tm_off)
+        on = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                        fused=True, sieve=True, timings=tm_on)
+        assert off == on                                   # identical events
+        assert tm_on["n_windows"] < tm_off["n_windows"]    # spurious skipped
+
+        # SFS path wiring (0 events on the synthetic shell by construction —
+        # 7.2; the equality is structural, the Euclidean lock above is the
+        # non-vacuous one).
+        from core.screening_volumes import regime_for
+        vols = [regime_for(m["periapsis_km"], m["eccentricity"],
+                           m["period_min"]) for m in meta]
+        assert (run_screen(sats, meta, start, 3.0, volumes=vols,
+                           fused=True, sieve=True)
+                == run_screen(sats, meta, start, 3.0, volumes=vols,
+                              fused=True, sieve=False))
+
+    def test_crosser_event_survives_sieve(self):
+        """The deterministic ISS/crosser conjunction (the Phase-6 anchor case)
+        is found identically with the sieve on — a fast, targeted no-skip
+        smoke on a genuine crossing geometry."""
+        a, b = _crosser_pair()
+        off = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                         threshold_km=25.0, fused=True, sieve=False)
+        on = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                        threshold_km=25.0, fused=True, sieve=True)
+        assert len(off) >= 1
+        assert off == on

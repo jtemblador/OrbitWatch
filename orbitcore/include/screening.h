@@ -17,6 +17,7 @@
 #define ORBITWATCH_SCREENING_H
 
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,72 @@ namespace screening {
 // One flagged close-approach window: pair (i, j), best-sampled Julian date,
 // and the distance there (km).
 struct MediumResult { size_t i, j; double jd, d; };
+
+// ---------------------------------------------------------------------------
+// Phase 10.2 time sieve — the validated 10.1b construction (see
+// progress/week10_planning/stage1b_timefilter_spec.md; time_filter_gate.py is
+// the independent oracle these formulas mirror).
+// ---------------------------------------------------------------------------
+
+// Per-satellite anchored elements: osculating states at the scan window's
+// start / mid / end (3 SGP4 propagations per sat), converted to classical
+// elements, with equinoctial CHORD rates over the window and a measured
+// per-sat curvature margin. Index-aligned with the satrec list; sats that
+// fail any anchor propagation get ok=false (treated always-active).
+struct AnchorSet {
+    std::vector<char> ok;
+    std::vector<double> inc;        // inclination at t0, rad
+    std::vector<double> raan0;      // RAAN at t0, rad
+    std::vector<double> raan_dot;   // chord RAAN rate, rad/day
+    std::vector<double> lam0;       // mean longitude argp+M at t0, rad
+    std::vector<double> lam_rate;   // chord mean-longitude rate, rad/day
+    std::vector<double> m_rate;     // chord mean-anomaly rate, rad/day
+    std::vector<double> ecc;        // osculating eccentricity at t0
+    std::vector<double> rp;         // perigee radius at t0, km
+    std::vector<double> u0;         // argument of latitude at t0, rad
+                                    // (incl. equation of center — exact phase)
+    std::vector<double> curv;       // curvature window margin, rad (x1.5)
+};
+
+// Build the anchors: 3 propagations per USED sat (start / midpoint / end of
+// [jd0, jd1]) -> rv2coe -> chord rates unwrapped against the satrec's own
+// reference rates (mdot/argpdot/nodedot; branch-safe — drag shifts the true
+// advance by only ~degrees over a day). Unused sats are skipped (ok=false).
+AnchorSet build_anchors(const std::vector<elsetrec*>& sats,
+                        const std::vector<char>& used,
+                        double jd0, double jd1);
+
+// Per-pair scan intervals as HALF-OPEN step ranges [k_lo, k_hi] (inclusive),
+// CSR layout: pair p's ranges are ranges[range_offset[p] .. range_offset[p+1]).
+// A pair with no ranges is never scanned (its orbits never co-occupy the node
+// windows); a conservative fall-back pair gets one whole-window range.
+struct SieveIndex {
+    std::vector<uint32_t> range_offset;               // size npairs+1
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    // Per-step activation index (built from the ranges): at step k, activate
+    // pairs in act[act_offset[k] .. act_offset[k+1]); after evaluating step k,
+    // deactivate pairs in deact[...] (their range ended at k).
+    std::vector<uint32_t> act_offset, act;            // size nsteps+1 / total
+    std::vector<uint32_t> deact_offset, deact;
+    long nsteps = 0;
+    size_t n_whole_window = 0;   // pairs kept whole-window (coplanar/fallback)
+    size_t n_dropped = 0;        // pairs with zero ranges (never scanned)
+};
+
+// Sieve tuning (defaults = the validated 10.1b spec values).
+struct SieveParams {
+    double osc_margin_km = 10.0;   // mean-vs-osculating D_eff pad
+    double u_margin_rad = 0.5 * 3.14159265358979323846 / 180.0;  // base 0.5 deg
+};
+
+// Build the per-pair scan intervals for the coarse-survivor list P over
+// [jd0, jd1] at step_sec, gating on D_eff = threshold_km + osc_margin_km.
+// Conservative by construction: near-coplanar pairs, failed anchors, very
+// eccentric phases and any window wide enough to wrap are kept whole-window.
+SieveIndex build_sieve_index(const AnchorSet& a,
+                             const std::vector<std::pair<size_t, size_t>>& P,
+                             double jd0, double jd1, double step_sec,
+                             double threshold_km, const SieveParams& params);
 
 // Coarse altitude-band cut: every (i, j), i < j, whose bands
 // [periapsis - pad, apoapsis + pad] overlap (touching counts), in row-major
@@ -46,12 +113,23 @@ std::vector<std::pair<size_t, size_t>> build_coarse_pairs(
 // co-orbital neighbors are not spuriously flagged. Returns one MediumResult
 // per contiguous flagged window per pair.
 //
+// sieve == nullptr: the classic full scan (every pair at every step).
+// sieve != nullptr (Phase 10.2 time filter): each pair is evaluated only
+// inside its precomputed step ranges — activated at a range's first step
+// (fresh window state), evaluated while active, and flushed+deactivated after
+// its last step (same flush as end-of-scan). Rows for evaluated windows are
+// byte-identical to the full scan; windows entirely outside every range
+// (medium's spurious far-distance flags) are simply never produced — the
+// EVENT list after the fine stage + report cut is identical (the 10.1b
+// contract; proven on 1.4M real events).
+//
 // Assumes inputs already validated: nsteps >= 2 and every P index in
 // [0, sats.size()). Mutates the satrecs (t, error) exactly like sgp4().
 std::vector<MediumResult> run_medium_scan(
     const std::vector<elsetrec*>& sats,
     const std::vector<std::pair<size_t, size_t>>& P,
-    double jd_start, double jd_end, double step_sec, double threshold_km);
+    double jd_start, double jd_end, double step_sec, double threshold_km,
+    const SieveIndex* sieve = nullptr);
 
 }  // namespace screening
 
