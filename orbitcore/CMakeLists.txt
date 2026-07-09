@@ -11,6 +11,9 @@ find_package(pybind11 CONFIG REQUIRED)
 # Create the pybind11 module
 pybind11_add_module(orbitcore
     src/bindings.cpp
+    src/bind_satrec.cpp
+    src/bind_propagation.cpp
+    src/bind_screening.cpp
     src/screening.cpp
     src/hello.cpp
     src/SGP4.cpp
