@@ -879,3 +879,118 @@ class TestScaleRegression:
         assert seen["gross_km"] != asym.r_km                  # not the radial axis
         corner = math.sqrt(0.4 ** 2 + 44 ** 2 + 51 ** 2)      # ~67.4 km
         assert seen["gross_km"] < corner                      # not the box corner
+
+
+class TestFusedStage:
+    """Phase 10.1a — the fused C++ stage (screen_pairs) and run_screen(fused=True).
+
+    screen_pairs computes the coarse cut and the medium scan in one call so the
+    survivor pairs never materialize as Python objects (the memory lever for the
+    full active catalog: ~48 M pairs = ~8.7 GB of tuples that won't fit CI). The
+    contract is BYTE-IDENTICAL results to coarse_filter() + medium_filter(), so
+    these tests lock exactly that equivalence — at scale, not just a toy pair."""
+
+    def test_exposed(self):
+        assert hasattr(orbitcore, "screen_pairs")
+
+    def test_rows_identical_to_coarse_plus_medium(self):
+        """screen_pairs' rows == medium_filter(coarse_filter(...)) byte-for-byte,
+        and its returned survivor count == len(coarse_filter(...)). This is the
+        whole correctness claim of 1a: same screen, the pairs just never cross
+        into Python. Run on a dense shell so thousands of real windows exercise
+        the fused path (not a lone pair)."""
+        sats, meta, start = _shell_satrecs(300)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        periapsis = [m["periapsis_km"] for m in meta]
+        apoapsis = [m["apoapsis_km"] for m in meta]
+        pad, step = 100.0, 30.0
+        jd_end = jd0 + 3.0 / 24.0
+
+        pairs = orbitcore.coarse_filter(periapsis, apoapsis, pad)
+        rows_ref = orbitcore.medium_filter(sats, pairs, jd0, jd_end, step, pad)
+        n_pairs, rows_fused = orbitcore.screen_pairs(
+            sats, periapsis, apoapsis, pad, jd0, jd_end, step, pad)
+
+        assert len(rows_ref) > 50, "shell too sparse to be a scale test"
+        assert n_pairs == len(pairs)             # same survivor count
+        assert rows_fused == rows_ref            # byte-identical rows
+
+    def test_run_screen_events_identical_both_modes(self):
+        """run_screen(fused=True) reproduces run_screen(fused=False) event-for-
+        event (every dict, order included) — the fused flag is a pure perf
+        switch, never a results switch.
+
+        The Euclidean path is the non-vacuous proof: >5 real events on the dense
+        shell, byte-identical through the full pipeline (fused rows → fine →
+        report cut → sort). The SFS path is exercised too, but yields 0 events on
+        the synthetic shell by construction (its crossings are radially dominated
+        — 7.2), so its equivalence is structural: the SFS report cut / suppression
+        / de-dupe are shared code operating on the SAME rows screen_pairs already
+        reproduced byte-for-byte (test_rows_identical_to_coarse_plus_medium)."""
+        sats, meta, start = _shell_satrecs(300)
+
+        euc_ref = run_screen(sats, meta, start, 3.0, threshold_km=100.0, fused=False)
+        euc_fused = run_screen(sats, meta, start, 3.0, threshold_km=100.0, fused=True)
+        assert len(euc_ref) > 5
+        assert euc_ref == euc_fused
+
+        from core.screening_volumes import regime_for
+        vols = [regime_for(m["periapsis_km"], m["eccentricity"], m["period_min"])
+                for m in meta]
+        sfs_ref = run_screen(sats, meta, start, 3.0, volumes=vols, fused=False)
+        sfs_fused = run_screen(sats, meta, start, 3.0, volumes=vols, fused=True)
+        assert sfs_ref == sfs_fused
+
+    def test_timings_shape_when_fused(self):
+        """Fused populates n_pairs (the survivor count comes back from C++) and
+        folds t_coarse into t_medium (t_coarse == 0.0)."""
+        sats, meta, start = _shell_satrecs(300)
+        tm: dict = {}
+        run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                   fused=True, timings=tm)
+        assert tm["n_pairs"] > 0
+        assert tm["t_coarse"] == 0.0
+        assert tm["n_windows"] >= tm["n_events"]
+
+    def test_empty_survivors_early_return(self):
+        """No coarse survivors (disjoint altitude bands) → screen_pairs returns
+        (0, []) and run_screen(fused=True) early-returns [] with zeroed timings,
+        mirroring the non-fused no-pairs path."""
+        a, b = _crosser_pair()
+        meta = [
+            {"norad_id": 1, "name": "LOW", "object_type": "PAYLOAD",
+             "epoch_age_days": 1.0, "periapsis_km": 300.0, "apoapsis_km": 320.0,
+             "object_id": "2020-001A", "eccentricity": 0.001, "period_min": 90.0},
+            {"norad_id": 2, "name": "HIGH", "object_type": "PAYLOAD",
+             "epoch_age_days": 1.0, "periapsis_km": 1500.0, "apoapsis_km": 1520.0,
+             "object_id": "2020-002A", "eccentricity": 0.001, "period_min": 116.0},
+        ]
+        tm: dict = {}
+        events = run_screen([a, b], meta, _iss_epoch_dt(), 3.0,
+                            threshold_km=5.0, pad_km=5.0, fused=True, timings=tm)
+        assert events == []
+        assert tm["n_pairs"] == 0
+        assert tm["n_events"] == 0
+
+    def test_validation(self):
+        """screen_pairs fails loudly on bad inputs (same discipline as
+        medium_filter): length mismatch, negative pad, bad window/step, and a
+        non-Satrec item."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        peri, apo = [410.0, 410.0], [420.0, 420.0]
+        cases = [
+            (([a, b], [410.0], apo, 5.0, jd0, jd0 + 1.0, 60.0, 5.0), ValueError),   # len mismatch
+            (([a, b], peri, apo, -1.0, jd0, jd0 + 1.0, 60.0, 5.0), ValueError),     # pad < 0
+            (([a, b], peri, apo, 5.0, jd0, jd0 - 1.0, 60.0, 5.0), ValueError),      # end <= start
+            (([a, b], peri, apo, 5.0, jd0, jd0 + 1.0, 0.0, 5.0), ValueError),       # step <= 0
+            (([a, b], peri, apo, 5.0, jd0, jd0 + 30 / 86400, 60.0, 5.0), ValueError),  # window < step
+            (([a, None], peri, apo, 5.0, jd0, jd0 + 1.0, 60.0, 5.0), TypeError),    # None satrec
+        ]
+        for args, exc in cases:
+            try:
+                orbitcore.screen_pairs(*args)
+                assert False, f"should have raised {exc.__name__}"
+            except exc:
+                pass

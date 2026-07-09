@@ -382,6 +382,7 @@ def run_screen(
     timings: dict | None = None,
     volumes: list | None = None,
     suppress: bool = True,
+    fused: bool = False,
 ) -> list[dict]:
     """
     Run the full conjunction cascade over an index-aligned satellite set and
@@ -416,6 +417,12 @@ def run_screen(
                          co-located-suppressed + de-duped to unique pairs.
         suppress:        SFS path only — apply Conservative-drop co-located
                          suppression (default True). No effect on the legacy path.
+        fused:           when True, run the fused C++ stage (screen_pairs) that
+                         computes the coarse cut and the medium scan in one call
+                         so survivor pairs never materialize as Python objects
+                         (Phase 10.1a — the memory lever for the full catalog).
+                         Byte-identical events to the default two-call path;
+                         default False keeps the exact Phase-6/7 path.
         step_sec:        medium-filter time step in seconds.
         pad_km:          coarse-filter altitude-band margin. Defaults to the
                          Euclidean gross threshold (threshold_km, or the largest
@@ -463,30 +470,6 @@ def run_screen(
     periapsis = [m["periapsis_km"] for m in meta]
     apoapsis = [m["apoapsis_km"] for m in meta]
 
-    # ⚠ PERF (Phase 7, scaling_tracker #3): coarse_filter hands survivor pairs
-    # back to Python and we pass them straight into medium_filter — millions of
-    # (i, j) tuples crossing the C++↔Python boundary twice (~378 ns/pair each
-    # way, measured 6.2). Measured on the full 10,544-sat Starlink catalog (7.1):
-    # 49% of all pairs survive at a 50 km pad (27.3 M), 19% at 5 km (10.5 M) —
-    # altitude-band screening is inclination-blind, so a constellation's stacked
-    # shells (43°/53°/97° all near ~475 km) barely cull. Fine at <=300 sats; at
-    # scale, 7.3 fuses the coarse cut inside medium_filter so survivors never
-    # materialize as Python objects.
-    _t = time.perf_counter()
-    pairs = orbitcore.coarse_filter(periapsis, apoapsis, pad_km)
-    if timings is not None:
-        timings["n_sats"] = len(satrecs)
-        timings["n_pairs"] = len(pairs)
-        timings["t_coarse"] = time.perf_counter() - _t
-    if not pairs:
-        if timings is not None:
-            timings["n_windows"] = 0
-            timings["n_events"] = 0
-            timings["n_suppressed"] = 0
-            timings["t_medium"] = 0.0
-            timings["t_fine"] = 0.0
-        return []
-
     if start_utc.tzinfo is None:
         start_utc = start_utc.replace(tzinfo=timezone.utc)
     jd_w, jd_f = orbitcore.jday(
@@ -497,12 +480,57 @@ def run_screen(
     jd_start = jd_w + jd_f
     jd_end = jd_start + duration_hours / 24.0
 
-    _t = time.perf_counter()
-    rows = orbitcore.medium_filter(
-        satrecs, pairs, jd_start, jd_end, step_sec, gross_km)
-    if timings is not None:
-        timings["t_medium"] = time.perf_counter() - _t
-        timings["n_windows"] = len(rows)
+    if fused:
+        # Fused stage (Phase 10.1a): one C++ call does the coarse cut AND the
+        # medium scan, so the survivor pairs never materialize as Python objects
+        # (the full active catalog's ~48 M pairs = ~8.7 GB of tuples that won't
+        # fit CI). Byte-identical rows to the two-call path below. t_coarse folds
+        # into the scan; n_pairs comes back for the survivor-reduction profile.
+        _t = time.perf_counter()
+        n_pairs, rows = orbitcore.screen_pairs(
+            satrecs, periapsis, apoapsis, pad_km,
+            jd_start, jd_end, step_sec, gross_km)
+        if timings is not None:
+            timings["n_sats"] = len(satrecs)
+            timings["n_pairs"] = n_pairs
+            timings["t_coarse"] = 0.0
+            timings["t_medium"] = time.perf_counter() - _t
+            timings["n_windows"] = len(rows)
+        if n_pairs == 0:
+            if timings is not None:
+                timings["n_events"] = 0
+                timings["n_suppressed"] = 0
+                timings["t_fine"] = 0.0
+            return []
+    else:
+        # ⚠ PERF (Phase 7, scaling_tracker #3): coarse_filter hands survivor
+        # pairs back to Python and we pass them straight into medium_filter —
+        # millions of (i, j) tuples crossing the C++↔Python boundary twice
+        # (~378 ns/pair each way, measured 6.2). Measured on the full 10,544-sat
+        # Starlink catalog (7.1): 49% of all pairs survive at 50 km (27.3 M) —
+        # altitude-band screening is inclination-blind. The fused=True path
+        # (Phase 10.1a, screen_pairs) eliminates this materialization.
+        _t = time.perf_counter()
+        pairs = orbitcore.coarse_filter(periapsis, apoapsis, pad_km)
+        if timings is not None:
+            timings["n_sats"] = len(satrecs)
+            timings["n_pairs"] = len(pairs)
+            timings["t_coarse"] = time.perf_counter() - _t
+        if not pairs:
+            if timings is not None:
+                timings["n_windows"] = 0
+                timings["n_events"] = 0
+                timings["n_suppressed"] = 0
+                timings["t_medium"] = 0.0
+                timings["t_fine"] = 0.0
+            return []
+
+        _t = time.perf_counter()
+        rows = orbitcore.medium_filter(
+            satrecs, pairs, jd_start, jd_end, step_sec, gross_km)
+        if timings is not None:
+            timings["t_medium"] = time.perf_counter() - _t
+            timings["n_windows"] = len(rows)
 
     _t = time.perf_counter()
     # Refine every window in one batched pass (Phase 7.3) rather than a per-window

@@ -113,7 +113,7 @@ def _load_satrecs(source, n, mode, tmpdir):
 
 
 def _profile_one(source, n, hours, threshold, step, tmpdir,
-                 mode="euclidean", start=_START):
+                 mode="euclidean", start=_START, fused=False):
     """One (load + full screen) measurement. Returns (t_load, timings dict)."""
     satrecs, meta, t_load = _load_satrecs(source, n, mode, tmpdir)
 
@@ -122,10 +122,10 @@ def _profile_one(source, n, hours, threshold, step, tmpdir,
         volumes = [regime_for(m["periapsis_km"], m["eccentricity"],
                               m["period_min"]) for m in meta]
         run_screen(satrecs, meta, start, hours, step_sec=step,
-                   volumes=volumes, timings=timings)
+                   volumes=volumes, timings=timings, fused=fused)
     else:
         run_screen(satrecs, meta, start, hours, threshold, step,
-                   timings=timings)
+                   timings=timings, fused=fused)
     return t_load, timings
 
 
@@ -163,6 +163,10 @@ def main() -> None:
                     help="screening start (ISO 8601 UTC). Default: the fixed "
                          "2026-06-01 profiling instant; pass a current date "
                          "when profiling a freshly fetched catalog")
+    ap.add_argument("--fused", action="store_true",
+                    help="use the fused C++ stage (screen_pairs) — the coarse "
+                         "survivor pairs never materialize in Python (Phase "
+                         "10.1a memory lever); byte-identical events")
     args = ap.parse_args()
 
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
@@ -193,14 +197,14 @@ def main() -> None:
         for n in sizes:
             t_load, tm = _profile_one(
                 args.source, n, args.hours, args.threshold, args.step, tmp,
-                mode=args.mode, start=start)
+                mode=args.mode, start=start, fused=args.fused)
             _print_row(t_load, tm)
 
         if args.full and args.source in ("starlink", "active"):
             print("  ... full catalog (can take minutes) ...")
             t_load, tm = _profile_one(
                 args.source, None, args.hours, args.threshold, args.step, tmp,
-                mode=args.mode, start=start)
+                mode=args.mode, start=start, fused=args.fused)
             _print_row(t_load, tm)
         elif args.full:
             print("  (--full ignored: not meaningful for --source synth)")
