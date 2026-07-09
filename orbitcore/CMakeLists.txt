@@ -20,3 +20,11 @@ pybind11_add_module(orbitcore
 )
 
 target_include_directories(orbitcore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# OpenMP parallelizes the Phase-10.4 fine stage (refine_rows: one row per
+# task, private satrec copies). Optional: without it the refine runs
+# single-threaded — same results, just slower (the pragma compiles away).
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(orbitcore PRIVATE OpenMP::OpenMP_CXX)
+endif()

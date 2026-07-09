@@ -11,6 +11,10 @@
 #include <cmath>
 #include <limits>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 namespace {
 
 const double PI = 3.14159265358979323846;
@@ -584,6 +588,204 @@ std::vector<MediumResult> run_medium_scan(
     }
 
     return results;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.4 fine stage — see screening.h for the superset contract.
+//
+// The algorithm below mirrors fine_filter_batch (backend/core/conjunctions.py)
+// step for step — same Newton update, same best-sample tracking, same
+// edge-widen retry — so its converged TCA/miss agree with the Python fine
+// stage to floating-point noise. It does NOT need to be bit-identical: only
+// the survive/reject decision leaves this file, and margin_km covers the
+// noise. Constants match the Python names.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const int FINE_NEWTON_STEPS = 5;             // _FINE_NEWTON_STEPS
+const double EDGE_TOL_DAY = 1e-3 / 1440.0;   // _EDGE_TOL_DAY
+
+// Both satellites' TEME state at jd; false (NaN outputs) on propagation
+// failure. Local elsetrec copies belong to the caller — sgp4() mutates.
+inline bool pair_state(elsetrec& sa, elsetrec& sb,
+                       double ep_a, double ep_b, double jd,
+                       Vec3& ra, Vec3& va, Vec3& rb, Vec3& vb) {
+    double r[3], v[3];
+    bool ok = SGP4Funcs::sgp4(sa, (jd - ep_a) * 1440.0, r, v);
+    if (!ok || sa.error != 0) return false;
+    ra = {r[0], r[1], r[2]}; va = {v[0], v[1], v[2]};
+    ok = SGP4Funcs::sgp4(sb, (jd - ep_b) * 1440.0, r, v);
+    if (!ok || sb.error != 0) return false;
+    rb = {r[0], r[1], r[2]}; vb = {v[0], v[1], v[2]};
+    return true;
+}
+
+// _minimize_tca for ONE row: Newton on the range-rate from the bracket
+// midpoint, clamped to [lo, hi], returning the best-SAMPLED time (never a
+// point we didn't evaluate; NaN evaluations never win).
+inline double minimize_tca_one(elsetrec& sa, elsetrec& sb,
+                               double ep_a, double ep_b,
+                               double lo, double hi) {
+    double t = 0.5 * (lo + hi);
+    double t_best = t;
+    double d2_best = std::numeric_limits<double>::infinity();
+    for (int it = 0; it < FINE_NEWTON_STEPS; ++it) {
+        Vec3 ra, va, rb, vb;
+        double d2 = std::numeric_limits<double>::quiet_NaN();
+        double g = 0.0, gprime = 0.0;
+        if (pair_state(sa, sb, ep_a, ep_b, t, ra, va, rb, vb)) {
+            const Vec3 dr{ra.x - rb.x, ra.y - rb.y, ra.z - rb.z};
+            const Vec3 dv{va.x - vb.x, va.y - vb.y, va.z - vb.z};
+            d2 = dot(dr, dr);
+            g = dot(dr, dv);        // range-rate * |dr|, km^2/s
+            gprime = dot(dv, dv);   // ~ dg/dt, km^2/s^2
+        }
+        if (!std::isnan(d2) && d2 < d2_best) {
+            d2_best = d2;
+            t_best = t;
+        }
+        // Step only where |dv| is real and non-zero (co-moving pairs and
+        // failed propagations keep step 0 — they don't move off the sample).
+        const double step_s = (gprime > 1e-9) ? g / gprime : 0.0;
+        t = t - step_s / 86400.0;
+        if (t < lo) t = lo;
+        if (t > hi) t = hi;
+    }
+    return t_best;
+}
+
+// One row end-to-end: minimize, edge-widen retry, authoritative state at the
+// result. Returns true with (jd_tca, states) on a finite refinement; false
+// when the pair cannot be propagated at its TCA.
+inline bool refine_one(elsetrec& sa, elsetrec& sb, double jd_flag,
+                       double step_day, double& jd_tca,
+                       Vec3& ra, Vec3& va, Vec3& rb, Vec3& vb) {
+    const double ep_a = sa.jdsatepoch + sa.jdsatepochF;
+    const double ep_b = sb.jdsatepoch + sb.jdsatepochF;
+    const double lo = jd_flag - step_day;
+    const double hi = jd_flag + step_day;
+
+    double t_star = minimize_tca_one(sa, sb, ep_a, ep_b, lo, hi);
+
+    // Edge-widen (mirrors fine_filter_batch): a minimum on a bracket edge
+    // means the true TCA likely sits just outside — widen that side by the
+    // bracket's own width and re-minimize once, fresh.
+    const bool at_lo = (t_star - lo) < EDGE_TOL_DAY;
+    const bool at_hi = (hi - t_star) < EDGE_TOL_DAY;
+    if (at_lo || at_hi) {
+        const double width = hi - lo;
+        const double wlo = at_lo ? lo - width : lo;
+        const double whi = at_hi ? hi + width : hi;
+        t_star = minimize_tca_one(sa, sb, ep_a, ep_b, wlo, whi);
+    }
+
+    jd_tca = t_star;
+    return pair_state(sa, sb, ep_a, ep_b, t_star, ra, va, rb, vb);
+}
+
+}  // namespace
+
+std::vector<MediumResult> refine_rows(
+    const std::vector<elsetrec*>& sats,
+    const std::vector<MediumResult>& rows,
+    double step_sec, double pre_cut_km, double margin_km,
+    const std::vector<RtnAxes>* axes,
+    int n_threads)
+{
+    const long n = (long)rows.size();
+    const double step_day = step_sec / 86400.0;
+    const double cut = pre_cut_km + margin_km;
+    std::vector<char> keep(n, 0);
+
+    // Embarrassingly parallel: rows are independent, and each iteration works
+    // on private elsetrec copies. The keep flag is indexed by row, so the
+    // compaction below is deterministic whatever the thread schedule was.
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic, 256) \
+        num_threads(n_threads > 0 ? n_threads : omp_get_max_threads())
+#endif
+    for (long k = 0; k < n; ++k) {
+        const size_t i = rows[k].i, j = rows[k].j;
+        elsetrec sa = *sats[i];   // private copies: sgp4() mutates
+        elsetrec sb = *sats[j];
+        double jd_tca;
+        Vec3 ra, va, rb, vb;
+        if (!refine_one(sa, sb, rows[k].jd, step_day, jd_tca,
+                        ra, va, rb, vb)) {
+            // Propagation failed at the TCA: hand the row back to Python
+            // (fine_filter_batch drops it the same way) instead of deciding
+            // a failure case here — conservative by construction.
+            keep[k] = 1;
+            continue;
+        }
+        const Vec3 dba{rb.x - ra.x, rb.y - ra.y, rb.z - ra.z};
+
+        if (axes == nullptr) {
+            // Euclidean report cut: miss <= threshold (+ margin).
+            keep[k] = (norm(dba) <= cut) ? 1 : 0;
+            continue;
+        }
+
+        // SFS report cut: the miss vector in the primary (i)'s RTN frame
+        // against the pair's ellipsoid, every semi-axis inflated by margin.
+        // Volume choice mirrors Python's max(vi, vj, key=circumscribing
+        // radius) — first-wins on ties, so j's only if STRICTLY larger.
+        const RtnAxes& ai = (*axes)[i];
+        const RtnAxes& aj = (*axes)[j];
+        const double rc_i = std::max(ai.r, std::max(ai.t, ai.n));
+        const double rc_j = std::max(aj.r, std::max(aj.t, aj.n));
+        const RtnAxes& vol = (rc_j > rc_i) ? aj : ai;
+
+        // Vallado RSW triad, identical to teme_to_rtn: R = r/|r|,
+        // N = (r x v)/|r x v|, T = N x R.
+        const double rmag = norm(ra);
+        const Vec3 Rh{ra.x / rmag, ra.y / rmag, ra.z / rmag};
+        Vec3 w = cross(ra, va);
+        const double wmag = norm(w);
+        const Vec3 Nh{w.x / wmag, w.y / wmag, w.z / wmag};
+        const Vec3 Th = cross(Nh, Rh);
+
+        const double rr = dot(dba, Rh) / (vol.r + margin_km);
+        const double tt = dot(dba, Th) / (vol.t + margin_km);
+        const double nn = dot(dba, Nh) / (vol.n + margin_km);
+        keep[k] = (rr * rr + tt * tt + nn * nn <= 1.0) ? 1 : 0;
+    }
+
+    std::vector<MediumResult> survivors;
+    for (long k = 0; k < n; ++k) {
+        if (keep[k]) survivors.push_back(rows[k]);
+    }
+    return survivors;
+}
+
+RefineDebug refine_debug(const std::vector<elsetrec*>& sats,
+                         const std::vector<MediumResult>& rows,
+                         double step_sec, int n_threads)
+{
+    const long n = (long)rows.size();
+    const double step_day = step_sec / 86400.0;
+    RefineDebug out;
+    out.jd_tca.assign(n, std::numeric_limits<double>::quiet_NaN());
+    out.miss_km.assign(n, std::numeric_limits<double>::quiet_NaN());
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic, 256) \
+        num_threads(n_threads > 0 ? n_threads : omp_get_max_threads())
+#endif
+    for (long k = 0; k < n; ++k) {
+        elsetrec sa = *sats[rows[k].i];
+        elsetrec sb = *sats[rows[k].j];
+        double jd_tca;
+        Vec3 ra, va, rb, vb;
+        const bool ok = refine_one(sa, sb, rows[k].jd, step_day, jd_tca,
+                                   ra, va, rb, vb);
+        out.jd_tca[k] = jd_tca;
+        if (ok) {
+            const Vec3 dr{ra.x - rb.x, ra.y - rb.y, ra.z - rb.z};
+            out.miss_km[k] = norm(dr);
+        }   // else: stays NaN — the pair failed to propagate at its TCA
+    }
+    return out;
 }
 
 }  // namespace screening

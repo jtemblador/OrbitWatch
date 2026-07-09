@@ -14,6 +14,8 @@
  */
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -218,7 +220,8 @@ The GIL is released during the scan.
 )doc"
     );
 
-    // --- screen_pairs: fused coarse + medium screen (stage 1a + 10.2 sieve) ---
+    // --- screen_pairs: fused coarse + medium screen (stage 1a + 10.2 sieve
+    //     + 10.4 fine refine) ---
     m.def("screen_pairs",
         [](py::sequence satrecs,
            const std::vector<double>& periapsis_km,
@@ -226,7 +229,10 @@ The GIL is released during the scan.
            double pad_km, double jd_start, double jd_end,
            double step_sec, double threshold_km,
            bool time_filter, double sieve_u_margin_deg,
-           double sieve_osc_margin_km) -> py::tuple
+           double sieve_osc_margin_km,
+           bool refine, double refine_margin_km,
+           const std::vector<std::array<double, 3>>& refine_axes,
+           int refine_threads) -> py::tuple
         {
             const size_t n = py::len(satrecs);
             if (periapsis_km.size() != n || apoapsis_km.size() != n) {
@@ -268,11 +274,34 @@ The GIL is released during the scan.
                 throw py::value_error(
                     "screen_pairs: sieve margins must be >= 0");
             }
+            if (refine_margin_km < 0.0) {
+                throw py::value_error(
+                    "screen_pairs: refine_margin_km must be >= 0, got "
+                    + std::to_string(refine_margin_km));
+            }
+            if (!refine_axes.empty() && refine_axes.size() != n) {
+                throw py::value_error(
+                    "screen_pairs: refine_axes (" + std::to_string(refine_axes.size())
+                    + ") must match satrecs (" + std::to_string(n) + ")");
+            }
+            std::vector<screening::RtnAxes> axes;
+            axes.reserve(refine_axes.size());
+            for (size_t i = 0; i < refine_axes.size(); ++i) {
+                const auto& ax = refine_axes[i];
+                if (!(ax[0] > 0.0) || !(ax[1] > 0.0) || !(ax[2] > 0.0)) {
+                    throw py::value_error(
+                        "screen_pairs: refine_axes[" + std::to_string(i)
+                        + "] semi-axes must be > 0");
+                }
+                axes.push_back({ax[0], ax[1], ax[2]});
+            }
 
             std::vector<elsetrec*> sats = extract_satrecs(satrecs, "screen_pairs");
 
             std::vector<std::pair<size_t, size_t>> P;
             std::vector<screening::MediumResult> results;
+            size_t n_flagged = 0;
+            double t_refine_s = 0.0;
             {
                 // Both the coarse cut AND the scan touch no Python objects ->
                 // release the GIL for the whole thing. The survivor pair list
@@ -315,6 +344,24 @@ The GIL is released during the scan.
                     results = screening::run_medium_scan(
                         sats, P, jd_start, jd_end, step_sec, threshold_km);
                 }
+
+                if (refine) {
+                    // Phase 10.4 fine pre-cut: refine every row's TCA in
+                    // parallel and keep only rows whose converged miss can
+                    // pass the report cut (miss <= gross + margin; propagation
+                    // failures survive for Python to adjudicate). The full row
+                    // list lives ONLY here — at the full catalog/24 h that's
+                    // ~13 M rows as a C++ vector vs ~13 M Python dicts, the
+                    // scaling_tracker #7 memory wall.
+                    n_flagged = results.size();
+                    const auto t0 = std::chrono::steady_clock::now();
+                    results = screening::refine_rows(
+                        sats, results, step_sec, threshold_km,
+                        refine_margin_km,
+                        axes.empty() ? nullptr : &axes, refine_threads);
+                    t_refine_s = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t0).count();
+                }
             } // GIL reacquired here
 
             py::list out;
@@ -323,7 +370,13 @@ The GIL is released during the scan.
             }
             // (n_pairs, rows): the survivor count is returned for profiling
             // (survivor reduction) WITHOUT materializing the pairs in Python.
-            return py::make_tuple(P.size(), out);
+            if (!refine) {
+                return py::make_tuple(P.size(), out);
+            }
+            // refine=True: rows are the SURVIVORS; also return the pre-refine
+            // flagged-row count (the comparable n_windows) and the refine wall
+            // time so Python's stage timings stay honest.
+            return py::make_tuple(P.size(), out, n_flagged, t_refine_s);
         },
         py::arg("satrecs"),
         py::arg("periapsis_km"),
@@ -336,6 +389,10 @@ The GIL is released during the scan.
         py::arg("time_filter") = false,
         py::arg("sieve_u_margin_deg") = 0.5,
         py::arg("sieve_osc_margin_km") = 10.0,
+        py::arg("refine") = false,
+        py::arg("refine_margin_km") = 0.01,
+        py::arg("refine_axes") = std::vector<std::array<double, 3>>{},
+        py::arg("refine_threads") = 0,
         R"doc(
 Fused coarse + medium conjunction screen (stage 1a) — a drop-in replacement
 for coarse_filter() followed by medium_filter(), producing byte-identical rows.
@@ -366,17 +423,41 @@ threshold_km: medium flag distance in km (> 0).
 time_filter:  enable the time sieve (default False = classic full scan).
 sieve_u_margin_deg: sieve base angular margin, deg (validated 0.25; ship 0.5).
 sieve_osc_margin_km: mean-vs-osculating pad on the sieve's D_eff (km).
+refine:       enable the Phase-10.4 C++ fine pre-cut (below).
+refine_margin_km: pre-cut slack (absorbs C++-vs-NumPy FP noise, measured
+              <= 5.7e-14 km on 934k rows; default 0.01 km = huge headroom).
+refine_axes:  per-satellite RTN ellipsoid semi-axes (r, t, n) km, index-
+              aligned with satrecs — the SFS report-cut shape. Empty (default)
+              = Euclidean pre-cut at threshold_km. The pair's volume is the
+              sat's with the larger circumscribing radius (first-wins on
+              ties, matching run_screen's max()).
+refine_threads: OpenMP team size for the refine (0 = default). Output is
+              deterministic for any value.
 
-Returns: (n_pairs, rows) where
-  n_pairs — number of coarse survivors (for profiling; the pairs themselves
-            are never returned).
-  rows    — list of (i, j, jd, distance_km); see medium_filter for the no-skip
-            detection criterion and row semantics. With time_filter=True the
-            rows are a subset (spurious far-distance windows dropped) whose
-            post-fine EVENTS are identical.
+refine=True adds the Phase-10.4 FINE PRE-CUT: every row's TCA is refined in
+parallel (the 7.3 Newton-on-range-rate algorithm, OpenMP across rows) and only
+rows that can pass the report cut survive — miss inside the pair's margin-
+inflated RTN ellipsoid (refine_axes given) or miss <= threshold_km +
+refine_margin_km (Euclidean). Propagation failures also survive — Python
+adjudicates them. Rows are returned with their ORIGINAL (jd, d) so the Python
+fine stage re-refines the survivors through the exact same validated path —
+reported events are byte-identical by construction; the row list (~13 M at
+the full catalog/24 h) never materializes in Python.
+
+Returns: (n_pairs, rows) — or, with refine=True,
+         (n_pairs, rows, n_flagged, t_refine_s) where
+  n_pairs   — number of coarse survivors (for profiling; the pairs themselves
+              are never returned).
+  rows      — list of (i, j, jd, distance_km); see medium_filter for the
+              no-skip detection criterion and row semantics. With
+              time_filter=True the rows are a subset (spurious far-distance
+              windows dropped) whose post-fine EVENTS are identical; with
+              refine=True they are the fine-stage SURVIVORS only.
+  n_flagged — pre-refine medium row count (the comparable n_windows).
+  t_refine_s — refine wall time, s (so stage timings stay honest).
 Raises: ValueError (bad lengths/pad/window/step/threshold/margins),
         TypeError (non-Satrec item, named by index).
-The GIL is released during the coarse cut, sieve build, and scan.
+The GIL is released during the coarse cut, sieve build, scan, and refine.
 )doc"
     );
 
@@ -418,6 +499,52 @@ margins. Not part of the public screening API.
 Returns: dict of per-satellite lists (index-aligned with satrecs):
   ok, inc, raan0, raan_dot, lam0, lam_rate, m_rate, ecc, rp, u0, curv
   (angles rad, rates rad/day, rp km).
+)doc"
+    );
+
+    // --- _refine_oracle: internal, for fine-stage oracle cross-validation ---
+    m.def("_refine_oracle",
+        [](py::sequence satrecs, py::sequence rows, double step_sec,
+           int n_threads) -> py::tuple
+        {
+            if (!(step_sec > 0.0)) {
+                throw py::value_error(
+                    "_refine_oracle: step_sec must be > 0");
+            }
+            std::vector<elsetrec*> sats =
+                extract_satrecs(satrecs, "_refine_oracle");
+            const size_t n = sats.size();
+            const size_t nrows = py::len(rows);
+            std::vector<screening::MediumResult> R(nrows);
+            for (size_t k = 0; k < nrows; ++k) {
+                auto t = rows[k].cast<py::tuple>();
+                const long long i = t[0].cast<long long>();
+                const long long j = t[1].cast<long long>();
+                if (i < 0 || j < 0 || (size_t)i >= n || (size_t)j >= n) {
+                    throw py::value_error(
+                        "_refine_oracle: rows item " + std::to_string(k)
+                        + " indexes out of range");
+                }
+                R[k] = {(size_t)i, (size_t)j,
+                        t[2].cast<double>(), t[3].cast<double>()};
+            }
+            screening::RefineDebug dbg;
+            {
+                py::gil_scoped_release release;
+                dbg = screening::refine_debug(sats, R, step_sec, n_threads);
+            }
+            return py::make_tuple(dbg.jd_tca, dbg.miss_km);
+        },
+        py::arg("satrecs"), py::arg("rows"), py::arg("step_sec"),
+        py::arg("n_threads") = 0,
+        R"doc(
+INTERNAL — the C++ fine stage's converged (jd_tca, miss_km) per medium row
+(Phase 10.4). Exposed so tests can lock the C++ Newton refinement against
+fine_filter_batch row-by-row; the measured disagreement justifies
+screen_pairs' refine_margin_km. NaN miss where the pair failed to propagate.
+Not part of the public screening API.
+
+Returns: (jd_tca list, miss_km list), index-aligned with rows.
 )doc"
     );
 }

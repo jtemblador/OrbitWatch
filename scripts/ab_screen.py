@@ -26,7 +26,9 @@ CI job can gate on it.
 Baselines:
     classic  run_screen(fused=False)             (production today)
     fused    run_screen(fused=True, sieve=False) (10.1a, proven == classic)
-Candidate is always fused=True, sieve=True — the Stage-1 path 10.6 flips on.
+Candidate is fused=True, sieve=True — plus refine=True (the Phase-10.4 C++
+fine pre-cut) when --refine is given. --baseline classic --refine is the full
+production flip 10.6 gates on.
 
 --start defaults to now (UTC): a freshly fetched catalog should be screened
 near its epochs. Pass an explicit ISO timestamp to reproduce a prior run.
@@ -64,18 +66,21 @@ def _load(source: str, n: int | None, mode: str):
     return build_satrecs_and_meta(df)
 
 
-def _screen(satrecs, meta, args, start, fused: bool, sieve: bool):
+def _screen(satrecs, meta, args, start, fused: bool, sieve: bool,
+            refine: bool = False):
     timings: dict = {}
     if args.mode == "sfs":
         volumes = [regime_for(m["periapsis_km"], m["eccentricity"],
                               m["period_min"]) for m in meta]
         events = run_screen(satrecs, meta, start, args.hours,
                             step_sec=args.step, volumes=volumes,
-                            timings=timings, fused=fused, sieve=sieve)
+                            timings=timings, fused=fused, sieve=sieve,
+                            refine=refine)
     else:
         events = run_screen(satrecs, meta, start, args.hours,
                             args.threshold, args.step,
-                            timings=timings, fused=fused, sieve=sieve)
+                            timings=timings, fused=fused, sieve=sieve,
+                            refine=refine)
     return events, timings
 
 
@@ -94,6 +99,9 @@ def main() -> None:
     ap.add_argument("--start", default=None,
                     help="screening start, ISO 8601 UTC (default: now)")
     ap.add_argument("--baseline", choices=("classic", "fused"), default="classic")
+    ap.add_argument("--refine", action="store_true",
+                    help="candidate adds the Phase-10.4 C++ fine pre-cut "
+                         "(fused+sieve+refine — the full Stage-1+2 flip)")
     args = ap.parse_args()
 
     start = (datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
@@ -101,10 +109,11 @@ def main() -> None:
 
     satrecs, meta = _load(args.source, args.max_sats, args.mode)
     cut = "SFS ellipsoids" if args.mode == "sfs" else f"{args.threshold} km"
+    cand = "fused+sieve+refine" if args.refine else "fused+sieve"
     print(f"\nStage-1 A/B -- source={args.source} n={len(satrecs)} "
           f"mode={args.mode} cut={cut} window={args.hours} h "
           f"step={args.step} s start={start.isoformat()}\n"
-          f"baseline={args.baseline}  candidate=fused+sieve", flush=True)
+          f"baseline={args.baseline}  candidate={cand}", flush=True)
 
     t0 = time.perf_counter()
     ev_a, tm_a = _screen(satrecs, meta, args, start,
@@ -115,11 +124,15 @@ def main() -> None:
           f"windows {tm_a['n_windows']:>9,}  total {t_a:>6.1f} s", flush=True)
 
     t0 = time.perf_counter()
-    ev_b, tm_b = _screen(satrecs, meta, args, start, fused=True, sieve=True)
+    ev_b, tm_b = _screen(satrecs, meta, args, start, fused=True, sieve=True,
+                         refine=args.refine)
     t_b = time.perf_counter() - t0
-    print(f"  B (fused+sieve): {len(ev_b):>7,} events  "
+    surv = (f"  survivors {tm_b['n_survivors']:>7,}"
+            if "n_survivors" in tm_b else "")
+    print(f"  B ({cand}): {len(ev_b):>7,} events  "
           f"medium {tm_b['t_medium']:>7.1f} s  fine {tm_b['t_fine']:>6.1f} s  "
-          f"windows {tm_b['n_windows']:>9,}  total {t_b:>6.1f} s", flush=True)
+          f"windows {tm_b['n_windows']:>9,}{surv}  total {t_b:>6.1f} s",
+          flush=True)
 
     peak_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
     speedup = tm_a["t_medium"] / max(tm_b["t_medium"], 1e-9)

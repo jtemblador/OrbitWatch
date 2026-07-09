@@ -131,6 +131,62 @@ std::vector<MediumResult> run_medium_scan(
     double jd_start, double jd_end, double step_sec, double threshold_km,
     const SieveIndex* sieve = nullptr);
 
+// ---------------------------------------------------------------------------
+// Phase 10.4 fine stage — C++ TCA refinement with a SUPERSET pre-cut.
+// ---------------------------------------------------------------------------
+//
+// refine_rows() runs the Phase-7.3 batched fine algorithm (Newton on the
+// relative range-rate over the bracket jd_flag +- one step, best-sample
+// tracking, one edge-widen retry) on every medium row, in parallel (OpenMP;
+// each row copies its two elsetrecs — sgp4() mutates the record, so shared
+// satrecs are NOT thread-safe), and returns the SURVIVOR subset of `rows`,
+// order preserved, original (jd, d) values untouched.
+//
+// The contract is a conservative pre-cut, not the reported numbers: a row
+// survives iff its converged miss can pass the report cut with margin, OR its
+// miss is non-finite (a propagation failure is handed back to Python to
+// adjudicate rather than dropped here). Python re-refines ONLY the survivors
+// with the validated fine_filter_batch, so every reported float comes from
+// the exact same code path as the unrefined screen — events are byte-identical
+// by construction as long as this cut is a true superset. margin_km absorbs
+// the C++-vs-NumPy floating-point disagreement (measured: |dTCA| exactly 0,
+// |dmiss| <= 5.7e-14 km on 934k real rows; the 0.01 km default carries ~12
+// orders of magnitude of headroom).
+//
+// Two cut shapes, mirroring run_screen's two report cuts:
+//   axes == nullptr (Euclidean mode): miss <= pre_cut_km + margin_km.
+//   axes != nullptr (SFS mode): per-satellite RTN ellipsoid semi-axes
+//     {r, t, n} km, index-aligned with sats. The pair's volume is the
+//     sat's whose circumscribing radius (max axis) is larger — j's only if
+//     STRICTLY larger, matching Python's first-wins max(). The miss vector
+//     at the converged TCA, in the PRIMARY (i)'s RTN frame (Vallado RSW,
+//     identical to teme_to_rtn), must lie inside the ellipsoid with every
+//     semi-axis inflated by margin_km. A global miss <= pre_cut_km ball
+//     would leave ~21% of rows surviving (measured — the SFS radial axis is
+//     0.4 km vs the 51 km gross); the ellipsoid collapses survivors to
+//     ~the true event set, which is what keeps the full catalog in memory.
+//
+// n_threads > 0 pins the OpenMP team size (tests use 1 vs default to prove
+// thread-count invariance); 0 = the OpenMP default. Output is deterministic
+// regardless: the keep/reject flag is stored per row index and compacted
+// serially.
+struct RtnAxes { double r, t, n; };
+std::vector<MediumResult> refine_rows(
+    const std::vector<elsetrec*>& sats,
+    const std::vector<MediumResult>& rows,
+    double step_sec, double pre_cut_km, double margin_km,
+    const std::vector<RtnAxes>* axes = nullptr,
+    int n_threads = 0);
+
+// The oracle hook (Phase-10.4 twin of _sieve_anchors): the converged
+// (jd_tca, miss_km) per row, index-aligned with `rows` (NaN miss where the
+// pair could not be propagated). Tests lock these against fine_filter_batch;
+// the measured disagreement is what justifies refine_rows' margin_km.
+struct RefineDebug { std::vector<double> jd_tca, miss_km; };
+RefineDebug refine_debug(const std::vector<elsetrec*>& sats,
+                         const std::vector<MediumResult>& rows,
+                         double step_sec, int n_threads = 0);
+
 }  // namespace screening
 
 #endif  // ORBITWATCH_SCREENING_H

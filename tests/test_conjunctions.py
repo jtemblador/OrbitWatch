@@ -1146,3 +1146,160 @@ class TestTimeSieve:
                         threshold_km=25.0, fused=True, sieve=True)
         assert len(off) >= 1
         assert off == on
+
+
+class TestCppFine:
+    """Phase 10.4 — the C++ fine pre-cut inside screen_pairs.
+
+    refine_rows refines every medium row's TCA in C++ (the 7.3 Newton
+    algorithm, OpenMP across rows) and returns only rows that can pass the
+    report cut with margin — a conservative SUPERSET, never the reported
+    numbers. fine_filter_batch then re-refines just the survivors, so every
+    reported float comes from the validated Python path: events are
+    byte-identical BY CONSTRUCTION as long as the pre-cut never drops a row
+    Python would keep. These locks pin (1) the C++ Newton against the Python
+    oracle, (2) the superset property, (3) end-to-end event identity on both
+    report-cut shapes, and (4) thread-count invariance."""
+
+    def test_refine_requires_fused(self):
+        a, b = _crosser_pair()
+        try:
+            run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 3.0,
+                       threshold_km=5.0, fused=False, refine=True)
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_cpp_refine_matches_python_fine(self):
+        """The C++ Newton refinement (_refine_oracle) reproduces
+        fine_filter_batch row-for-row on real shell windows. Measured on 934k
+        real catalog rows: |dTCA| exactly 0, |dmiss| <= 5.7e-14 km — the
+        trial-time sequences are identical and only the final norm differs in
+        the last ulp. The tolerances here leave orders-of-magnitude headroom
+        and still justify refine_margin_km=0.01 km a million times over."""
+        sats, meta, start = _shell_satrecs(200)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        peri = [m["periapsis_km"] for m in meta]
+        apo = [m["apoapsis_km"] for m in meta]
+        _, rows = orbitcore.screen_pairs(
+            sats, peri, apo, 100.0, jd0, jd0 + 3.0 / 24.0, 60.0, 100.0)
+        assert len(rows) > 200          # non-vacuous
+
+        tca_c, miss_c = orbitcore._refine_oracle(sats, rows, 60.0)
+        fine = fine_filter_batch(sats, rows, 60.0)
+        n_checked = 0
+        for k, out in enumerate(fine):
+            if out is None:
+                assert math.isnan(miss_c[k])   # same failure adjudication
+                continue
+            assert abs(tca_c[k] - out["jd_tca"]) * 86400.0 < 1e-6, k
+            assert abs(miss_c[k] - out["miss_km"]) < 1e-9, k
+            n_checked += 1
+        assert n_checked > 200
+
+    def test_refine_survivors_are_superset(self):
+        """The pre-cut contract: every row whose Python-refined miss passes
+        the Euclidean report cut MUST be in the survivor set (and the cut must
+        actually bite — far fewer survivors than rows). 300 sats: a sparser
+        shell has flagged rows but no natural sub-100 km crossings (the 7.5
+        fixture lesson)."""
+        sats, meta, start = _shell_satrecs(300)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        peri = [m["periapsis_km"] for m in meta]
+        apo = [m["apoapsis_km"] for m in meta]
+        args = (sats, peri, apo, 100.0, jd0, jd0 + 3.0 / 24.0, 60.0, 100.0)
+        _, rows = orbitcore.screen_pairs(*args)
+        _, survivors, n_flagged, _t = orbitcore.screen_pairs(
+            *args, refine=True)
+
+        assert n_flagged == len(rows)
+        surv = set(survivors)
+        fine = fine_filter_batch(sats, rows, 60.0)
+        kept = [r for r, out in zip(rows, fine)
+                if out is not None and out["miss_km"] < 100.0]
+        assert len(kept) > 100                      # non-vacuous
+        assert all(r in surv for r in kept)         # superset — the contract
+        assert len(survivors) < len(rows)           # and the cut bites
+
+    def test_refine_events_identical_euclidean(self):
+        """End-to-end: run_screen(refine=True) == run_screen(refine=False) on
+        the dense shell's >1000 real Euclidean events."""
+        sats, meta, start = _shell_satrecs(300)
+        tm_off: dict = {}
+        tm_on: dict = {}
+        off = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                         fused=True, sieve=True, timings=tm_off)
+        on = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                        fused=True, sieve=True, refine=True, timings=tm_on)
+        assert len(off) > 1000
+        assert off == on
+        assert tm_on["n_windows"] == tm_off["n_windows"]   # pre-refine count
+        assert tm_on["n_survivors"] < tm_on["n_windows"]   # the cut bites
+
+    def test_refine_events_identical_ellipsoid(self):
+        """The RTN-ellipsoid pre-cut path, non-vacuously: ASYMMETRIC custom
+        volumes (distinct r/t/n semi-axes) large enough that the shell's
+        natural crossings produce real events. If the C++ RSW triad or the
+        volume-choice rule deviated from teme_to_rtn + max(key=circumscribing
+        radius), the pre-cut would drop rows the Python ellipsoid test keeps
+        and this identity would fail. (The SFS Table-3 volumes exclude the
+        synthetic shell's radial-dominated geometry — 7.2 — hence custom
+        axes for a non-vacuous lock.)"""
+        sats, meta, start = _shell_satrecs(300)
+        vols = [ScreeningVolume("T104", 60.0, 100.0, 80.0)] * len(sats)
+        tm_on: dict = {}
+        off = run_screen(sats, meta, start, 3.0, volumes=vols,
+                         fused=True, sieve=True)
+        on = run_screen(sats, meta, start, 3.0, volumes=vols,
+                        fused=True, sieve=True, refine=True, timings=tm_on)
+        assert len(off) > 50                               # non-vacuous
+        assert off == on
+        assert tm_on["n_survivors"] < tm_on["n_windows"]   # ellipsoid bites
+
+    def test_refine_thread_invariance(self):
+        """OpenMP must not change results: survivor lists are byte-identical
+        for 1, 3, and default thread counts (each row works on private satrec
+        copies; the keep flag is indexed by row and compacted serially).
+        300 sats — sparser shells have no natural sub-100 km crossings (7.5)."""
+        sats, meta, start = _shell_satrecs(300)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        peri = [m["periapsis_km"] for m in meta]
+        apo = [m["apoapsis_km"] for m in meta]
+        outs = [orbitcore.screen_pairs(
+                    sats, peri, apo, 100.0, jd0, jd0 + 3.0 / 24.0, 60.0,
+                    100.0, refine=True, refine_threads=nt)[1]
+                for nt in (1, 3, 0)]
+        assert len(outs[0]) > 50
+        assert outs[0] == outs[1] == outs[2]
+
+    def test_crosser_event_survives_refine(self):
+        """The deterministic ISS/crosser conjunction survives the pre-cut and
+        reports identically — the targeted anchor-case smoke."""
+        a, b = _crosser_pair()
+        off = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                         threshold_km=25.0, fused=True)
+        on = run_screen([a, b], _crosser_meta(), _iss_epoch_dt(), 6.0,
+                        threshold_km=25.0, fused=True, refine=True)
+        assert len(off) >= 1
+        assert off == on
+
+    def test_refine_validation(self):
+        """Boundary discipline: negative margin, mismatched/invalid axes."""
+        a, b = _crosser_pair()
+        jd0 = _iss_epoch_jd()
+        peri, apo = [410.0, 410.0], [420.0, 420.0]
+        base = (peri, apo, 25.0, jd0, jd0 + 1.0, 60.0, 25.0)
+        cases = [
+            dict(refine=True, refine_margin_km=-1.0),           # margin < 0
+            dict(refine=True, refine_axes=[(1.0, 1.0, 1.0)]),   # len mismatch
+            dict(refine=True, refine_axes=[(1.0, 0.0, 1.0)] * 2),  # axis <= 0
+        ]
+        for kw in cases:
+            try:
+                orbitcore.screen_pairs([a, b], *base, **kw)
+                assert False, f"should have raised ValueError: {kw}"
+            except ValueError:
+                pass

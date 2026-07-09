@@ -384,6 +384,7 @@ def run_screen(
     suppress: bool = True,
     fused: bool = False,
     sieve: bool = False,
+    refine: bool = False,
 ) -> list[dict]:
     """
     Run the full conjunction cascade over an index-aligned satellite set and
@@ -432,6 +433,17 @@ def run_screen(
                          pair-step work at the production catalog. Events are
                          identical; the medium's spurious far-distance windows
                          (which the fine stage discards anyway) are skipped.
+        refine:          when True (requires fused=True), run the Phase-10.4
+                         C++ FINE PRE-CUT inside screen_pairs: every medium
+                         row's TCA is refined in parallel (OpenMP) and only
+                         rows that can pass the report cut — the pair's
+                         margin-inflated RTN ellipsoid (SFS) or the Euclidean
+                         threshold — come back. fine_filter_batch then
+                         re-refines just those survivors, so every reported
+                         float still comes from the validated Python path:
+                         events are byte-identical by construction, and the
+                         row list (~13 M at the full catalog / 24 h) never
+                         materializes in Python (scaling_tracker #7).
         step_sec:        medium-filter time step in seconds.
         pad_km:          coarse-filter altitude-band margin. Defaults to the
                          Euclidean gross threshold (threshold_km, or the largest
@@ -441,7 +453,12 @@ def run_screen(
         timings:         optional dict; if provided, populated with per-stage
                          wall times (t_coarse / t_medium / t_fine, seconds) and
                          counts (n_sats, n_pairs, n_windows, n_events) for
-                         profiling (see scripts/profile_screening.py). None
+                         profiling (see scripts/profile_screening.py). With
+                         refine=True, also n_survivors (pre-cut survivors) and
+                         t_refine_cpp (the C++ refine wall time — booked inside
+                         t_fine, where that work used to happen; n_windows
+                         stays the PRE-refine flagged count so rows are
+                         comparable across paths). None
                          (default) → no measurement, no behavior change.
                          t_coarse / t_medium include the C++↔Python
                          survivor/row materialization — the scaling_tracker #3
@@ -460,6 +477,10 @@ def run_screen(
         raise ValueError(
             "run_screen: sieve=True requires fused=True (the time sieve lives "
             "inside the fused C++ stage)")
+    if refine and not fused:
+        raise ValueError(
+            "run_screen: refine=True requires fused=True (the fine pre-cut "
+            "lives inside the fused C++ stage)")
 
     # Index alignment IS the screening contract: medium_filter returns (i, j)
     # positions, and we map them back to identity via meta[i]/meta[j]. A length
@@ -493,6 +514,8 @@ def run_screen(
     jd_start = jd_w + jd_f
     jd_end = jd_start + duration_hours / 24.0
 
+    t_refine = 0.0   # C++ fine-pre-cut wall time (refine=True only) — booked
+    #                  under t_fine, where that work used to happen.
     if fused:
         # Fused stage (Phase 10.1a): one C++ call does the coarse cut AND the
         # medium scan, so the survivor pairs never materialize as Python objects
@@ -501,15 +524,33 @@ def run_screen(
         # below. t_coarse folds into the scan; n_pairs comes back for the
         # survivor-reduction profile.
         _t = time.perf_counter()
-        n_pairs, rows = orbitcore.screen_pairs(
-            satrecs, periapsis, apoapsis, pad_km,
-            jd_start, jd_end, step_sec, gross_km, time_filter=sieve)
+        if refine:
+            # Phase 10.4: the fine pre-cut runs inside the same GIL-released
+            # call. rows come back as the pre-cut SURVIVORS (original values,
+            # so fine_filter_batch below re-refines them identically);
+            # n_flagged is the pre-cut row count (the comparable n_windows),
+            # and t_refine is C++-measured so it can be booked under t_fine
+            # rather than t_medium.
+            axes = ([(v.r_km, v.t_km, v.n_km) for v in volumes]
+                    if use_volumes else [])
+            n_pairs, rows, n_flagged, t_refine = orbitcore.screen_pairs(
+                satrecs, periapsis, apoapsis, pad_km,
+                jd_start, jd_end, step_sec, gross_km, time_filter=sieve,
+                refine=True, refine_axes=axes)
+        else:
+            n_pairs, rows = orbitcore.screen_pairs(
+                satrecs, periapsis, apoapsis, pad_km,
+                jd_start, jd_end, step_sec, gross_km, time_filter=sieve)
+            n_flagged, t_refine = len(rows), 0.0
         if timings is not None:
             timings["n_sats"] = len(satrecs)
             timings["n_pairs"] = n_pairs
             timings["t_coarse"] = 0.0
-            timings["t_medium"] = time.perf_counter() - _t
-            timings["n_windows"] = len(rows)
+            timings["t_medium"] = time.perf_counter() - _t - t_refine
+            timings["n_windows"] = n_flagged
+            if refine:
+                timings["n_survivors"] = len(rows)
+                timings["t_refine_cpp"] = t_refine
         if n_pairs == 0:
             if timings is not None:
                 timings["n_events"] = 0
@@ -612,7 +653,7 @@ def run_screen(
     events.sort(key=lambda e: (e["miss_distance_km"], e["sat1_norad_id"],
                                e["sat2_norad_id"], e["tca"]))
     if timings is not None:
-        timings["t_fine"] = time.perf_counter() - _t
+        timings["t_fine"] = time.perf_counter() - _t + t_refine
         timings["n_events"] = len(events)
         timings["n_suppressed"] = n_suppressed
     return events
