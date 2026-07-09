@@ -270,7 +270,8 @@ SieveIndex build_sieve_index(const AnchorSet& a,
             // sees anywhere in the window (conservative; also catches planes
             // precessing through near-coplanarity mid-window).
             double sinIR_min = 2.0;
-            double un_i0 = 0, un_i1 = 0, un_j0 = 0, un_j1 = 0;
+            double un_i0 = 0, un_im = 0, un_i1 = 0;
+            double un_j0 = 0, un_jm = 0, un_j1 = 0;
             for (int q = 0; q < 3; ++q) {
                 const double t = (q == 0) ? jd0 : (q == 1 ? jd0 + (jd1 - jd0) / 2.0 : jd1);
                 const double dt = t - jd0;
@@ -281,6 +282,7 @@ SieveIndex build_sieve_index(const AnchorSet& a,
                 const Vec3 k = cross(h1, h2);
                 sinIR_min = std::min(sinIR_min, std::max(norm(k), 1e-12));
                 if (q == 0) { un_i0 = node_angle(k, h1, o1); un_j0 = node_angle(k, h2, o2); }
+                if (q == 1) { un_im = node_angle(k, h1, o1); un_jm = node_angle(k, h2, o2); }
                 if (q == 2) { un_i1 = node_angle(k, h1, o1); un_j1 = node_angle(k, h2, o2); }
             }
 
@@ -289,10 +291,24 @@ SieveIndex build_sieve_index(const AnchorSet& a,
             if (xi >= 1.0 || xj >= 1.0) {
                 whole = true;   // near-coplanar: no angular constraint (oracle rule)
             } else {
+                // Node-path NONLINEARITY margin (review catch): the crossing
+                // enumeration advances the node angle linearly between its
+                // endpoint evaluations, but u_node is a nonlinear function of
+                // the two precessing planes (worst where sin I_R is small —
+                // the 1/sinIR amplification). The already-computed midpoint
+                // evaluation measures the actual deviation: for a smooth path,
+                // max interior deviation from the chord = |half-chord
+                // mismatch| / 2; x1.5 for higher-order tails — the same
+                // measured-curvature discipline as the anchor's lam margin.
+                const double ncurv_i = 1.5 * std::fabs(
+                    wrap_pi(un_i1 - un_im) - wrap_pi(un_im - un_i0)) / 2.0;
+                const double ncurv_j = 1.5 * std::fabs(
+                    wrap_pi(un_j1 - un_jm) - wrap_pi(un_jm - un_j0)) / 2.0;
+
                 const double du_i =
-                    std::asin(xi) + params.u_margin_rad + a.curv[i];
+                    std::asin(xi) + params.u_margin_rad + a.curv[i] + ncurv_i;
                 const double du_j =
-                    std::asin(xj) + params.u_margin_rad + a.curv[j];
+                    std::asin(xj) + params.u_margin_rad + a.curv[j] + ncurv_j;
                 wi.clear(); wj.clear(); inter.clear();
                 if (!sat_windows(a, i, un_i0, un_i1, du_i, jd0, jd1, step_day, wi) ||
                     !sat_windows(a, j, un_j0, un_j1, du_j, jd0, jd1, step_day, wj)) {
