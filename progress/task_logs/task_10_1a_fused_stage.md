@@ -94,6 +94,35 @@ builds the time filter into**.
   by construction — radially-dominated crossings, 7.2); the non-vacuous SFS proof needs real
   data (the 78-event active slice), so it lives in a manual cross-check, not the offline suite.
 
+## Review round (adversarial pass)
+
+Two findings, both fixed; the rest held up.
+
+1. **Docstring/comment memory numbers were wrong** — the `screen_pairs` docstring and its
+   inline comment attributed **~8.7 GB to the pair list** (and "~8 bytes/pair"). That's the
+   exact misconception this task *corrects*: 8.7 GB is the whole-screen RSS at 10k; the pair
+   list is ~5 GB at the full catalog, and a `std::pair<size_t,size_t>` is 16 bytes. Rewrote
+   both to the accurate framing (pair list ~5 GB Python / ~0.8 GB C++; whole-screen peak is
+   the *later fine stage*, not this list). Leaving it wrong would undercut the honest-
+   measurement story in code a reviewer reads.
+2. **Equivalence was only locked all-survive + all-drop, never a partial cut** — the realistic
+   case (and where the inlined coarse logic could silently drift from `coarse_filter`). Added
+   `test_coarse_cut_identical_on_partial_overlap`: feeds `screen_pairs` a two-band spread so
+   ~half the pairs are cross-band-disjoint, asserts `(n_pairs, rows)` == `coarse_filter` +
+   `medium_filter` on the same bands. 563 passing.
+
+**Checked and deliberately left as-is:**
+- **GIL scope in `screen_pairs`** — the coarse loop + scan run under `gil_scoped_release`;
+  `extract_satrecs` (touches Python) is called *before* the release, and `periapsis_km`/
+  `apoapsis_km` are pybind-copied C++ vectors (independent of Python) — safe. Same satrec-
+  pointer discipline as the validated `medium_filter`.
+- **Not freeing `P` early** — considered, but the process peak is the fine stage (`P` is
+  already destroyed when `screen_pairs` returns), so freeing it sooner wouldn't move peak RSS.
+- **Duplicated nsteps-check / row-conversion across the two bindings** — 3–4 trivial lines;
+  a shared helper would be premature abstraction (2build rule). Left.
+- **`uint32` pairs instead of `size_t`** (would halve `P`) — touches the shared helper's
+  signature for a transient that doesn't affect peak; deferred, not worth the surface area.
+
 ## Function reference
 
 ```python

@@ -916,6 +916,30 @@ class TestFusedStage:
         assert n_pairs == len(pairs)             # same survivor count
         assert rows_fused == rows_ref            # byte-identical rows
 
+    def test_coarse_cut_identical_on_partial_overlap(self):
+        """The inlined coarse cut must match coarse_filter() when the cut drops
+        SOME pairs — not all-survive (the co-altitude shell above) nor all-drop
+        (the empty case below), but the realistic partial cut where the two
+        copies of the coarse logic could silently drift. screen_pairs takes the
+        altitude bands directly, so feed a two-band spread (1 km apart) that
+        leaves within-band pairs overlapping and cross-band pairs disjoint."""
+        sats, meta, start = _shell_satrecs(120)
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        n = len(sats)
+        peri = [400.0 if k % 2 == 0 else 1400.0 for k in range(n)]
+        apo = [450.0 if k % 2 == 0 else 1450.0 for k in range(n)]
+        pad, step = 50.0, 30.0
+        jd_end = jd0 + 2.0 / 24.0
+
+        pairs = orbitcore.coarse_filter(peri, apo, pad)
+        assert 0 < len(pairs) < n * (n - 1) // 2   # a genuine partial cut
+        rows_ref = orbitcore.medium_filter(sats, pairs, jd0, jd_end, step, pad)
+        n_pairs, rows_fused = orbitcore.screen_pairs(
+            sats, peri, apo, pad, jd0, jd_end, step, pad)
+        assert n_pairs == len(pairs)
+        assert rows_fused == rows_ref
+
     def test_run_screen_events_identical_both_modes(self):
         """run_screen(fused=True) reproduces run_screen(fused=False) event-for-
         event (every dict, order included) — the fused flag is a pure perf

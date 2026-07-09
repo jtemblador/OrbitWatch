@@ -693,10 +693,11 @@ The GIL is released during the scan.
             {
                 // Both the coarse cut AND the scan touch no Python objects ->
                 // release the GIL for the whole thing. The survivor pair list
-                // lives ONLY here in C++ (~8 bytes/pair) — it never crosses
-                // into Python, which is the point of the fused stage: at the
-                // full active catalog the equivalent Python list is ~8.7 GB of
-                // tuples (would not fit CI), versus a few hundred MB here.
+                // lives ONLY here in C++ (16 bytes/pair) — it never crosses
+                // into Python: at the full active catalog that's ~48 M pairs,
+                // ~5 GB as Python tuples vs ~0.8 GB here. (Whole-screen peak RSS
+                // is dominated by the LATER fine stage, not this list — see
+                // task_10_1a; this drops the pair-list share, ~2 GB at 10k.)
                 py::gil_scoped_release release;
 
                 // Coarse altitude-band cut — identical logic to coarse_filter
@@ -736,9 +737,10 @@ for coarse_filter() followed by medium_filter(), producing byte-identical rows.
 
 The coarse altitude-band cut is computed internally and its survivor (i, j)
 pairs are fed straight into the time-stepped medium scan WITHOUT ever crossing
-into Python. On the full active catalog that pair list is ~48 M entries: as
-Python tuples it is ~8.7 GB (does not fit a 16 GB CI runner), versus a few
-hundred MB as a C++ vector here. Same screening result, far less memory.
+into Python. On the full active catalog that's ~48 M pairs: ~5 GB as Python
+tuples versus ~0.8 GB as a C++ vector here. (The whole screen's peak RSS is
+dominated by the later fine stage, not this list; this removes the pair-list
+share — measured ~2 GB at 10k. Same screening result either way.)
 
 satrecs:      sequence of Satrec (passed by reference; t/error mutate).
 periapsis_km: per-satellite perigee altitude, km (index-aligned with satrecs).
