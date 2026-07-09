@@ -7,7 +7,7 @@ an industry-standard screening cascade, and a self-refreshing 3D globe that
 screens **5,000 satellites for close approaches, 3×/day** — validated against
 CelesTrak SOCRATES to **0.000 km agreement** on epoch-matched elements.
 
-[![OrbitWatch — live conjunction view](docs/img/live-conjunction-view.png)](https://jtemblador.github.io/OrbitWatch/)
+[![OrbitWatch demo — conjunction screening on the live globe](docs/img/demo.gif)](https://jtemblador.github.io/OrbitWatch/)
 
 ## What it is
 
