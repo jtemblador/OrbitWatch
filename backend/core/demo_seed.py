@@ -1,66 +1,19 @@
 """
-Demo seed — a synthetic "crosser" conjunction for the live demo.
+Synthetic dense-shell fixture for tests and profiling.
 
-Real catalogs rarely contain a *visibly dramatic* close approach in any given
-screening window: genuine conjunctions are close (small miss → a near-invisible
-line), and constellations are station-kept to avoid them. So for the demo we
-inject one synthetic object that is guaranteed to cross a real satellite.
+`build_synthetic_shell` produces a deterministic, OMM-shaped catalog with no
+network access — used by the scale-regression tests and
+scripts/profile_screening.py to exercise the screener at constellation scale.
 
-`append_demo_crosser` clones the first satellite in the loaded catalog and
-flips its orbit plane (RAAN + 180°) and phase (mean anomaly + 180.2°). Two
-orbits with the same shape and opposite ascending nodes cross near the line of
-nodes; the mean-anomaly offset phases the clone to arrive there at nearly the
-same time → a real, repeating close approach that the screener flags.
-
-This is demo scaffolding (gated by ORBITWATCH_DEMO_SEED — see backend/main.py)
-and is removed/replaced when real dense data drives the screen in Phase 7.
+(The synthetic "demo crosser" that once lived here — `append_demo_crosser`,
+gated by ORBITWATCH_DEMO_SEED — was removed in Phase 9.9: the deployed site
+screens the real active catalog, so a fabricated conjunction had no remaining
+purpose.)
 """
 
 from datetime import datetime, timezone
 
 import pandas as pd
-
-# Synthetic NORAD id for the seeded crosser — high, fixed, unlikely to collide
-# with any real catalog entry (real catalog numbers are currently 6 digits).
-DEMO_CROSSER_ID = 9900001
-
-# Plane/phase offsets that turn a clone into a crossing partner. The 180.2°
-# (not exactly 180°) gives a small but non-zero miss rather than a perfect
-# co-location; exact miss varies with the base orbit, caught by a generous
-# screening threshold.
-_DMO_DEG = 180.2
-_DNODE_DEG = 180.0
-
-
-def append_demo_crosser(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return `df` with one synthetic crossing partner appended.
-
-    The crosser clones row 0 (any catalog: a station, a Starlink sat, …) so it
-    shares that orbit's altitude band — coarse_filter always pairs them — but
-    sits in the opposing node, producing a genuine close approach.
-
-    No-op (returns `df` unchanged) if the catalog is empty or already seeded,
-    so it is safe to call on every data load.
-    """
-    if df.empty or DEMO_CROSSER_ID in df["norad_cat_id"].values:
-        return df
-
-    # iloc[[0]] (double brackets) returns a 1-row DataFrame, preserving each
-    # column's dtype. iloc[0].to_frame().T would collapse the mixed row to a
-    # Series and upcast every column to object on concat, contaminating the
-    # whole served catalog's dtypes.
-    crosser = df.iloc[[0]].copy()
-    crosser["norad_cat_id"] = DEMO_CROSSER_ID
-    crosser["object_name"] = "CROSSER (DEMO)"
-    crosser["object_id"] = "DEMO"
-    crosser["object_type"] = "PAYLOAD"
-    crosser["mean_anomaly"] = (crosser["mean_anomaly"] + _DMO_DEG) % 360.0
-    crosser["ra_of_asc_node"] = (crosser["ra_of_asc_node"] + _DNODE_DEG) % 360.0
-    # Same orbit shape as the base → period/apoapsis/periapsis/eccentricity/
-    # epoch all stay valid as-copied; only the plane and phase changed.
-
-    return pd.concat([df, crosser], ignore_index=True)
 
 
 def build_synthetic_shell(

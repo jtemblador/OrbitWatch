@@ -25,20 +25,16 @@ from backend.models.schemas import HealthResponse
 from backend.routers.satellites import router as satellites_router
 
 # Dataset selection via environment (defaults keep the test suite on the
-# ISS-bearing "stations" group, cached + no seed):
+# ISS-bearing "stations" group, cached):
 #   ORBITWATCH_GROUP       — catalog to load (e.g. "starlink"); default "stations"
-#   ORBITWATCH_DEMO_SEED=1 — append a synthetic crosser for a guaranteed visible
-#                            conjunction (see backend/core/demo_seed.py)
 #   ORBITWATCH_LIVE=1      — fetch fresh GP data on load (re-downloads only past
 #                            CelesTrak's 2 h cache; cache fallback offline)
 #   ORBITWATCH_MAX_SATS=N  — slice the catalog to one dense shell of ≤N sats
-#                            (keeps the live Starlink group tractable pre-7.1)
 # Live dense demo:
 #   ORBITWATCH_LIVE=1 ORBITWATCH_GROUP=starlink ORBITWATCH_MAX_SATS=300 \
-#   ORBITWATCH_DEMO_SEED=1 python backend/main.py
+#   python backend/main.py
 # Offline fallback (static snapshot): ORBITWATCH_GROUP=starlink_shell …
 _GROUP = os.getenv("ORBITWATCH_GROUP", "stations")
-_SEED_DEMO = os.getenv("ORBITWATCH_DEMO_SEED") == "1"
 _LIVE = os.getenv("ORBITWATCH_LIVE") == "1"
 _MAX_SATS = int(os.environ["ORBITWATCH_MAX_SATS"]) if os.getenv("ORBITWATCH_MAX_SATS") else None
 
@@ -47,7 +43,7 @@ _MAX_SATS = int(os.environ["ORBITWATCH_MAX_SATS"]) if os.getenv("ORBITWATCH_MAX_
 async def lifespan(app: FastAPI):
     # Propagator is lazy — no data loaded until first request calls _ensure_data()
     app.state.propagator = SatellitePropagator(
-        group=_GROUP, seed_demo=_SEED_DEMO, live=_LIVE, max_sats=_MAX_SATS)
+        group=_GROUP, live=_LIVE, max_sats=_MAX_SATS)
     yield
 
 

@@ -700,33 +700,12 @@ class TestScreeningVolumesPath:
         assert t["n_suppressed"] >= 1
 
 
-class TestSeededScreenIntegration:
-    """Demo seed → screener: the synthetic crosser must produce a flagged
-    conjunction against the live stations catalog. Invariant-based (the crosser
-    clones row 0 and crosses it), so it survives catalog churn."""
-
-    def test_seeded_catalog_yields_crosser_event(self):
-        from datetime import datetime, timezone
-        from core.demo_seed import DEMO_CROSSER_ID
-        from core.propagator import SatellitePropagator
-
-        prop = SatellitePropagator(seed_demo=True)
-        events = ConjunctionScreener(prop).screen(
-            datetime.now(timezone.utc), 6.0, 100.0)
-        crosser = [e for e in events
-                   if DEMO_CROSSER_ID in (e["sat1_norad_id"], e["sat2_norad_id"])]
-        assert crosser, "seeded crosser produced no conjunction"
-        # A real crossing: small but non-zero miss, high relative speed.
-        best = min(crosser, key=lambda e: e["miss_distance_km"])
-        assert best["miss_distance_km"] < 100.0
-        assert best["relative_speed_km_s"] > 5.0
-
-
 class TestDenseShellScale:
     """6.9 success criteria at constellation scale: the full pipeline (load →
     coarse → medium → fine → RTN) runs error-free on a ~300-sat dense shell and
     a conjunction flows end-to-end. Uses a deterministic synthetic shell so it
-    needs no network; the live demo swaps in a real Starlink shell."""
+    needs no network. The shell's natural plane-crossings provide the events
+    (7.5 measured ~257 windows at this size/pad — no seeded crosser needed)."""
 
     def test_screen_on_synthetic_dense_shell(self):
         import tempfile
@@ -734,7 +713,7 @@ class TestDenseShellScale:
         from datetime import datetime, timezone
         from pathlib import Path
 
-        from core.demo_seed import DEMO_CROSSER_ID, build_synthetic_shell
+        from core.demo_seed import build_synthetic_shell
         from core.propagator import SatellitePropagator
         from core.tle_fetcher import GPFetcher
 
@@ -744,10 +723,9 @@ class TestDenseShellScale:
             prop = SatellitePropagator(
                 group="synthshell",
                 fetcher=GPFetcher(cache_dir=Path(d)),
-                seed_demo=True,
             )
             sats, meta = prop.get_all_satrecs()
-            assert len(sats) == 301  # 300 shell + crosser
+            assert len(sats) == 300
 
             start = datetime(2026, 6, 1, tzinfo=timezone.utc)  # the shell epoch
             t0 = time.perf_counter()
@@ -760,11 +738,13 @@ class TestDenseShellScale:
             sfs_events = ConjunctionScreener(prop).screen(
                 start, 6.0, timings=sfs_stats)
 
-        # Criterion 2: a conjunction flows through (the crosser at minimum).
-        crosser = [e for e in events
-                   if DEMO_CROSSER_ID in (e["sat1_norad_id"], e["sat2_norad_id"])]
-        assert crosser, "no crosser conjunction on the dense shell"
-        e = crosser[0]
+        # Criterion 2: conjunctions flow through end-to-end — the shell's
+        # natural plane-crossings. Gate the geometry check on a genuine crossing
+        # (rel_speed > 1 km/s, the 7.5 lesson), then RTN norm must equal miss.
+        assert events, "no conjunctions on the dense shell"
+        crossings = [e for e in events if e["relative_speed_km_s"] > 1.0]
+        assert crossings, "no genuine plane-crossing among the events"
+        e = min(crossings, key=lambda ev: ev["miss_distance_km"])
         norm = (e["r_km"]**2 + e["t_km"]**2 + e["n_km"]**2) ** 0.5
         assert abs(norm - e["miss_distance_km"]) < 1e-9
 

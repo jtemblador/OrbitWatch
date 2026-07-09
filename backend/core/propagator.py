@@ -149,7 +149,6 @@ class SatellitePropagator:
         self,
         group: str = "stations",
         fetcher: GPFetcher | None = None,
-        seed_demo: bool = False,
         live: bool = False,
         max_sats: int | None = None,
     ):
@@ -157,9 +156,6 @@ class SatellitePropagator:
         Args:
             group: CelesTrak satellite group to use
             fetcher: Optional GPFetcher instance (creates one if not provided)
-            seed_demo: if True, append a synthetic crosser to the loaded
-                catalog (demo scaffolding — see backend/core/demo_seed.py).
-                Off by default so tests run against the unmodified catalog.
             live: if True, fetch fresh GP data on load (GPFetcher.fetch, which
                 re-downloads only when the cache is older than CelesTrak's 2 h
                 update interval and otherwise serves cache; falls back to cache
@@ -171,7 +167,6 @@ class SatellitePropagator:
         """
         self.group = group
         self.fetcher = fetcher or GPFetcher()
-        self.seed_demo = seed_demo
         self.live = live
         self.max_sats = max_sats
         self._df: pd.DataFrame | None = None
@@ -195,9 +190,6 @@ class SatellitePropagator:
             if self.max_sats is not None:
                 from backend.core.tle_fetcher import slice_to_shell
                 df = slice_to_shell(df, max_sats=self.max_sats)
-            if self.seed_demo:
-                from backend.core.demo_seed import append_demo_crosser
-                df = append_demo_crosser(df)
 
             # Positional indexing (get_all_satrecs / _find_satellite use iloc on
             # index labels) requires a clean 0..n-1 RangeIndex.

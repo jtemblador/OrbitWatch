@@ -406,9 +406,15 @@ class TestBatchPropagation(unittest.TestCase):
         cls.now = datetime.now(timezone.utc)
         cls.results, cls.errors = cls.prop.get_all_positions(cls.now)
 
-    def test_all_30_stations_propagate(self):
-        """All 30 Phase 1 stations must propagate without error."""
-        self.assertGreaterEqual(len(self.results), 25)
+    def test_all_stations_propagate(self):
+        """Every station in the loaded catalog must propagate (relative to the
+        cache contents, NOT an absolute census — the live stations group churns
+        as modules dock/undock, which broke the old hardcoded >= 25). Small
+        slack for genuinely decayed entries."""
+        n = self.prop.catalog_size()
+        self.assertGreater(n, 0)
+        self.assertEqual(len(self.results) + len(self.errors), n)
+        self.assertGreaterEqual(len(self.results), n - 2)
 
     def test_all_altitudes_positive(self):
         """All satellites must have positive altitude (not underground)."""
@@ -620,8 +626,8 @@ class TestCachingAndIndexes(unittest.TestCase):
 class TestPerformance(unittest.TestCase):
     """Verify propagation performance meets requirements."""
 
-    def test_30_satellites_under_1_second(self):
-        """Propagating all 30 stations should take < 1 second."""
+    def test_stations_group_under_1_second(self):
+        """Propagating the full stations group should take < 1 second."""
         prop = SatellitePropagator()
         now = datetime.now(timezone.utc)
 
@@ -629,7 +635,7 @@ class TestPerformance(unittest.TestCase):
         results, _ = prop.get_all_positions(now)
         elapsed = time.perf_counter() - start
 
-        self.assertGreaterEqual(len(results), 25)
+        self.assertGreaterEqual(len(results), prop.catalog_size() - 2)
         self.assertLess(elapsed, 1.0,
             f"Took {elapsed:.3f}s for {len(results)} satellites (limit: 1.0s)")
 
@@ -966,69 +972,6 @@ class TestGetAllSatrecs(unittest.TestCase):
         again, _ = self.prop.get_all_satrecs()
         for a, b in zip(self.satrecs, again):
             self.assertIs(a, b)
-
-
-class TestDemoSeed(unittest.TestCase):
-    """Demo crosser seed (append_demo_crosser) + propagator seed_demo flag."""
-
-    @classmethod
-    def setUpClass(cls):
-        from backend.core.demo_seed import DEMO_CROSSER_ID
-        cls.DEMO_ID = DEMO_CROSSER_ID
-        cls.base = GPFetcher().load_cached("stations")
-
-    def test_append_adds_one_crosser_row(self):
-        from backend.core.demo_seed import append_demo_crosser
-        out = append_demo_crosser(self.base)
-        self.assertEqual(len(out), len(self.base) + 1)
-        self.assertIn(self.DEMO_ID, out["norad_cat_id"].values)
-
-    def test_append_is_idempotent(self):
-        """Safe to call on every data load — a second call adds nothing."""
-        from backend.core.demo_seed import append_demo_crosser
-        once = append_demo_crosser(self.base)
-        twice = append_demo_crosser(once)
-        self.assertEqual(len(twice), len(once))
-
-    def test_append_noop_on_empty(self):
-        from backend.core.demo_seed import append_demo_crosser
-        empty = self.base.iloc[0:0]
-        self.assertEqual(len(append_demo_crosser(empty)), 0)
-
-    def test_append_preserves_column_dtypes(self):
-        """Seeding must not upcast the served catalog's columns to object
-        (the iloc[[0]] vs iloc[0].to_frame().T trap)."""
-        from backend.core.demo_seed import append_demo_crosser
-        out = append_demo_crosser(self.base)
-        for col in ("norad_cat_id", "periapsis", "apoapsis",
-                    "mean_anomaly", "inclination"):
-            self.assertEqual(out[col].dtype, self.base[col].dtype, col)
-
-    def test_crosser_shares_orbit_shape_offsets_plane(self):
-        """The crosser clones the base orbit (same period/altitude) but flips
-        the plane (RAAN +180) and phase (MA +180.2) — that's what makes it
-        cross rather than co-locate."""
-        from backend.core.demo_seed import append_demo_crosser
-        out = append_demo_crosser(self.base)
-        base0 = self.base.iloc[0]
-        crosser = out[out["norad_cat_id"] == self.DEMO_ID].iloc[0]
-        self.assertAlmostEqual(crosser["period"], base0["period"], places=6)
-        self.assertAlmostEqual(crosser["apoapsis"], base0["apoapsis"], places=6)
-        self.assertAlmostEqual(
-            crosser["ra_of_asc_node"],
-            (base0["ra_of_asc_node"] + 180.0) % 360.0, places=6)
-
-    def test_propagator_seed_flag(self):
-        """seed_demo=True surfaces the crosser in get_all_satrecs; the default
-        leaves the catalog untouched."""
-        seeded = SatellitePropagator(seed_demo=True)
-        _, meta = seeded.get_all_satrecs()
-        ids = {m["norad_id"] for m in meta}
-        self.assertIn(self.DEMO_ID, ids)
-
-        plain = SatellitePropagator()
-        _, meta2 = plain.get_all_satrecs()
-        self.assertNotIn(self.DEMO_ID, {m["norad_id"] for m in meta2})
 
 
 class TestLiveModeAndFreshness(unittest.TestCase):
