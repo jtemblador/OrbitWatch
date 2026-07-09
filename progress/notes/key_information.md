@@ -897,6 +897,24 @@ User QA of the live site drove a big frontend round (search, conjunction-first v
 
 ---
 
+## Phase 10.0 measurement gate — path filter vs time filter (Jul 8)
+
+One day of NumPy against real catalogs re-scoped Phase 10 before any C++ was written. Durable findings:
+
+**The path filter cannot cut a megaconstellation.** Two near-circular co-altitude orbits in different planes *intersect* at their mutual node line (both at ~the same radius on the same line) — their paths genuinely touch, their conjunctions are real, and no orbit-geometry test can drop them. That's the dominant pair class in any Starlink-heavy catalog. Measured (conservative bound, realistic margins): **0.002% / 1.9% / 0.4%** of coarse survivors dropped on Starlink-10,544 / active-CI-4,821 / active-full-15,708. The path filter only uniquely cuts eccentric-vs-circular pairs (bands overlap, node radii differ) — a minority of active payloads.
+
+**The time filter (H-C-R Filter III) is the real sieve.** Approaches require *both* objects inside small angular windows `|sin u| ≤ D_eff/(r_p·sin I_R)` around the node line simultaneously; intersecting per-object transit-time intervals leaves **0.31–1.86%** of medium pair-step work (measured ceiling, ~54–320×).
+
+**No-skip is an EVENT-level contract, not flag-level.** `medium_filter` flags on a conservative interval bound (subtracts `v̂·dt/2` — hundreds of km for fast pairs), so it routinely flags pairs with no true sub-threshold approach. A geometric filter dropping such a pair changes zero events. The gate's bound: **0 event-level violations everywhere** (4,246 medium-flagged pairs among its drops — every one fine-refined to miss > gross). Spec/validate Stage 1 against *events*, never *flags*.
+
+**Production cascade shape (SFS / 24 h / 30 s, local):** 4,821 sats → 157 s = medium 81 + fine 74 (**~50/50**), 1.7 GB. 9,795 → 852 s = 368 + **479** (fine 56% and growing), **8.7 GB**. Full 15,708: 48.1 M coarse survivors ≈ 8.7 GB of pair tuples alone, total **~25 GB extrapolated → cannot fit the 16 GB CI runner** (the 9.4 "38 min" was memory pressure, not CPU). Consequences: the sieve alone caps at ~2× (fine is untouched); cap-lift needs the fine stage in C++ too (GIL-free, OpenMP, streamed — post-sieve fine is ~90% of a full screen).
+
+**Mean-element geometry must be advanced to screen time.** Parquet elements are per-sat epoch snapshots; Starlink RAAN precesses ~5°/day and cache epochs were ~11 days old (~55° stale). Secularly advance Ω/ω (J2 rates, or the satrec's own `nodedot`/`argpdot` in C++) before any node geometry. Margins that made the bound safe: D_eff += ~10 km mean-vs-osculating (J2 short-period) + drift pad; node windows += `|Ω̇₁−Ω̇₂|·T·(1+2·sin i/sin I_R)` + 1% advance-model error; ν intervals += `|ω̇|·T`.
+
+**Tools:** the prototype/oracle lives in `progress/week10_planning/path_gate.py` (+ `gate_sanity.py`, 6 hand-built geometry cases); `scripts/profile_screening.py` now profiles the exact CI operating point (`--source active --mode sfs --step 30 --hours 24 --start <now>` — head-slice + screenable filter, matching `build_snapshot.py`, NOT the densest-shell slice).
+
+---
+
 ## Cesium CallbackProperty for Real-Time Tracking
 
 **Use `CallbackProperty` when a visual element must track a satellite's interpolated position every frame.** The standard approach (updating in the 5-second fetch cycle) creates visible lag because the satellite moves between refreshes via lerp interpolation. `CallbackProperty` evaluates a function every render frame, reading the `PointPrimitive.position` directly — zero API calls, zero timing issues.

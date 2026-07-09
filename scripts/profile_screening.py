@@ -26,6 +26,18 @@ Sources:
                            multi-shell catalog (the realistic cross-shell case).
     synth                -- build_synthetic_shell(n): deterministic, no network
                            or data file. One shell, like starlink intra-shell.
+    active               -- the on-disk active.parquet, HEAD-sliced to each
+                           size and (in --mode sfs) filtered to screenable
+                           orbits -- exactly build_snapshot.py's production
+                           path, so this profiles the CI operating point
+                           (Phase 10.0/10.4): --source active --mode sfs
+                           --sizes 5000 --hours 24 --step 30.
+
+Modes (Phase 10.0):
+    euclidean (default) -- legacy threshold_km report cut (the 7.1 baseline).
+    sfs                  -- per-object SFS RTN ellipsoids (regime_for), gross
+                           threshold = largest semi-axis; --threshold ignored.
+                           This is what the CI snapshot job runs.
 
 Columns: t_coarse / t_medium include the C++<->Python survivor/row
 materialization (the scaling_tracker #3 boundary cost); t_load is the one-time
@@ -50,7 +62,8 @@ for _p in (_ROOT, os.path.join(_ROOT, "backend")):
 
 from backend.core.conjunctions import run_screen          # noqa: E402
 from backend.core.demo_seed import build_synthetic_shell   # noqa: E402
-from backend.core.propagator import SatellitePropagator    # noqa: E402
+from backend.core.propagator import SatellitePropagator, build_satrecs_and_meta  # noqa: E402
+from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
 from backend.core.tle_fetcher import GPFetcher             # noqa: E402
 
 # Fixed screening instant so runs are comparable. Equal to build_synthetic_shell's
@@ -77,16 +90,42 @@ def _make_propagator(source: str, n: int | None, tmpdir: str) -> SatellitePropag
         group="profshell", fetcher=GPFetcher(cache_dir=Path(tmpdir)))
 
 
-def _profile_one(source, n, hours, threshold, step, tmpdir):
-    """One (load + full screen) measurement. Returns (t_load, timings dict)."""
-    prop = _make_propagator(source, n, tmpdir)
+def _load_satrecs(source, n, mode, tmpdir):
+    """(satrecs, meta, t_load) for one run. The 'active' source reproduces
+    build_snapshot.py's production path: HEAD-slice to n, then (SFS mode only)
+    keep screenable orbits -- NOT the densest-shell slice the propagator does."""
+    if source == "active":
+        df = GPFetcher().load_cached("active")
+        if n and len(df) > n:
+            df = df.head(n).reset_index(drop=True)
+        if mode == "sfs":
+            keep = [is_screenable(p, e, pr) for p, e, pr in
+                    zip(df["periapsis"], df["eccentricity"], df["period"])]
+            df = df[keep].reset_index(drop=True)
+        t0 = time.perf_counter()
+        satrecs, meta = build_satrecs_and_meta(df)
+        return satrecs, meta, time.perf_counter() - t0
 
+    prop = _make_propagator(source, n, tmpdir)
     t0 = time.perf_counter()
     satrecs, meta = prop.get_all_satrecs()   # sgp4init() for every satellite
-    t_load = time.perf_counter() - t0
+    return satrecs, meta, time.perf_counter() - t0
+
+
+def _profile_one(source, n, hours, threshold, step, tmpdir,
+                 mode="euclidean", start=_START):
+    """One (load + full screen) measurement. Returns (t_load, timings dict)."""
+    satrecs, meta, t_load = _load_satrecs(source, n, mode, tmpdir)
 
     timings: dict = {}
-    run_screen(satrecs, meta, _START, hours, threshold, step, timings=timings)
+    if mode == "sfs":
+        volumes = [regime_for(m["periapsis_km"], m["eccentricity"],
+                              m["period_min"]) for m in meta]
+        run_screen(satrecs, meta, start, hours, step_sec=step,
+                   volumes=volumes, timings=timings)
+    else:
+        run_screen(satrecs, meta, start, hours, threshold, step,
+                   timings=timings)
     return t_load, timings
 
 
@@ -106,51 +145,65 @@ def _print_row(t_load: float, tm: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Profile the conjunction cascade at scale (Phase 7.1).")
-    ap.add_argument("--source", choices=("starlink", "synth"), default="starlink")
+    ap.add_argument("--source", choices=("starlink", "synth", "active"),
+                    default="starlink")
     ap.add_argument("--sizes", default="300,800,1500",
-                    help="comma-separated satellite counts (intra-shell slices)")
+                    help="comma-separated satellite counts (intra-shell "
+                         "slices; head-slices for --source active)")
     ap.add_argument("--full", action="store_true",
-                    help="also run the full multi-shell catalog (starlink only; slow)")
+                    help="also run the full catalog (starlink/active; slow)")
     ap.add_argument("--hours", type=float, default=3.0, help="screening window, h")
     ap.add_argument("--threshold", type=float, default=25.0,
-                    help="report/medium threshold, km")
+                    help="report/medium threshold, km (euclidean mode only)")
     ap.add_argument("--step", type=float, default=60.0, help="medium step, s")
+    ap.add_argument("--mode", choices=("euclidean", "sfs"), default="euclidean",
+                    help="report cut: legacy Euclidean threshold, or the SFS "
+                         "RTN ellipsoids the CI snapshot job runs")
+    ap.add_argument("--start", default=None,
+                    help="screening start (ISO 8601 UTC). Default: the fixed "
+                         "2026-06-01 profiling instant; pass a current date "
+                         "when profiling a freshly fetched catalog")
     args = ap.parse_args()
 
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    start = (datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+             if args.start else _START)
 
-    # The 'starlink' source reads the gitignored backend/data/tle/starlink.parquet
-    # (a fresh clone won't have it). Fail with a clear pointer instead of a raw
-    # FileNotFoundError from deep in load_cached().
-    if args.source == "starlink":
-        cache = GPFetcher().cache_dir / "starlink.parquet"
+    # The starlink/active sources read gitignored backend/data/tle parquets
+    # (a fresh clone won't have them). Fail with a clear pointer instead of a
+    # raw FileNotFoundError from deep in load_cached().
+    if args.source in ("starlink", "active"):
+        cache = GPFetcher().cache_dir / f"{args.source}.parquet"
         if not cache.exists():
             sys.exit(
-                f"\nNo Starlink cache at {cache} (it's gitignored).\n"
+                f"\nNo {args.source} cache at {cache} (it's gitignored).\n"
                 f"  Offline, representative run:  "
                 f"python scripts/profile_screening.py --source synth\n"
                 f"  Or populate the real catalog first (a live CelesTrak fetch "
-                f"of the 'starlink' group).\n")
+                f"of the '{args.source}' group).\n")
 
+    cut = "SFS ellipsoids" if args.mode == "sfs" else f"{args.threshold} km"
     print(f"\nConjunction screening profile -- source={args.source}, "
-          f"window={args.hours} h, threshold={args.threshold} km, "
-          f"step={args.step} s  (start={_START.date()})\n")
+          f"mode={args.mode}, window={args.hours} h, cut={cut}, "
+          f"step={args.step} s  (start={start.date()})\n")
     print(_HDR)
     print("-" * len(_HDR))
 
     with tempfile.TemporaryDirectory() as tmp:
         for n in sizes:
             t_load, tm = _profile_one(
-                args.source, n, args.hours, args.threshold, args.step, tmp)
+                args.source, n, args.hours, args.threshold, args.step, tmp,
+                mode=args.mode, start=start)
             _print_row(t_load, tm)
 
-        if args.full and args.source == "starlink":
-            print("  ... full multi-shell catalog (can take minutes) ...")
+        if args.full and args.source in ("starlink", "active"):
+            print("  ... full catalog (can take minutes) ...")
             t_load, tm = _profile_one(
-                "starlink", None, args.hours, args.threshold, args.step, tmp)
+                args.source, None, args.hours, args.threshold, args.step, tmp,
+                mode=args.mode, start=start)
             _print_row(t_load, tm)
         elif args.full:
-            print("  (--full ignored: only meaningful for --source starlink)")
+            print("  (--full ignored: not meaningful for --source synth)")
 
     print()
 

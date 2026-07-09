@@ -154,7 +154,8 @@ Turn it into a live, resume-linkable site that runs the **active-satellite catal
 > repo's GitHub-hosted Linux runner is **4 vCPU / 16 GB / unlimited minutes** (6 h/job cap) → fits with
 > headroom. ⚠ A *private* repo runner is only 2 vCPU / **7 GB** / 2,000 min/mo — so **keep the repo
 > public** (which the resume link wants anyway). If it ever outgrows that: (1) trim the set → (2) **Phase
-> 10 path filter** (cuts time *and* memory — its main job) → (3) **self-hosted runner** (your machine/VM)
+> 10 time-sieve + C++ fine stage** (cuts time *and* memory — its main job; the path filter measured out
+> in 10.0) → (3) **self-hosted runner** (your machine/VM)
 > → (4) escape hatch: GitHub Actions isn't load-bearing — *any* scheduler that runs the script and pushes
 > `snapshot.json` works (e.g. a local cron). Memory, not time, is the thing to watch.
 
@@ -174,31 +175,40 @@ Turn it into a live, resume-linkable site that runs the **active-satellite catal
 
 **✅ Done when:** a public **GitHub Pages** URL (on the resume) loads the active-satellite globe + validated conjunctions, **looks right and is verified visually (9.6)**, **links the validation report**, **refreshes itself a few×/day via the robot job (9.5)**, and makes **no upstream call on a page visit**.
 
-## Phase 10: Geometric Path Filter — Full-Catalog Performance (post-launch / long-term)
-**Built last, after the portfolio is shippable (Phases 8–9 done).** This is the one optimization the
-Jun 24 SOCRATES research surfaced: the **smart-sieve "path filter"** (Alfano 2002 / Hoots-Crawford-
-Roehrich 1984) — the orbit-geometry stage SOCRATES has and we don't. It attacks a weakness we measured
-ourselves (7.1 / `scaling_tracker #3` + `#8`): `coarse_filter` is **inclination-blind**, so on a dense
-constellation **49% of pairs survive** (25 M tuples, 4.5 GB) and the medium filter time-steps them all.
+## Phase 10: Smart-Sieve Time Filter + C++ Fine Stage — Full-Catalog CI Performance (post-launch)
+**Built last, after the portfolio is shippable (Phases 8–9 done).** Originally scheduled as the
+smart-sieve **"path filter"** (Hoots-Crawford-Roehrich Filter II — the orbit-geometry pre-cut
+SOCRATES has and we don't). **The 10.0 measurement gate killed that plan and re-scoped the phase**
+(decision Jul 8): the path filter measures out at a **0.002–1.9% cut** on our catalogs, because
+near-circular co-altitude orbits — the pair class a megaconstellation is made of — genuinely
+*intersect* at their mutual node line and cannot be dropped geometrically. What pays instead:
 
-> **Why it's worth doing (the rationale, sharpened by the Phase-9 deploy).** Most of those survivors
-> are pairs whose *orbits never actually approach* — they only share an altitude band. A geometric
-> pre-cut drops them before the expensive time-stepping, cutting **both** memory **and** wall time on the
-> active-payload catalog (still Starlink-dense, so the win holds). That screen is now **production**: the
-> Phase-9.5 CI job runs it a few×/day to publish the snapshot, so every second/GB shaved is **real CI cost
-> and faster refreshes** — *less
-> compute → lower cloud cost*, the kind of measured efficiency win an employer cares about. It's deferred
-> to last (not a launch blocker — the CI job tolerates the 117 s screen fine) and is the **only remaining
-> C++ change**, so it forces a `.so` rebuild → must be verified in the Phase-9.5 CI build.
+> **The measured shape of the problem (10.0, real catalogs, production operating point).**
+> The CI screen (4,821 screenable / 24 h / 30 s SFS) splits **~50/50 between the medium filter
+> (81 s) and the fine stage (74 s)** — and fine's share *grows* with scale (56% at 10 k). The
+> **time filter** (H-C-R Filter III: conjunctions can only occur while *both* objects transit
+> small angular windows around the mutual node line — intersect the transit-time intervals)
+> removes **98–99% of medium pair-step work** (ceiling measured: 0.31–1.86% remains). Built
+> **fused in C++**, it also eliminates the coarse→medium Python pair materialization — **48.1 M
+> tuples ≈ 8.7 GB** on the full active catalog, which is why the full screen **cannot fit the
+> 16 GB CI runner at all** (~25 GB extrapolated; the 9.4 "38 min" was memory pressure, not CPU).
+> But a sieve alone caps the total win at ~2×: post-sieve, the **fine stage is ~90% of a
+> full-catalog screen** (~23 min single-thread) and its per-window result dicts are the next
+> memory wall (`scaling_tracker #7`). Lifting the 5000 cap therefore needs **both stages**.
+> ⚠ **No-skip is an EVENT-level contract, not flag-level** (10.0 finding): `medium_filter`
+> over-flags by design (its interval bound subtracts `v̂·dt/2` — hundreds of km for fast pairs),
+> so "drops zero *flagged* pairs" is unachievable and wrong as a spec; "changes zero *events*"
+> is the correctness bar, and the gate's bound already meets it (0 true violations everywhere).
 
-- [ ] **10.1 Spec the no-skip geometric bound** — derive a **conservative lower bound** on the orbit-to-orbit minimum distance from relative inclination + nodal geometry (MOID-style), so the filter can *never* drop a pair the medium filter would flag. ⚠ **The hard part:** LEO nodes precess (~5°/day for Starlink), so the bound must hold across the whole 7-day window — mirror 6.3's velocity-aware no-skip discipline. Cite Hoots-Crawford-Roehrich + Alfano smart sieve.
-- [ ] **10.2 C++ `path_filter` + pybind11 binding** — new `orbitcore` function (orbital geometry → drop pairs whose orbits never approach within `threshold + precession margin`), inserted between `coarse_filter` and `medium_filter`. Keeps the cut inside C++ (no new Python materialization; complements `scaling_tracker #3`).
-- [ ] **10.3 Wire into `run_screen`** — new optional stage in the cascade; preserve the index-aligned `(i,j)` contract; gate behind a flag + profile hook so it's measurable and reversible.
-- [ ] **10.4 Validate + re-profile** — **no-skip equivalence:** assert the path filter drops **zero** pairs that the full medium→fine screen would have flagged (cross-check on the dense shell *and* the full 10,544-sat catalog). Then re-run `scripts/profile_screening.py` to quantify the survivor-count drop (target: well below 49%) and the wall-time / peak-RSS improvement vs the 7.1 baseline.
-- [ ] **10.5 Tests** — no-skip property test (the critical lock, mutation-checked) + a survivor-reduction regression + the existing scale-regression suite still byte-identical (the filter changes *speed*, never *results*).
-- [ ] **10.6 CI-build verification + close** — rebuild the `.so` in the Phase-9.5 CI job, run the active-payload snapshot screen **in CI**, confirm it completes faster/lighter with identical event counts and the published snapshot is unchanged (results, not speed). Update `scaling_tracker #3`/`#8` → resolved, roadmap → Phase 10 done.
+- [x] **10.0 Measurement gate (profile-first)** — a one-day NumPy prototype of the conservative path bound + a time-filter work estimate, swept over every coarse-surviving pair of three real catalogs BEFORE writing any C++. **Path filter (realistic margins): 0.002% / 1.9% / 0.4%** of coarse survivors dropped (Starlink 10,544 / active CI-slice 4,821 / active full 15,708) → **rejected**. **Time-filter ceiling: 0.31% / 1.86% / 1.12%** of medium pair-step work remains (~54–320×) → **the sieve to build**. Bound verified safe: **0 event-level no-skip violations** on every catalog (4,246 medium-flagged pairs among drops, every one fine-refined to miss > gross). Production profiles: CI point 157 s (81 medium / 74 fine, 1.7 GB); 10 k → 852 s (368/479, **8.7 GB**); full 15,708 → **~25 GB extrapolated = won't fit CI**. Prototype + 6-case geometry sanity preserved in `progress/week10_planning/` (it's the Stage-1 oracle). `profile_screening.py` gained `--source active / --mode sfs / --start` (profiles the exact CI operating point). See `task_logs/task_10_0_measurement_gate.md`.
+- [ ] **10.1 Spec the fused sieve (Stage 1 design)** — the event-level no-skip contract + the conservative bound construction (plane-distance node windows `|sin u| ≤ D_eff/(r_p·sin I_R)` + reverse-triangle radius-interval gap at both nodes + transit-time interval intersection), with margins: mean-vs-osculating (~10 km), relative nodal precession `|Ω̇₁−Ω̇₂|·T` amplified `~1/sin I_R` (secular rates read off the satrec's `nodedot`/`argpdot` — no Python plumbing), `|ω̇|·T` on the anomaly, drift pad. Near-coplanar pairs degrade to keep (measured: they're the coplanar-crossing class the medium filter must scan anyway). Cite Hoots-Crawford-Roehrich 1984 + Alfano smart sieve; the 10.0 prototype is the executable spec.
+- [ ] **10.2 C++ fused sieve stage (Stage 1 build)** — one GIL-released `orbitcore` stage replacing the `coarse_filter`→Python→`medium_filter` round-trip: perigee-apogee cut + node geometry + per-pair **encounter time-windows** for the medium scan, so the 48 M-pair Python list never materializes (closes `scaling_tracker #3` + `#8`). Preserve the index-aligned `(i,j)` contract in whatever rows it emits; flag-gated + `timings` hook so it's measurable and reversible.
+- [ ] **10.3 Validate + re-profile Stage 1** — **byte-identical events** sieve-on vs sieve-off on the dense shell, full Starlink, and full active (the 10.0 prototype is the independent oracle); expected: CI point ~2× total, medium → propagation-bound, pair-list RSS gone. Re-run `profile_screening.py --source active --mode sfs` at 5 k / 10 k vs the 10.0 baselines.
+- [ ] **10.4 C++ fine stage (Stage 2 build)** — move the range-rate Newton refinement (7.3's `fine_filter_batch` math) into C++: GIL-free, **OpenMP across windows** (embarrassingly parallel; 4 CI vCPUs), results **streamed** past the report cut so per-window dicts never accumulate (closes `scaling_tracker #7`). Python keeps the report cut / RTN / suppression on the survivors. Byte-identical-events gate again (scipy oracle + brute-force grid, as 7.3 did).
+- [ ] **10.5 Tests** — event-level no-skip property test (the critical lock, **mutation-checked**: shrink a margin → the test must bite), sieve-on/off equivalence locks at multiple scales, survivor/work-reduction regressions, and the existing scale-regression suite still byte-identical (both stages change *speed and memory*, never *results*).
+- [ ] **10.6 CI verification + lift the cap + close** — the deploy REBUILD path already rebuilds the `.so`; run one **A/B inside a single CI job on one fetch** (screen twice, stages on/off, diff event lists — CI fetches live data, so cross-day byte-diffs don't exist), then **raise `--max-sats` toward the full ~16 k** per the measured CI numbers (est. 5–8 min post-both-stages). Update `scaling_tracker #3`/`#7`/`#8` → resolved, roadmap → Phase 10 done.
 
-**✅ Done when:** the CI snapshot screen is measurably faster and lighter, **no real conjunction is dropped** (no-skip proven on the full catalog), and the published snapshot is byte-identical to the pre-filter one.
+**✅ Done when:** the full active catalog (~16 k) screens in the CI job within budget (target ≲10 min / well under 16 GB), **events byte-identical** to the unfiltered cascade at every gated stage, and the published snapshot reflects the lifted cap.
 
 ## Backlog (future, unscheduled)
 - **Debris + rocket-body collision screening** — the deployed site is satellites-only (active payloads) to keep the engine and the browser light. Adding the ~14k debris/R-B objects back as *secondaries* (screen active payloads **against** debris) is the natural next capability — it's the harder, more impressive SSA problem, and a clean future phase once the path filter (Phase 10) has cut the per-object cost. Object types already derived (7.4), so the data is ready.
@@ -215,7 +225,7 @@ constellation **49% of pairs survive** (25 M tuples, 4.5 GB) and the medium filt
 | ✅ Jun 23 | **Phase 7:** full-catalog screening with industry **ellipsoidal** RTN screening volumes + measured perf numbers — batched fine stage, type filters, scale-regression locks, 432 tests | Yes |
 | Jul 4  | **Phase 8:** detections validated against CelesTrak SOCRATES | Yes |
 | Jul 12 | **Phase 9:** deployed as a static website — active-satellite globe + validated conjunctions, CI-refreshed a few×/day (+ snapshot archive), zero per-visit upstream calls, resume-linkable | **Live URL** |
-| post-Jul 12 | **Phase 10 (long-term):** geometric path filter — active-catalog CI screen faster & lighter (less compute → lower cost), no-skip proven, verified in CI | Yes |
+| post-Jul 12 | **Phase 10 (long-term, re-scoped by the 10.0 gate):** fused C++ time-sieve + C++ fine stage — full ~16k active catalog screened in CI (memory-viable + fast), events byte-identical, no-skip proven at event level | Yes |
 
 ---
 
@@ -290,7 +300,10 @@ constellation **49% of pairs survive** (25 M tuples, 4.5 GB) and the medium filt
 > Euclidean mode (matches SOCRATES for validation) **and** the SFS **RTN-ellipsoid** mode (matches 19
 > SDS operational volumes) — we span both criteria. (d) We deliberately **emit no Pc** (SOCRATES's
 > MaxProb uses *assumed*, not measured, covariance — so this is an honest narrowing, not a deficiency).
-> The smart-sieve path filter is **now scheduled as Phase 10** (post-launch, long-term) — see below.
+> **⚠ Measured update (10.0 gate, Jul 8):** on our catalogs the path filter cuts only **0.002–1.9%**
+> (co-altitude near-circular orbits intersect at their mutual nodes — nothing geometric to drop); the
+> smart sieve's real lever is the **time filter** (98–99% of medium pair-step work removable). Phase 10
+> is re-scoped accordingly — see below.
 
 > **Other validation sources surveyed (Jun 24) — SOCRATES still wins.** **TraCSS** (NOAA/Office of
 > Space Commerce civil SSA, 52 pilot users Jun 2026): CDMs still routed through Space-Track `cdm_public`
