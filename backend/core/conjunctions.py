@@ -483,9 +483,10 @@ def run_screen(
     if fused:
         # Fused stage (Phase 10.1a): one C++ call does the coarse cut AND the
         # medium scan, so the survivor pairs never materialize as Python objects
-        # (the full active catalog's ~48 M pairs = ~8.7 GB of tuples that won't
-        # fit CI). Byte-identical rows to the two-call path below. t_coarse folds
-        # into the scan; n_pairs comes back for the survivor-reduction profile.
+        # (the full active catalog's ~48 M pairs ≈ 5 GB of tuples; ~0.8 GB as
+        # the internal C++ vector). Byte-identical rows to the two-call path
+        # below. t_coarse folds into the scan; n_pairs comes back for the
+        # survivor-reduction profile.
         _t = time.perf_counter()
         n_pairs, rows = orbitcore.screen_pairs(
             satrecs, periapsis, apoapsis, pad_km,

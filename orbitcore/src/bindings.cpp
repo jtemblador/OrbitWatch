@@ -282,6 +282,14 @@ PYBIND11_MODULE(orbitcore, m) {
         .def_readwrite("altp", &elsetrec::altp)
         .def_readwrite("t", &elsetrec::t)
 
+        // Secular rates (rad/min), set by sgp4init — the linear terms SGP4 uses
+        // to advance the mean elements: mp = mo + mdot*t, argpp = argpo +
+        // argpdot*t, nodep = nodeo + nodedot*t. Exposed for the Phase-10 time
+        // filter's per-step node-window geometry (see progress/week10_planning).
+        .def_readonly("mdot", &elsetrec::mdot)
+        .def_readonly("argpdot", &elsetrec::argpdot)
+        .def_readonly("nodedot", &elsetrec::nodedot)
+
         // Gravity model constants (populated by sgp4init)
         .def_readonly("radiusearthkm", &elsetrec::radiusearthkm)
         .def_readonly("mus", &elsetrec::mus)
