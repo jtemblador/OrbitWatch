@@ -1303,3 +1303,174 @@ class TestCppFine:
                 assert False, f"should have raised ValueError: {kw}"
             except ValueError:
                 pass
+
+
+_COMPOSITE_CACHE = None
+
+
+def _composite_satrecs():
+    """The Phase-10.5 hostile composite: three shells at different altitudes
+    and inclinations (real cross-shell geometry — spurious medium windows,
+    mixed relative-inclination node lines) plus two adversarial singletons
+    with non-nominal element sets the uniform shells lack — a high-drag orbit
+    (large bstar/ndot, the 10.1b reentering class) and an eccentric one
+    (e=0.03, perigee ~345 / apogee ~760 km, so it spans all three shells and
+    drives the equinoctial-chord + EoC-widening sieve paths). Both are
+    verified to propagate the whole window and to appear in medium windows
+    (33 / 70), so they genuinely exercise the sieve/refine paths rather than
+    decaying out. Deterministic + offline. Module-cached: five flip locks
+    share it, and screens never corrupt satrec state (every sgp4() call sets
+    t before use), so rebuilding ~550 satrecs per test would be pure waste."""
+    global _COMPOSITE_CACHE
+    if _COMPOSITE_CACHE is not None:
+        return _COMPOSITE_CACHE
+
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from core.demo_seed import build_synthetic_shell
+    from core.propagator import SatellitePropagator
+    from core.tle_fetcher import GPFetcher
+
+    lo = build_synthetic_shell(n=200)                       # 53.0°, 15.05
+    mid = build_synthetic_shell(n=200, base_norad=8100000,
+                                mean_motion=15.35, inclination_deg=97.0)
+    hi = build_synthetic_shell(n=150, base_norad=8200000,
+                               mean_motion=14.85, inclination_deg=72.0)
+    df = pd.concat([lo, mid, hi], ignore_index=True)
+
+    # Adversarial singletons: clone a shell row's OMM shape, then bend it.
+    def _variant(name, norad, **omm):
+        row = df.iloc[0].to_dict()
+        row.update(object_name=name, object_id=name, norad_cat_id=norad,
+                   ra_of_asc_node=137.0, mean_anomaly=311.0, **omm)
+        row.update(GPFetcher._derive_orbit_params(
+            row["mean_motion"], row["eccentricity"]))
+        return row
+
+    df = pd.concat([df, pd.DataFrame([
+        # ~480 km, decaying hard: ndot ~0.12 rev/day^2 (OMM stores /2),
+        # bstar an order past any operational LEO sat.
+        _variant("HOSTILE-DRAG", 8999998, mean_motion=15.55,
+                 eccentricity=0.001, inclination=65.0, bstar=0.02,
+                 mean_motion_dot=0.06),
+        # e=0.03 spanning all three shells: perigee ~430 km, apogee ~840 km.
+        _variant("HOSTILE-ECC", 8999999, mean_motion=15.05,
+                 eccentricity=0.03, inclination=80.0),
+    ])], ignore_index=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        df.to_parquet(Path(d) / "composite.parquet", index=False)
+        prop = SatellitePropagator(
+            group="composite", fetcher=GPFetcher(cache_dir=Path(d)))
+        sats, meta = prop.get_all_satrecs()
+    _COMPOSITE_CACHE = (sats, meta,
+                        datetime(2026, 6, 1, tzinfo=timezone.utc))
+    return _COMPOSITE_CACHE
+
+
+class TestFlipContract:
+    """Phase 10.5 — mutation-checked property locks for the 10.6 production
+    flip. The pairwise equivalences (classic==fused, sieve on==off, refine
+    on==off) are locked elsewhere; this class locks the EXACT production
+    contract — classic == fused+sieve+refine, in one assertion, on hostile
+    geometry — plus the properties that make that lock trustworthy: the new
+    path is deterministic, its work-reduction machinery provably bites, and
+    its load-bearing conservatisms are load-bearing (mutate one -> events
+    change, so the identity locks are sensitive, not vacuously green)."""
+
+    def test_flip_identity_on_hostile_composite(self):
+        """THE 10.6 contract: the full Stage-1+2 path reproduces the classic
+        cascade event-for-event on cross-shell + drag + eccentric geometry,
+        with BOTH stages provably engaged — the sieve dropped spurious windows
+        (flip's flagged count < the classic full scan's) and the refine
+        pre-cut dropped rows (survivors < flagged). Without both assertions a
+        regression that silently disabled a stage would still pass identity."""
+        sats, meta, start = _composite_satrecs()
+        tc: dict = {}
+        tm: dict = {}
+        classic = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                             timings=tc)
+        flip = run_screen(sats, meta, start, 3.0, threshold_km=100.0,
+                          fused=True, sieve=True, refine=True, timings=tm)
+        assert len(classic) > 500                          # non-vacuous
+        assert classic == flip
+        assert tm["n_windows"] < tc["n_windows"]           # sieve engaged
+        assert tm["n_survivors"] < tm["n_windows"]         # refine engaged
+
+    def test_flip_identity_sfs_ellipsoid_path(self):
+        """The same contract through the SFS report cut (asymmetric custom
+        volumes — Table 3 excludes synthetic radial-dominated geometry, 7.2),
+        so the ellipsoid pre-cut + suppression + de-dupe path is locked
+        non-vacuously too."""
+        sats, meta, start = _composite_satrecs()
+        vols = [ScreeningVolume("T105", 60.0, 100.0, 80.0)] * len(sats)
+        classic = run_screen(sats, meta, start, 3.0, volumes=vols)
+        flip = run_screen(sats, meta, start, 3.0, volumes=vols,
+                          fused=True, sieve=True, refine=True)
+        assert len(classic) > 50                           # non-vacuous
+        assert classic == flip
+
+    def test_flip_path_run_to_run_deterministic(self):
+        """The flip path against ITSELF: two runs, byte-identical lists.
+        (The classic path's determinism is locked in TestScaleRegression;
+        OpenMP + activation-list scan order make this a separate claim.)"""
+        sats, meta, start = _composite_satrecs()
+        kw = dict(threshold_km=100.0, fused=True, sieve=True, refine=True)
+        assert (run_screen(sats, meta, start, 3.0, **kw)
+                == run_screen(sats, meta, start, 3.0, **kw))
+
+    def test_sieve_margins_are_wired_and_bite(self):
+        """Zeroing the sieve's tunable margins must strictly shrink the row
+        set (the margins demonstrably reach the interval builder and widen
+        real windows). Event-level zero-margin bites need real-catalog
+        pathologies (10.1b measured 1/59/256/351 dropped events there;
+        synthetic fixtures are too well-conditioned — every other margin is
+        a constructive bound, which is WHY they don't bite here); the
+        standing event-level check on real data is 10.6's in-CI A/B."""
+        sats, meta, start = _composite_satrecs()
+        peri = [m["periapsis_km"] for m in meta]
+        apo = [m["apoapsis_km"] for m in meta]
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        args = (sats, peri, apo, 100.0, jd0, jd0 + 3.0 / 24.0, 60.0, 100.0)
+        _, rows_default = orbitcore.screen_pairs(*args, time_filter=True)
+        _, rows_zero = orbitcore.screen_pairs(
+            *args, time_filter=True,
+            sieve_u_margin_deg=0.0, sieve_osc_margin_km=0.0)
+        assert len(rows_zero) < len(rows_default)
+
+    def test_refine_pre_cut_mutation_bites(self):
+        """Deflate the pre-cut ellipsoid to 40% of the report volume and rows
+        that Python's report cut keeps MUST go missing — proving the pre-cut
+        is load-bearing and the flip-identity locks above would go red if its
+        geometry (RTN frame, volume choice, inflation) were wrong. The
+        correctly-sized pre-cut stays a superset on the same rows."""
+        sats, meta, start = _composite_satrecs()
+        vol = ScreeningVolume("T105", 60.0, 100.0, 80.0)
+        peri = [m["periapsis_km"] for m in meta]
+        apo = [m["apoapsis_km"] for m in meta]
+        jd_w, jd_f = utc_to_jd(start)
+        jd0 = jd_w + jd_f
+        args = (sats, peri, apo, 60.0, jd0, jd0 + 3.0 / 24.0, 60.0, 100.0)
+
+        _, rows = orbitcore.screen_pairs(*args)
+        fine = fine_filter_batch(sats, rows, 60.0)
+        kept = [r for r, out in zip(rows, fine) if out is not None
+                and vol.contains(*teme_to_rtn(out["pos_a_teme"],
+                                              out["vel_a_teme"],
+                                              out["pos_b_teme"]))]
+        assert len(kept) > 50                              # non-vacuous
+
+        full = [(vol.r_km, vol.t_km, vol.n_km)] * len(sats)
+        defl = [(vol.r_km * 0.4, vol.t_km * 0.4, vol.n_km * 0.4)] * len(sats)
+        _, surv_full, _, _ = orbitcore.screen_pairs(
+            *args, refine=True, refine_axes=full)
+        _, surv_defl, _, _ = orbitcore.screen_pairs(
+            *args, refine=True, refine_axes=defl)
+
+        sf, sd = set(surv_full), set(surv_defl)
+        assert all(r in sf for r in kept)      # correct pre-cut: superset
+        assert any(r not in sd for r in kept)  # deflated pre-cut: BITES
