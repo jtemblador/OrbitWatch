@@ -506,6 +506,44 @@ These were fixed in Vallado's code but are present in many online SGP4 implement
 
 ---
 
+## Post-launch review hardening (Task 10.7)
+
+Durable gotchas from the full-project code review:
+
+1. **Vendored `elsetrec::satnum` was `char[6]` but the code writes up to 9 digits
+   into it.** Vallado's `sgp4init` unconditionally `strcpy`s the id in, and our
+   binding let 8 chars through → a buffer overflow that only bites once catalog
+   ids pass 99999 (≈ mid-2026, the reason we ship OMM not TLE). Widened to
+   `satnum[10]` in `SGP4.h`; the `bind_satrec.cpp` setter + `sgp4init` lambda
+   bound every copy to `sizeof(field) - 1`. **Any re-vendor of `SGP4.cpp/.h` must
+   re-apply the `[10]` widening** — upstream is still `[6]`. (`.satnum` identity
+   matters: `test_propagator.py` reads `int(satrec.satnum)` back, so don't
+   "fix" this by truncating to 5.)
+
+2. **`propagator.py` still does `str(int(row["norad_cat_id"]))`** — fine for
+   6-digit *numeric* ids, but throws on an Alpha-5 *letter* form (`"A1234"`). OMM
+   is numeric today; revisit if a feed ever emits Alpha-5 strings.
+
+3. **CI gates CODE at push time (`ci.yml`), separate from the DATA-refresh cron.**
+   `deploy.yml`'s `push` filter is `frontend/**` only and a push there REUSES the
+   snapshot (no gate), so engine changes are gated by `ci.yml` (push/PR on
+   `orbitcore/**`, `backend/**`, scripts, `tests/**`). That's what makes the
+   cron's gate-skip safe. Solo-repo caveat: without branch protection a red CI run
+   is an alert, not a hard block — the offending commit can still cron-deploy.
+
+4. **The A/B gate needs an absolute floor, not just `A == B`.** Two
+   identically-truncated inputs agree trivially. `ab_screen.py` +
+   `build_snapshot.py` take `--min-objects` (checked on the RAW catalog before any
+   `--max-sats` slice); CI passes `--min-objects 8000` (active is ~16k).
+
+5. **Any handler mutating the propagator's shared cache/indexes must hold
+   `_propagator_lock`.** `reload_data()` nulls `_satrec_cache` / `_name_index` /
+   `_norad_index`; a lock-free reload (the old `/api/refresh`) races every
+   concurrent position/screen request → `None.get(...)` → 500. Also fetch off the
+   event loop (`run_in_threadpool`), never inline in an async handler.
+
+---
+
 ## SGP4 Accuracy Expectations
 
 | Time from Epoch | Expected Error |
