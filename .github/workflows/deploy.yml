@@ -9,11 +9,13 @@
 #   • REUSE (default, ~1 min) — redeploy the site while keeping the snapshot
 #     that's already live. This is what a frontend/CSS/JS change wants: no need
 #     to re-fetch + re-screen the catalog just to ship a UI tweak.
-#   • REBUILD (~20-30 min) — build the C++ SGP4 extension, fetch the active
-#     catalog, run the Phase-10.6 A/B gate (accelerated screen == classic,
-#     byte-identical), then screen the FULL catalog and bake a fresh snapshot.
-#     Triggered by the `schedule:` cron below (the Phase 9.5 robot job), a manual
-#     dispatch with rebuild_snapshot=true, or when there's no snapshot to reuse.
+#   • REBUILD — build the C++ SGP4 extension, fetch the active catalog, screen
+#     the FULL ~16k catalog with the Phase-10 accelerated engine, and bake a
+#     fresh snapshot. Triggered by the `schedule:` cron below (the Phase 9.5
+#     robot job, ~10 min), a manual dispatch with rebuild_snapshot=true, or when
+#     there's no snapshot to reuse. Non-cron rebuilds also run the Phase-10.6
+#     A/B gate first (accelerated == classic, byte-identical; ~+40 min) — see
+#     that step for why cron skips it.
 #
 # Phase 9.5 — the robot job + archive:
 #   • The `schedule:` cron rebuilds 3×/day so the site refreshes itself and
@@ -39,9 +41,9 @@ on:
   # trails the confirmed ~12:10 UTC SOCRATES upload by ~1 h, a margin that absorbs
   # both SOCRATES jitter and GitHub cron's best-effort delay. The :17 offset
   # dodges the top-of-hour, which GitHub's docs flag as the most-congested (and
-  # most-delayed/-dropped) minute for scheduled jobs. The other two keep the site
-  # fresh on an even cadence; tune them once the "Log SOCRATES run time" output
-  # reveals SOCRATES's actual morning/evening upload times.
+  # most-delayed/-dropped) minute for scheduled jobs. Cheap to run 3×/day because
+  # scheduled rebuilds SKIP the A/B gate (see that step) — a cron refresh is
+  # ~10 min, only data changes, and the engine is already validated.
   schedule:
     - cron: "17 13 * * *"   # 13:17 UTC — after the midday SOCRATES run
     - cron: "17 21 * * *"   # 21:17 UTC
@@ -174,8 +176,19 @@ jobs:
       #     the sieve-OFF medium scan (~9 min) affordable for a 3x/day cron; the
       #     24 h production window's fidelity is covered by Tier 1.
       # ab_screen.py exits 0 iff the event lists match; `set -e` fails the step.
+      #
+      # SKIPPED on scheduled (cron) rebuilds: the gate re-runs the OLD slow
+      # cascade as the reference (~40 min on the 4-vCPU runner — measured
+      # 2026-07-15: Tier 1 ~8 min + Tier 2 ~31 min), which tripled the robot
+      # job for a check that only guards CODE changes, not data refreshes. The
+      # engine's identity is already proven offline (581 tests incl. mutation-
+      # checked flip locks), across 4 catalogs (10.3), and in CI on live data
+      # (this gate, 2026-07-15: 308==308, 3,887==3,887). Cron runs refresh data
+      # with the validated engine (~10 min); the FULL gate still runs on every
+      # manual dispatch (rebuild_snapshot=true) and any push-triggered rebuild
+      # fallback — i.e., whenever a human changes something.
       - name: A/B gate — accelerated screen == classic (byte-identical events)
-        if: steps.decide.outputs.rebuild == 'true'
+        if: steps.decide.outputs.rebuild == 'true' && github.event_name != 'schedule'
         run: |
           set -e
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
