@@ -31,6 +31,8 @@ The industry (19 SDS) says: "compute Probability of Collision (Pc) using covaria
 
 **Decision needed:** Which option are we going for? This shapes the entire Week 6/7 architecture.
 
+**Answer (Apr 9):** Option B + C combined. Estimate approximate covariance from TLE epoch age for our own detections AND fetch real CDMs from Space-Track for validation and ML training. Even rough Pc shows domain understanding; real CDMs show we know the data ecosystem. Together they're stronger than either alone.
+
 ---
 
 ## Question 2: What Exactly Is Our ML Model Predicting?
@@ -46,6 +48,8 @@ The industry (19 SDS) says: "compute Probability of Collision (Pc) using covaria
 4. **TLE quality indicators** — epoch age, number of observations, residual RMS. These tell you how much to trust the miss distance prediction.
 
 **Decision needed:** What features will we train on? This determines what data we need to fetch (CDMs from Space-Track) and when (Week 6, not Week 7).
+
+**Answer (Apr 9):** See "ML Purpose Discussion" section at end of document. The ML target and framing is still under active discussion. The core tension: SGP4 is inherently less accurate than the SP propagation 19 SDS uses, so what genuine value does ML add on top of SGP4-based detection? Multiple paths under consideration.
 
 **Proposed features for ML (from CDM data):**
 - `MISS_DISTANCE` (meters)
@@ -84,6 +88,8 @@ This is a rotation matrix applied to the relative position vector between two sa
 
 **Recommendation:** Implement RTN in Week 6. It's a 3x3 rotation — maybe 20 lines of Python. The payoff is that our conjunction output looks like a real CDM, which impresses employers.
 
+**Answer (Apr 9):** Yes, implement RTN in Week 6. Small code, large portfolio impact. Every conjunction output should include RTN components.
+
 ---
 
 ## Question 4: Are Our Screening Thresholds Correct?
@@ -107,6 +113,8 @@ This is a rotation matrix applied to the relative position vector between two sa
 
 **Decision needed:** At minimum, we should know that our thresholds differ from industry. Ideally, we match them.
 
+**Answer (Apr 9):** Match 19 SDS volumes by orbit regime. Use the exact numbers from the SFS Handbook (LEO 1: R=0.4km, T=44km, N=51km) as a lookup table in the medium filter. ~10 extra lines of code, shows we've read the operational documentation.
+
 ---
 
 ## Question 5: How Do We Validate Our Results?
@@ -128,6 +136,8 @@ This is a rotation matrix applied to the relative position vector between two sa
 
 **Decision needed:** Do we set up CDM fetching from Space-Track in Week 6? It would serve triple duty: validation, ML training data (Week 7), and showing employers we know the real data ecosystem.
 
+**Answer (Apr 9):** Yes, fetch CDMs in Week 6. CDM comparison validates results against the operational system (stronger than Orekit cross-validation alone). Also becomes ML training data in Week 7. Deprioritize Orekit in favor of CDM validation if time is tight.
+
 ---
 
 ## Question 6: What Training Data Do We Need for ML, and When?
@@ -144,6 +154,8 @@ This is a rotation matrix applied to the relative position vector between two sa
 - We need to decide: are we predicting **per-CDM risk** or **per-conjunction risk**?
 
 **Decision needed:** Fetch CDM data in Week 6, even if we don't train until Week 7. Understanding the data early avoids "oh, this field is always null" surprises later.
+
+**Answer (Apr 9):** Yes, fetch early. Same answer as Q5 -- CDMs serve triple duty (validation, training data, portfolio signal). Build the Space-Track CDM fetcher as part of Week 6.
 
 ---
 
@@ -165,6 +177,8 @@ This is a rotation matrix applied to the relative position vector between two sa
 **The honest answer we should give employers:** "Our system identifies conjunctions using SGP4 propagation. SGP4 provides sufficient accuracy for screening (~1 km at epoch) but not for operational collision avoidance. For operational use, SP-quality ephemeris with proper covariance is required."
 
 **Decision needed:** Should we quantify SGP4 uncertainty explicitly in our output? (e.g., "miss distance: 8.3 km +/- ~7 km based on TLE epoch age"). This shows domain maturity.
+
+**Answer (Apr 9):** Yes. Include a confidence indicator based on TLE age of both objects. High (both < 1 day), Medium (1-3 days), Low (3+ days). Honest uncertainty quantification shows engineering maturity and becomes an ML feature.
 
 ---
 
@@ -205,6 +219,8 @@ CelesTrak OMM data (30-6000 satellites)
 
 **Decision needed:** Does this pipeline make sense? Are there missing steps? Is the ordering right?
 
+**Answer (Apr 9):** Pipeline is correct. One addition: after ML classifier, add a CDM cross-reference step that checks whether Space-Track also flagged the event. This gives a "validated" flag in the output. Note: ML role in this pipeline is still under discussion (see end of document).
+
 ---
 
 ## Question 9: How Do We Handle Object Size?
@@ -223,6 +239,8 @@ CelesTrak OMM data (30-6000 satellites)
 - The industry often uses a default HBR of ~5 meters when actual size is unknown
 
 **Decision needed:** Do we use RCS-derived size, a default radius, or skip Pc entirely?
+
+**Answer (Apr 9):** Use RCS-derived radius with default fallback. `radius = sqrt(RCS / pi)` for known RCS, default HBR of 5m when unknown. This is industry standard practice. ~5 lines of code, required for Pc computation.
 
 ---
 
@@ -261,3 +279,57 @@ CelesTrak OMM data (30-6000 satellites)
 2. **CDM data integration** — Space-Track CDMs are simultaneously our validation ground truth, our ML training data, and our proof that we understand the real ecosystem. Fetch early.
 
 3. **RTN coordinate frame** — 20 lines of code, but it transforms our output from "XYZ distance between points" to "industry-standard conjunction geometry." Every CDM field the industry uses is in RTN.
+
+---
+
+## ML Purpose Discussion (Apr 9) — ACTIVE, UNRESOLVED
+
+### The Core Tension
+
+Jose raised a fundamental question: "Why not just use SP-level accuracy data rather than SGP4? It sounds like we're using inferior data and dressing it up."
+
+This is a valid concern. Here's the honest breakdown of why we can't "just use SP," and what that means for the ML angle:
+
+### Why We Can't Use SP (Special Perturbations)
+
+SP = Special Perturbations = numerical integration of full equations of motion with high-fidelity force models. 19 SDS uses this operationally. We can't because:
+
+1. **SP requires data we don't have access to.** SP propagation needs precise initial conditions (osculating elements from orbit determination using raw radar/optical tracking data). This data is restricted/classified. What's public is TLE/OMM data, which contains MEAN elements fitted to SGP4 theory.
+
+2. **You literally cannot feed TLE data into an SP propagator.** TLE mean elements have SGP4's perturbation model baked into them. Using them with a different propagator produces WORSE results than SGP4, not better. This is a common misconception.
+
+3. **What 19 SDS publishes:** They give us TLEs (for SGP4 screening) and CDMs (the RESULTS of their SP-based assessment). We can use CDMs as ground truth, but we can't reproduce the SP pipeline.
+
+4. **Orekit's numerical propagator** could give better-than-SGP4 accuracy IF we had osculating elements. With TLE mean elements, it would actually be less accurate than SGP4 with TLEs.
+
+**Bottom line: Every public conjunction screening system (LeoLabs, AGI, academic tools) uses SGP4/TLE for initial screening. This is not a limitation of our project specifically — it's the reality of public space situational awareness.**
+
+### The ML Question: Multiple Paths Forward
+
+**Path A: ML as SGP4-to-SP triage (current proposal)**
+- SGP4 screens all pairs, ML predicts which detections are genuine (would also be flagged by 19 SDS's SP system)
+- Trained on CDM data (labels = whether 19 SDS flagged it and at what Pc)
+- Genuine ML problem: learns which feature combinations correlate with real risk vs SGP4 noise
+- Concern: feels like "fixing" SGP4's limitations with ML instead of using better propagation
+
+**Path B: ML for CDM evolution prediction**
+- Given early CDMs for a conjunction event, predict the final Pc at TCA
+- CDMs are issued repeatedly as TCA approaches (5-20 per event over several days)
+- Real-world utility: operators need to decide EARLY whether to plan a maneuver
+- Time-series prediction from CDM update history
+- Concern: requires historical CDM sequences, data availability TBD
+
+**Path C: Drop ML, make conjunction detection the centerpiece**
+- Full pipeline: C++ screening, RTN coordinates, Pc computation, CDM-format output, CDM validation
+- The engineering depth IS the project — C++/pybind11, orbital mechanics, coordinate transforms, industry standards
+- ML was in the original plan but if it doesn't serve a genuine purpose, better to cut it than fake it
+- Concern: roadmap says ML, removing it changes the project scope
+
+**Path D: ML for TLE quality / propagation uncertainty estimation**
+- Predict how accurate an SGP4 propagation will be given TLE characteristics
+- Features: epoch age, observation count, residual RMS, orbit type, drag characteristics
+- Target: actual position error (estimated by comparing consecutive TLEs)
+- Published research territory — shows awareness of cutting-edge work
+- Concern: might be too research-y for a portfolio project
+
+### Status: Awaiting Decision
