@@ -17,13 +17,17 @@ bpc_kernel = kernel_dir / "earth_latest_high_prec.bpc"
 print("Testing SPICE setup...")
 print(f"Kernel directory: {kernel_dir}")
 
-# Check kernels exist
+# Check kernels exist. This module runs its checks at import time, so a missing
+# kernel must SKIP the module (not sys.exit) — a sys.exit during pytest collection
+# is an INTERNALERROR that takes down every other test's results with it.
 for kernel in [lsk_kernel, pck_kernel, bpc_kernel]:
     if kernel.exists():
         print(f"  ✓ {kernel.name}")
     else:
         print(f"  ✗ {kernel.name} NOT FOUND")
-        sys.exit(1)
+        import pytest
+        pytest.skip(f"SPICE kernel {kernel.name} not provisioned",
+                    allow_module_level=True)
 
 # Load kernels
 print("\nLoading kernels...")

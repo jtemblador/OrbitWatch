@@ -81,6 +81,22 @@ jobs:
           make -j"$(nproc)"
           cp orbitcore*.so ../../backend/
 
+      # The geodetic-transform tests (SPICE recgeo) need the NAIF generic kernels,
+      # which live under the gitignored backend/data/ and aren't in the checkout.
+      # Fetch the same three the app loads (~5 MB) so the full suite runs. If NAIF
+      # is unreachable the step fails loudly here (a clear "provisioning" error,
+      # not a confusing test failure); test_spice.py additionally skips itself if a
+      # kernel is still missing, so a hiccup can't crash collection.
+      - name: Provision SPICE kernels (NAIF generic)
+        run: |
+          mkdir -p backend/data/spice_kernels
+          cd backend/data/spice_kernels
+          base=https://naif.jpl.nasa.gov/pub/naif/generic_kernels
+          curl -fsSL --retry 3 --retry-delay 2 -O "$base/lsk/naif0012.tls"
+          curl -fsSL --retry 3 --retry-delay 2 -O "$base/pck/pck00011.tpc"
+          curl -fsSL --retry 3 --retry-delay 2 -O "$base/pck/earth_latest_high_prec.bpc"
+          ls -la
+
       # Fast fail: the offline, deterministic suite (incl. the mutation-checked
       # TestFlipContract locks) runs in well under a minute. Catches most engine
       # regressions before we pay for the live-data A/B gate below.
