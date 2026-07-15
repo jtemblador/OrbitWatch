@@ -65,8 +65,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies (+ pybind11 for the C++ build)
-        run: pip install -r requirements.txt pybind11
+      # requirements.txt is the app's runtime deps only; the test suite also needs
+      # pytest and httpx (FastAPI's TestClient in test_api.py). deploy.yml never
+      # runs pytest, so it doesn't install these — CI must.
+      - name: Install Python dependencies (+ pybind11, pytest, httpx for the suite)
+        run: pip install -r requirements.txt pybind11 pytest httpx
 
       # Build the pybind11 SGP4 module and drop the .so where the screen imports
       # it (backend/) — mirrors deploy.yml's build so CI and prod build identically.
