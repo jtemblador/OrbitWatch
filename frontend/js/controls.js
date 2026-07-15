@@ -15,8 +15,9 @@
  */
 
 // --- Toggle State ---
+// (Labels are no longer a manual toggle — satellites.js auto-labels the handful
+//  on screen in an isolated/focused view; see _wantsLabel.)
 const toggleState = {
-  labels: true,
   groups: {}, // group key -> bool (built from the snapshot's populated groups)
 };
 
@@ -55,9 +56,6 @@ function initControls() {
   panel.id = "controls-panel";
 
   let html = `<div id="controls-header">Display</div>`;
-  html += `<label class="control-toggle">
-    <input type="checkbox" id="toggle-labels" checked> Labels
-  </label>`;
   html += `<div id="controls-section-label">Satellites</div>`;
   for (const g of groups) {
     html += `<label class="group-toggle">
@@ -78,11 +76,6 @@ function initControls() {
   document.body.appendChild(panel);
 
   // --- Event Listeners ---
-
-  document.getElementById("toggle-labels").addEventListener("change", function () {
-    toggleState.labels = this.checked;
-    applyVisibilityState();
-  });
 
   for (const cb of panel.querySelectorAll("[data-group]")) {
     cb.addEventListener("change", function () {
@@ -117,7 +110,13 @@ function applyVisibilityState() {
     // filteredOut = hidden by the filter/mode (NOT by a failed propagation) —
     // only a filter hide tears down a selection/focus, an ok=false batch doesn't.
     let show, filteredOut;
-    if (conjOnlyActive === "top20") {
+    if (typeof isolationSet !== "undefined" && isolationSet !== null) {
+      // Focus isolation (conjunctions.js): ONLY the involved satellites exist —
+      // overrides every other mode. The selected sat and focused pair are
+      // always members, so the teardown checks below can't fire on them.
+      filteredOut = !isolationSet.has(noradId);
+      show = !filteredOut && entry.ok !== false;
+    } else if (conjOnlyActive === "top20") {
       // Arc view: hide all dots (the fading arcs are the display); a focused pair
       // still shows over them.
       filteredOut = !revealedSats.has(noradId);
@@ -148,7 +147,14 @@ function applyVisibilityState() {
     }
 
     entry.point.show = show;
-    if (entry.label) entry.label.show = show && toggleState.labels; // labels are lazy at scale
+    // Label policy (10.6): auto-labelled in isolated/focused views (identify the
+    // handful on screen), sparse in bulk — see _wantsLabel (satellites.js).
+    const wantLabel =
+      show && (typeof _wantsLabel === "function" ? _wantsLabel(noradId) : false);
+    if (wantLabel && !entry.label && typeof _createLabel === "function") {
+      _createLabel(noradId);
+    }
+    if (entry.label) entry.label.show = wantLabel;
 
     // Tear down interactions that reference a now-hidden satellite: the info
     // panel selection, and (only the visuals of) a conjunction focus that would

@@ -61,6 +61,64 @@ const conjParticipants = new Set();        // every norad_id that's in ≥1 conj
 function isConjunctionParticipant(noradId) {
   return conjParticipants.has(noradId);
 }
+// --- Focus isolation (10.6 UX round): while a conjunction/selection is in
+// focus, ONLY the involved satellites exist on screen — every other dot is
+// hidden AND excluded from the worker's propagation batch, so a focused view
+// costs a handful of satellites of CPU instead of hundreds. null = off.
+// Cleared by clearConjunctionVisuals (Escape / click-away / LIVE / mode switch),
+// which restores the previous view (group filters, conjunction-only modes).
+let isolationSet = null;
+
+// Zoom-level state (10.6 UX): the view is a 3-level stack that Escape walks up.
+//   All Conjunctions  — startup, every participant (no selection, no isolation)
+//   Conjunction View  — one satellite + all its conjunction partners (selected)
+//   TCA View          — zoomed to ONE approach (clock jumped, camera flown in)
+// tcaZoomed distinguishes the deepest level; selectedNoradId (info-panel.js)
+// distinguishes the middle from the top. Escape: TCA→Conjunction→All.
+let tcaZoomed = false;
+
+// POV indicator (top-center, under the search bar): names the current level and
+// what Escape does next, so the zoom stack is legible.
+const povEl = document.createElement("div");
+povEl.id = "pov-indicator";
+document.body.appendChild(povEl);
+
+function updatePovIndicator() {
+  const selName = (typeof selectedNoradId !== "undefined" && selectedNoradId !== null)
+    ? getSatName(selectedNoradId) : null;
+  if (tcaZoomed && focusedPair) {
+    const up = selName ? "Conjunction View" : "All Conjunctions";
+    povEl.innerHTML =
+      `<span class="pov-level">TCA View</span>` +
+      `<span class="pov-ctx">${getSatName(focusedPair[0])} × ${getSatName(focusedPair[1])}</span>` +
+      `<span class="pov-esc">Esc → ${up}</span>`;
+  } else if (selName) {
+    povEl.innerHTML =
+      `<span class="pov-level">Conjunction View</span>` +
+      `<span class="pov-ctx">${selName}</span>` +
+      `<span class="pov-esc">Esc → All Conjunctions</span>`;
+  } else {
+    povEl.innerHTML = `<span class="pov-level">All Conjunctions</span>`;
+  }
+}
+
+function isolateSats(ids) {
+  isolationSet = new Set(ids);
+  if (typeof applyVisibilityState === "function") applyVisibilityState();
+  // Re-mask the worker NOW (force: must land even while paused) so the
+  // propagation batch shrinks to the isolated set immediately.
+  if (typeof refreshSatellites === "function") refreshSatellites(true);
+}
+
+function clearIsolation() {
+  if (isolationSet === null) return;
+  isolationSet = null;
+  if (typeof applyVisibilityState === "function") applyVisibilityState();
+  // Unmasked forced batch: masked-out sats carry ok=false, so restoring the
+  // view needs one full batch even while paused (same pattern as setConjOnly).
+  if (typeof refreshSatellites === "function") refreshSatellites(true);
+}
+
 let conjOrb = null;                        // translucent yellow orb at the approach
 let conjTrails = [];                       // [{teme, positions, entity}] both orbits
 let conjTrailTimer = null;                 // re-rotates trails as time advances
@@ -129,7 +187,7 @@ function addTrail(noradId, centerMs) {
     // so a Starlink × Other-LEO encounter reads as one orange + one blue orbit.
     const col = (typeof groupColor === "function")
       ? groupColor(noradId).withAlpha(0.75) : TRAIL_BLUE;
-    const t = { teme, positions: temeToEcef(teme, simClock.getTimeMs()) };
+    const t = { noradId, teme, positions: temeToEcef(teme, simClock.getTimeMs()) };
     t.entity = viewer.entities.add({
       polyline: {
         positions: new Cesium.CallbackProperty(() => t.positions, false),
@@ -139,8 +197,48 @@ function addTrail(noradId, centerMs) {
       },
     });
     conjTrails.push(t);
+    syncConjTrailVisibility();
   } catch (err) {
     console.error("Could not draw conjunction trail:", err);
+  }
+}
+
+/**
+ * De-duplicate orbit rings: the SELECTED satellite already shows its
+ * full-period info-panel trail, and a focused conjunction draws its own trail
+ * for both participants — for the selected sat those are the same orbit
+ * sampled over slightly different windows, rendering as two near-identical
+ * rings a few pixels apart. Hide the conjunction copy while the info-panel
+ * trail is visible; re-show it if the panel trail is toggled off (so the pair
+ * geometry stays complete) or the selection changes. Called from addTrail,
+ * and from info-panel.js on select/deselect/trail-toggle — reactive, so it's
+ * correct for every click order (row-then-dot, dot-then-row, …).
+ */
+function syncConjTrailVisibility() {
+  const sel = (typeof selectedNoradId !== "undefined") ? selectedNoradId : null;
+  const infoTrailOn = (typeof trailVisible !== "undefined") ? trailVisible : true;
+  for (const t of conjTrails) {
+    t.entity.show = !(infoTrailOn && t.noradId === sel);
+  }
+}
+
+// --- Pair highlight: BOTH participants of the focused conjunction get the
+// enlarged/outlined dot treatment (same look as the selection ring, so
+// "highlighted = involved in what you're looking at" reads consistently).
+// Reactive like the trail sync: recomputed on focus, clear, and selection
+// changes, so no click order can leave a stale ring. The point belonging to
+// the SELECTED satellite is skipped — info-panel.js owns that one's style.
+let _pairGlow = []; // norad ids currently styled by the pair highlight
+
+function syncPairHighlight() {
+  if (typeof satellites === "undefined") return;
+  const prev = _pairGlow;
+  _pairGlow = focusedPair ? [...focusedPair] : [];
+  // Restyle everything that entered or left the pair set — refreshPointStyle
+  // (satellites.js) resolves hover/selection/pair priority in one place.
+  const affected = new Set([...prev, ..._pairGlow]);
+  for (const id of affected) {
+    if (typeof refreshPointStyle === "function") refreshPointStyle(id);
   }
 }
 
@@ -263,7 +361,7 @@ function clearOrb() {
 // --- Ephemeris: drop a nadir line from the conjunction point to the ground and
 //     mark the sub-point, so you can see what land the encounter happens over. ---
 
-function addConjEphemeris(cart) {
+function addConjEphemeris(cart, tcaIso) {
   clearConjEphemeris();
   // Project the TCA point straight down to the ellipsoid surface.
   const surface = new Cesium.Cartesian3();
@@ -278,6 +376,9 @@ function addConjEphemeris(cart) {
   const lon = Cesium.Math.toDegrees(carto.longitude);
   const latlon = `${Math.abs(lat).toFixed(1)}°${lat >= 0 ? "N" : "S"}, ` +
                  `${Math.abs(lon).toFixed(1)}°${lon >= 0 ? "E" : "W"}`;
+  // Location + WHEN: the ground label carries the TCA date/time under the
+  // sub-point, so the marker answers both "where" and "when" the approach is.
+  const labelText = tcaIso ? `${latlon}\n${formatTca(tcaIso)}` : latlon;
 
   const line = viewer.entities.add({
     polyline: {
@@ -296,7 +397,7 @@ function addConjEphemeris(cart) {
       outlineWidth: 1,
     },
     label: {
-      text: latlon,
+      text: labelText,
       font: "11px monospace",
       fillColor: Cesium.Color.WHITE,
       showBackground: true,
@@ -350,8 +451,8 @@ function drawConjunctionGeometry(e) {
     },
   });
 
-  // Ephemeris: nadir line + ground marker so the land point below is visible.
-  addConjEphemeris(cart);
+  // Ephemeris: nadir line + ground marker (location + TCA date/time) below.
+  addConjEphemeris(cart, e.tca);
 
   // Both orbits in thin blue; re-rotate as time advances so they track the dots.
   clearTrails();
@@ -381,9 +482,17 @@ function focusConjunction(e, doJump = true) {
   // switching conjunctions re-hides the previous pair. Already-visible ones are
   // unaffected.
   if (typeof revealSatsExclusive === "function") revealSatsExclusive(focusedPair);
+  // Isolation: the focused pair (plus any open selection — hiding the selected
+  // sat would trigger the filter teardown and tear this focus down mid-flight).
+  const iso = new Set(focusedPair);
+  if (typeof selectedNoradId !== "undefined" && selectedNoradId !== null) {
+    iso.add(selectedNoradId);
+  }
+  isolateSats(iso);
 
   const cart = drawConjunctionGeometry(e);
   if (!cart) return;
+  syncPairHighlight(); // both participants get the highlight ring
 
   // In the Top-20 arc view, focusing a conjunction replaces the arc slices with
   // its two full trails + TCA orb — hide the arcs (restored when focus clears).
@@ -410,6 +519,8 @@ function focusConjunction(e, doJump = true) {
   } else {
     viewer.scene.requestRender();
   }
+  tcaZoomed = doJump;   // zoomed to one approach → TCA View (Escape steps up)
+  updatePovIndicator();
 }
 
 /**
@@ -423,6 +534,7 @@ function softFocusConjunction(e) {
   focusedKey = eventKey(e);
   focusedPair = [e.sat1_norad_id, e.sat2_norad_id];
   if (!drawConjunctionGeometry(e)) return;
+  syncPairHighlight(); // both participants get the highlight ring
   renderConjunctionList();
   viewer.scene.requestRender();
 }
@@ -436,13 +548,42 @@ function clearConjunctionVisuals() {
   restoreLabels();
   focusedKey = null;
   focusedPair = null;
+  syncPairHighlight(); // un-ring the pair (focusedPair is null now)
+  clearIsolation();    // every other satellite comes back (worker unmasks too)
   // Re-hide any satellite we force-revealed just for this focus (per-sat reveal).
   if (typeof clearRevealedSats === "function") clearRevealedSats();
   // Coming out of a focus while the Top-20 arc view is active → restore the arcs.
   if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "top20") {
     renderConjOnlyArcs("top20");
   }
+  tcaZoomed = false;   // no focus → not the TCA level anymore
+  updatePovIndicator();
   viewer.scene.requestRender(); // clear the orb/trails now even if paused
+}
+
+// --- Escape zoom stack (10.6): walk UP one level per keypress ---
+
+/** Re-enter a satellite's Conjunction View (from a TCA-zoom Escape): rebuild the
+ *  neighborhood (isolate + soft-focus closest + all partner trails, via
+ *  showConjunctionsFor) and pull the camera back out of the TCA zoom. */
+function enterConjunctionView(noradId) {
+  if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
+  viewer.camera.flyHome(1.2);
+}
+
+/** Return to All Conjunctions: drop the selection + focus + isolation and pull
+ *  the camera all the way back to the full-Earth view. */
+function exitToAll() {
+  if (typeof selectedNoradId !== "undefined" && selectedNoradId !== null
+      && typeof deselectSatellite === "function") {
+    deselectSatellite();          // clears focus + isolation (clearConjunctionFocus)
+  } else {
+    clearConjunctionFocus();
+  }
+  tcaZoomed = false;
+  renderConjunctionList();
+  updatePovIndicator();
+  viewer.camera.flyHome(1.2);
 }
 
 /** Full teardown — the focus visuals plus the selected-satellite detail panel.
@@ -467,8 +608,13 @@ function handleParticipantHidden(noradId) {
 function renderConjunctionList() {
   const satCount = (typeof satelliteMetadata !== "undefined")
     ? satelliteMetadata.size : "—";
+  // With the display cap (snapshot-data.js) the UI works with the closest N of
+  // the full screened set — say so, so the count stays honest.
+  const pairsLabel = conjEvents.length < conjTotalCount
+    ? `closest ${conjEvents.length} of ${conjTotalCount} pairs`
+    : `${conjTotalCount} pairs`;
   document.getElementById("conjunction-header").textContent =
-    `Conjunctions · ${conjTotalCount} pairs · ${satCount} sats`;
+    `Conjunctions · ${pairsLabel} · ${satCount} sats`;
 
   const body = document.getElementById("conjunction-body");
   if (!conjEvents.length) {
@@ -524,7 +670,7 @@ function showConjunctionsFor(noradId) {
     `<div class="cd-satname">${name}</div>` +
     `<div class="cd-count">${events.length} conjunction${events.length > 1 ? "s" : ""}</div>` +
     `</div>` +
-    `<button id="jump-to-tca" title="Jump the clock to the closest approach">⤓ Jump to TCA</button>` +
+    `<button id="jump-to-tca" title="Jump the clock to the closest approach">⤓ Click to Jump to TCA</button>` +
     `</div>` +
     events.map((e, i) => `
       <div class="cd-row${eventKey(e) === focusedKey ? " focused" : ""}" data-idx="${i}">
@@ -545,12 +691,34 @@ function showConjunctionsFor(noradId) {
   const jumpBtn = document.getElementById("jump-to-tca");
   if (jumpBtn) jumpBtn.addEventListener("click", () => focusConjunction(events[0], true));
 
-  // In the "All" view, selecting a participant immediately soft-focuses its
-  // closest conjunction (both trails + orb, no clock jump). Skip during a
-  // focusConjunction refresh (that would stomp the just-focused event).
-  if (!_refreshingDetail && events.length &&
-      typeof conjOnlyActive !== "undefined" && conjOnlyActive === "all") {
+  // Selecting a participant (any view, 10.6 UX round) isolates the screen to
+  // this satellite + EVERY partner it has a conjunction with, soft-focuses its
+  // closest event (orb + pair highlight, no clock jump), and draws the other
+  // partners' orbit trails too — the whole neighborhood of this object, and
+  // nothing else, on screen. Skip during a focusConjunction refresh (that
+  // would stomp the just-focused event).
+  if (!_refreshingDetail && events.length) {
+    const iso = new Set([noradId]);
+    for (const e of events) {
+      iso.add(e.sat1_norad_id);
+      iso.add(e.sat2_norad_id);
+    }
+    isolateSats(iso);
     softFocusConjunction(events[0]);
+    // Orbit trails for the partners beyond the focused (closest) event —
+    // each centered on ITS OWN encounter time. addTrail appends to conjTrails,
+    // so the re-rotation timer + clearTrails handle them like the pair's.
+    const trailed = new Set(
+      [noradId, events[0].sat1_norad_id, events[0].sat2_norad_id]);
+    for (const e of events.slice(1)) {
+      for (const id of [e.sat1_norad_id, e.sat2_norad_id]) {
+        if (trailed.has(id)) continue;
+        trailed.add(id);
+        addTrail(id, Date.parse(e.tca));
+      }
+    }
+    tcaZoomed = false;      // a fresh selection lands in Conjunction View
+    updatePovIndicator();
   }
 }
 
@@ -595,3 +763,27 @@ snapshotReady.then(() => {
   renderFreshness();
   setInterval(renderFreshness, 60000); // the age ticks while the tab stays open
 }).catch(() => { /* load failure already reported + shown by satellites.js */ });
+
+// --- Escape: walk UP the zoom stack one level per keypress ---
+//   TCA View  → Conjunction View (of the selected sat) — or All if none selected
+//   Conjunction View → All Conjunctions (deselect, isolation cleared, camera home)
+//   All (a stray focus) → cleared
+// Field-level Escapes are NOT ours: the clock's HH:MM:SS edit (contenteditable)
+// and the search box (input) handle their own cancel and must keep it.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const t = e.target;
+  if (t && (t.isContentEditable || t.tagName === "INPUT")) return;
+  const hasSelection =
+    typeof selectedNoradId !== "undefined" && selectedNoradId !== null;
+  if (tcaZoomed) {
+    // Level 2 → up one: back to the selected sat's neighborhood, or All.
+    if (hasSelection) enterConjunctionView(selectedNoradId);
+    else exitToAll();
+  } else if (hasSelection || focusedKey !== null) {
+    // Level 1 (or a stray focus) → All Conjunctions.
+    exitToAll();
+  }
+});
+
+updatePovIndicator(); // initial: "All Conjunctions"

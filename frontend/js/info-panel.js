@@ -14,9 +14,11 @@ let trailVisible = true;
 let lastTrailRefresh = 0;
 const BASE_TRAIL_REFRESH_MS = 30000; // re-fetch trail every 30s at 1x
 
-/** Trail refresh interval — scales with speed so trail stays centered at high speeds. */
+/** Trail refresh interval — scales with |speed| so the trail stays centered at
+ *  high speeds, forward OR rewind (a raw negative division would misbehave). */
 function getTrailRefreshInterval() {
-  return Math.max(Math.floor(BASE_TRAIL_REFRESH_MS / simClock.getSpeed()), 5000);
+  const spd = Math.abs(simClock.getSpeed()) || 1;
+  return Math.max(Math.floor(BASE_TRAIL_REFRESH_MS / spd), 5000);
 }
 
 // Orbit trail — ONE depth-tested Primitive (PolylineGeometry) at orbital altitude.
@@ -78,6 +80,9 @@ document.getElementById("trail-checkbox").addEventListener("change", function ()
   for (const p of trailPrimitives) {
     p.show = trailVisible;
   }
+  // Info trail off → re-show the conjunction copy of this sat's ring (and vice
+  // versa), so a focused pair always shows exactly one ring per satellite.
+  if (typeof syncConjTrailVisibility === "function") syncConjTrailVisibility();
   viewer.scene.requestRender(); // reflect the toggle now even if paused (requestRenderMode)
 });
 
@@ -105,6 +110,11 @@ function selectSatellite(noradId) {
 
   // Show this satellite's conjunctions (conjunctions.js, if loaded)
   if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
+  // Hide the conjunction-focus copy of THIS sat's orbit ring — the info-panel
+  // trail above already draws it (two near-identical rings otherwise) — and
+  // re-sync the pair highlight around the selection change.
+  if (typeof syncConjTrailVisibility === "function") syncConjTrailVisibility();
+  if (typeof syncPairHighlight === "function") syncPairHighlight();
 
   viewer.scene.requestRender(); // show the selection now even if paused (requestRenderMode)
 }
@@ -117,35 +127,26 @@ function deselectSatellite() {
   clearNadirLine();
   clearSelectionIndicator();
   if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
+  if (typeof syncPairHighlight === "function") syncPairHighlight(); // no-op if no focus
   viewer.scene.requestRender(); // clear the selection visuals now even if paused
 }
 
 // --- Selection Indicator (highlight selected satellite's point) ---
-
-const SELECTED_STYLE = { pixelSize: 10, outlineColor: Cesium.Color.CYAN, outlineWidth: 3 };
-const DEFAULT_STYLE = { pixelSize: 6, outlineColor: Cesium.Color.TRANSPARENT, outlineWidth: 0 };
+// Styling goes through refreshPointStyle (satellites.js) so hover + the
+// conjunction-pair ring share one source of truth (no style fights).
 
 function updateSelectionIndicator(noradId) {
   clearSelectionIndicator();
-  const entry = satellites.get(noradId);
-  if (!entry) return;
-
-  // Enlarge point + add cyan outline ring
-  entry.point.pixelSize = SELECTED_STYLE.pixelSize;
-  entry.point.outlineColor = SELECTED_STYLE.outlineColor;
-  entry.point.outlineWidth = SELECTED_STYLE.outlineWidth;
+  if (!satellites.has(noradId)) return;
   selectionIndicator = noradId; // track which satellite is highlighted
+  refreshPointStyle(noradId);   // apply the emphasis ring
 }
 
 function clearSelectionIndicator() {
   if (selectionIndicator !== null) {
-    const entry = satellites.get(selectionIndicator);
-    if (entry) {
-      entry.point.pixelSize = DEFAULT_STYLE.pixelSize;
-      entry.point.outlineColor = DEFAULT_STYLE.outlineColor;
-      entry.point.outlineWidth = DEFAULT_STYLE.outlineWidth;
-    }
+    const prev = selectionIndicator;
     selectionIndicator = null;
+    refreshPointStyle(prev);     // back to hover/plain as appropriate
   }
 }
 

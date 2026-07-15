@@ -69,16 +69,23 @@ const simClock = (() => {
 
   // --- Time Bar UI ---
 
+  // Transport layout: rewind speeds ⏸ forward speeds — negative data-speed
+  // plays the simulation BACKWARD (getTimeMs multiplies wall-dt by speed, so
+  // reverse needs no other machinery; consumers that divide by speed use
+  // |speed| — see satellites.js / info-panel.js).
   const bar = document.createElement("div");
   bar.id = "time-bar";
   bar.innerHTML = `
-    <button id="time-pause" title="Pause">⏸</button>
     <span id="time-display">
       <span id="time-date"></span>
       <span class="time-edit" id="time-hh" contenteditable="true" title="Click to edit, Enter to jump"></span><span class="time-colon">:</span><span class="time-edit" id="time-mm" contenteditable="true" title="Click to edit, Enter to jump"></span><span class="time-colon">:</span><span class="time-edit" id="time-ss" contenteditable="true" title="Click to edit, Enter to jump"></span>
       <span id="time-utc">UTC</span>
     </span>
     <span id="time-speed-group">
+      <button class="time-speed" data-speed="-10" title="Rewind at 10×">−10×</button>
+      <button class="time-speed" data-speed="-5" title="Rewind at 5×">−5×</button>
+      <button class="time-speed" data-speed="-1" title="Rewind at 1×">−1×</button>
+      <button id="time-pause" title="Pause">⏸</button>
       <button class="time-speed active" data-speed="1">1×</button>
       <button class="time-speed" data-speed="5">5×</button>
       <button class="time-speed" data-speed="10">10×</button>
@@ -150,6 +157,8 @@ const simClock = (() => {
     if (!e.target.classList.contains("time-speed")) return;
     const n = parseInt(e.target.dataset.speed);
     setSpeed(n);
+    // Transport semantics: picking a speed while paused means "go" — resume.
+    if (!playing) togglePause();
   });
 
   // LIVE — return the clock to the present and drop any conjunction focus.
@@ -157,6 +166,19 @@ const simClock = (() => {
     setTime(Date.now());
     setSpeed(1);
     if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
+  });
+
+  // Spacebar toggles pause/resume — the universal transport shortcut. Ignore it
+  // while typing (the clock's editable HH:MM:SS, the search box) or when a
+  // button has focus (space should click it), and preventDefault so the page
+  // doesn't scroll.
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" && e.key !== " ") return;
+    const t = e.target;
+    if (t && (t.isContentEditable || t.tagName === "INPUT" ||
+              t.tagName === "TEXTAREA" || t.tagName === "BUTTON")) return;
+    e.preventDefault();
+    togglePause();
   });
 
   function updateUI() {

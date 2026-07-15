@@ -598,3 +598,42 @@ html, body, #cesiumContainer {
   color: #888;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- POV indicator (10.6): current zoom level + what Escape does next.
+   Top-center, just under the search bar. --- */
+#pov-indicator {
+  position: fixed;
+  top: 58px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  background: rgba(10, 10, 20, 0.82);
+  border: 1px solid #333;
+  border-radius: 999px;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none; /* purely informational — never eats a globe click */
+}
+#pov-indicator .pov-level {
+  color: #4fc3f7;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+#pov-indicator .pov-ctx {
+  color: #e0e0e0;
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-left: 1px solid #333;   /* "TCA View | context" divider */
+  padding-left: 10px;
+}
+#pov-indicator .pov-esc {
+  color: #888;
+  border-left: 1px solid #333;
+  padding-left: 10px;
+}

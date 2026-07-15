@@ -38,12 +38,23 @@ const SAT_GROUPS = [
 const _STATION_RE = /\b(ISS|ZARYA|TIANHE|TIANGONG|MENGTIAN|WENTIAN|CSS)\b/;
 const _GNSS_RE = /\b(GPS|NAVSTAR|GLONASS|GALILEO|BEIDOU)\b/;
 
+// Display cap on conjunctions (Phase 10.6 full-catalog perf): the snapshot now
+// carries the ENTIRE screened catalog's events (~7.7k pairs → ~6.9k unique
+// participant sats), and animating that many dots made the whole machine lag.
+// The UI works with only the closest CAP events (list, arcs, participant dots,
+// worker propagation all follow from this one slice — events arrive
+// closest-first). The full set still exists in snapshot.json + the archive;
+// the header shows "closest N of TOTAL" so the display stays honest.
+// 500 events ≈ ~800 participant sats — comparable per-frame work to the old
+// 5k-catalog view, with 15 fps + occlusion-skip (satellites.js) as headroom.
+const CONJ_DISPLAY_CAP = 500;
+
 // Populated by loadSnapshot(); consumed as globals by the other modules
 // (matches the project's existing plain-globals style).
 const satelliteMetadata = new Map(); // norad_id -> derived metadata (see below)
 let snapshotMeta = null;             // snapshot.json "meta" block
 let snapshotSatellites = [];         // raw OMM records (worker init payload)
-let snapshotConjunctions = [];       // adapted events, closest-first
+let snapshotConjunctions = [];       // adapted events, closest-first (capped)
 
 // Per-satellite satrec cache for main-thread single-sat computations (info
 // panel, trails, TCA orb). json2satrec is the expensive call (~15 µs) — cache
@@ -152,11 +163,16 @@ const snapshotReady = (async () => {
     _ommById.set(omm.NORAD_CAT_ID, omm);
     satelliteMetadata.set(omm.NORAD_CAT_ID, _deriveMetadata(omm));
   }
-  snapshotConjunctions = snap.conjunctions.map(_adaptConjunction);
+  // Cap to the closest CAP events for display (see CONJ_DISPLAY_CAP above).
+  // Events are closest-first in the snapshot (run_screen sorts by miss).
+  snapshotConjunctions =
+    snap.conjunctions.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
 
   console.log(
     `snapshot: ${snap.meta.n_satellites} satellites, ` +
-    `${snap.meta.n_conjunctions} conjunctions, generated ${snap.meta.generated_at}`
+    `${snap.meta.n_conjunctions} conjunctions ` +
+    `(displaying closest ${snapshotConjunctions.length}), ` +
+    `generated ${snap.meta.generated_at}`
   );
   return snap;
 })();

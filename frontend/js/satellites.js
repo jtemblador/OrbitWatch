@@ -20,17 +20,25 @@
 
 const BASE_REFRESH_MS = 5000;
 const MIN_REFRESH_MS = 500;  // floor — keeps the sim-time gap between batches small at speed
-const TARGET_FPS = 30;       // animation cap (was Cesium's uncapped ~60 → cooler/quieter)
+// Animation cap. Was Cesium's uncapped ~60, then 30 (the 9.4 heat fix); 15 fps
+// since the 10.6 full-catalog lift — dots drift a few pixels between batches,
+// so 15 fps lerp is visually indistinguishable while halving per-frame work
+// (position sets + full-scene renders), the main-thread cost that scales with
+// the participant count.
+const TARGET_FPS = 15;
 const FRAME_MS = 1000 / TARGET_FPS;
 const LABELS_ALL_MAX = 400;  // ≤ this many sats → label everything up front
 
 /**
  * Effective refresh interval — scales inversely with clock speed so the
  * simulated time gap between position batches stays small enough for accurate
- * lerp. At 1x: 5000ms (5s sim gap). At 10x: 500ms (5s sim gap).
+ * lerp. At 1x: 5000ms (5s sim gap). At 10x: 500ms (5s sim gap). |speed|:
+ * rewind (negative speeds) needs the same cadence as forward — a raw division
+ * would go negative and pin the interval at the floor.
  */
 function getRefreshInterval() {
-  return Math.max(Math.floor(BASE_REFRESH_MS / simClock.getSpeed()), MIN_REFRESH_MS);
+  const spd = Math.abs(simClock.getSpeed()) || 1;
+  return Math.max(Math.floor(BASE_REFRESH_MS / spd), MIN_REFRESH_MS);
 }
 
 // GPU-batched collections — single draw call each; the 11k-point path.
@@ -57,6 +65,7 @@ let lerpFactor = 0;
 let lastFetchTime = 0;
 let lastLerpTime = 0;
 let lastBatchSimMs = null; // sim time of the previous batch (time-jump detection)
+let _tick = 0;             // frame counter — staggers occluded-point updates
 
 // Worker plumbing — one in-flight batch at a time (the old fetchInFlight).
 let propWorker = null;
@@ -88,9 +97,38 @@ function groupColor(noradId) {
   return (meta && GROUP_COLOR.get(meta.group)) || DEFAULT_COLOR;
 }
 
-/** Create the label for one satellite if it doesn't exist yet (lazy at scale).
- *  Called by info-panel.js (selection) and conjunctions.js (pair labels). */
-function ensureLabel(noradId) {
+// --- Unified point emphasis (10.6 UX): ONE source of truth for a point's
+// size/outline so hover, the selection ring, and the conjunction-pair
+// highlight never overwrite each other. Priority: hover > selected/pair >
+// plain. Reads state owned by info-panel.js (selectionIndicator) and
+// conjunctions.js (focusedPair) at call time — both loaded by then.
+const _HOVER_STYLE = { pixelSize: 11, outlineColor: Cesium.Color.WHITE, outlineWidth: 2 };
+const _EMPH_STYLE  = { pixelSize: 10, outlineColor: Cesium.Color.CYAN,  outlineWidth: 3 };
+const _PLAIN_STYLE = { pixelSize: 6,  outlineColor: Cesium.Color.TRANSPARENT, outlineWidth: 0 };
+let hoveredNoradId = null;
+
+function _isEmphasized(noradId) {
+  if (typeof selectionIndicator !== "undefined" && selectionIndicator === noradId) return true;
+  if (typeof focusedPair !== "undefined" && focusedPair &&
+      (focusedPair[0] === noradId || focusedPair[1] === noradId)) return true;
+  return false;
+}
+
+/** Re-apply the correct emphasis to one point from current state. */
+function refreshPointStyle(noradId) {
+  const entry = satellites.get(noradId);
+  if (!entry) return;
+  const s = noradId === hoveredNoradId ? _HOVER_STYLE
+          : _isEmphasized(noradId)     ? _EMPH_STYLE
+          :                              _PLAIN_STYLE;
+  entry.point.pixelSize = s.pixelSize;
+  entry.point.outlineColor = s.outlineColor;
+  entry.point.outlineWidth = s.outlineWidth;
+}
+
+/** Create one satellite's label if missing (no side effects — safe to call
+ *  from inside applyVisibilityState, which owns .show). */
+function _createLabel(noradId) {
   const entry = satellites.get(noradId);
   if (!entry) return null;
   if (!entry.label) {
@@ -99,15 +137,45 @@ function ensureLabel(noradId) {
       text: getSatName(noradId),
       ...LABEL_STYLE,
     });
-    // Respect current visibility state (type filters + label toggle)
-    if (typeof applyVisibilityState === "function") applyVisibilityState();
   }
   return entry.label;
+}
+
+/** Create the label for one satellite if it doesn't exist yet (lazy at scale),
+ *  then re-apply visibility. Called by info-panel.js / conjunctions.js. */
+function ensureLabel(noradId) {
+  const label = _createLabel(noradId);
+  if (label && typeof applyVisibilityState === "function") applyVisibilityState();
+  return label;
+}
+
+/** Label policy (10.6): label every satellite in an isolated/focused context so
+ *  the handful on screen are identifiable; keep the bulk views (startup "All",
+ *  group filters) label-free — LabelCollection rasterizes per glyph and isn't
+ *  as cheap as the point batch. Replaces the old manual Labels toggle. */
+function _wantsLabel(noradId) {
+  // Small catalog: the cozy demo look labels everything (unchanged pre-10.6).
+  if (snapshotSatellites.length <= LABELS_ALL_MAX) return true;
+  if (typeof isolationSet !== "undefined" && isolationSet !== null) {
+    return isolationSet.has(noradId);
+  }
+  if (typeof selectionIndicator !== "undefined" && selectionIndicator === noradId) return true;
+  if (typeof focusedPair !== "undefined" && focusedPair &&
+      (focusedPair[0] === noradId || focusedPair[1] === noradId)) return true;
+  return false;
 }
 
 // Scratch Cartesian3 — reused each frame to avoid GC pressure.
 // Safe: Cesium's position setter copies the value, not the reference.
 const scratchCartesian = new Cesium.Cartesian3();
+
+// Earth-occlusion tester for the animation loop (10.6 full-catalog perf):
+// points behind the globe are already invisible (GPU depth test), so paying
+// the Cesium position-setter + label update + vertex upload for them every
+// frame is pure waste — roughly half the participants at any moment. Reused
+// instance; the camera position is refreshed once per frame.
+const _occluder = new Cesium.EllipsoidalOccluder(
+  Cesium.Ellipsoid.WGS84, new Cesium.Cartesian3(1, 0, 0));
 
 /**
  * Process a fresh position batch from the worker.
@@ -123,7 +191,8 @@ function updatePositions(batch) {
   const labelAll = snapshotSatellites.length <= LABELS_ALL_MAX;
 
   // Time jump = sim time moved far more than the expected batch gap.
-  const expectedGapMs = getRefreshInterval() * simClock.getSpeed();
+  // |speed|: when rewinding, sim time legitimately moves backward by the gap.
+  const expectedGapMs = getRefreshInterval() * Math.abs(simClock.getSpeed());
   const snap = lastBatchSimMs !== null &&
     Math.abs(timeMs - lastBatchSimMs) > 3 * Math.max(expectedGapMs, 5000);
   lastBatchSimMs = timeMs;
@@ -221,11 +290,25 @@ function animationTick(now) {
   const elapsed = now - lastFetchTime;
   lerpFactor = Math.min(elapsed / getRefreshInterval(), 1.0);
 
+  // Refresh the occlusion tester with this frame's camera position.
+  _occluder.cameraPosition = viewer.scene.camera.positionWC;
+  _tick++;
+
   let moved = false;
   for (let i = 0; i < satOrder.length; i++) {
     const entry = satOrder[i];
     if (!entry.point.show) continue; // hidden group / failed sat — no work
     Cesium.Cartesian3.lerp(entry.start, entry.target, lerpFactor, scratchCartesian);
+    // Occlusion throttle: a point behind the Earth is invisible (GPU depth
+    // test), so update it at 1/4 rate instead of every tick — staggered by
+    // index so the work spreads evenly. Not a full skip: its rendered position
+    // then stays ≤ ~4 ticks stale, so a camera rotation can never reveal a
+    // ghost dot at a long-stale spot. The test uses the FRESH lerped position
+    // (never the stale rendered one), so a sat emerging from behind the limb
+    // updates on its first visible frame.
+    if (!_occluder.isPointVisible(scratchCartesian) && ((_tick + i) & 3) !== 0) {
+      continue;
+    }
     entry.point.position = scratchCartesian;
     if (entry.label) entry.label.position = scratchCartesian;
     moved = true;
@@ -237,6 +320,25 @@ function animationTick(now) {
   if (moved) viewer.scene.requestRender();
 }
 requestAnimationFrame(animationTick);
+
+// --- Hover emphasis: the point under the cursor gets the hover ring + a
+// pointer cursor, so it's clear what a click will select. Own handler (the
+// LEFT_CLICK one lives in info-panel.js); acts only on a change of target. ---
+const _hoverHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+_hoverHandler.setInputAction((move) => {
+  const picked = viewer.scene.pick(move.endPosition);
+  const id = (Cesium.defined(picked) && Cesium.defined(picked.primitive) &&
+              picked.primitive.id !== undefined && satellites.has(picked.primitive.id) &&
+              satellites.get(picked.primitive.id).point.show)
+    ? picked.primitive.id : null;
+  if (id === hoveredNoradId) return;
+  const prev = hoveredNoradId;
+  hoveredNoradId = id;
+  if (prev !== null) refreshPointStyle(prev);
+  if (id !== null) refreshPointStyle(id);
+  viewer.scene.canvas.style.cursor = id !== null ? "pointer" : "";
+  viewer.scene.requestRender();
+}, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
 // Cached "which sats are conjunction participants" mask, in worker-index order.
 // Built once (participants don't change) and reused to skip non-participant
@@ -252,6 +354,23 @@ function participantMask() {
     }
   }
   _participantMask = mask;
+  return mask;
+}
+
+// Focus-isolation worker mask (conjunctions.js sets isolationSet): propagate
+// ONLY the isolated satellites — the big CPU cut behind the isolation UX.
+// Cached per Set identity (each isolateSats() call makes a new Set).
+let _isoMaskSrc = null;
+let _isoMask = null;
+function isolationMask() {
+  if (_isoMaskSrc === isolationSet && _isoMask) return _isoMask;
+  const n = snapshotSatellites.length;
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (isolationSet.has(snapshotSatellites[i].NORAD_CAT_ID)) mask[i] = 1;
+  }
+  _isoMaskSrc = isolationSet;
+  _isoMask = mask;
   return mask;
 }
 
@@ -284,7 +403,11 @@ function refreshSatellites(force) {
   if ((simClock.isPaused() && !force) || !tabVisible) return;
   workerBusy = true;
   const msg = { type: "compute", timeMs: simClock.getTimeMs() };
-  if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "all") {
+  if (typeof isolationSet !== "undefined" && isolationSet !== null) {
+    // Focus isolation: propagate ONLY the involved satellites (~2–10) —
+    // takes precedence over the All-view participant mask.
+    msg.mask = isolationMask();
+  } else if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "all") {
     msg.mask = participantMask();
   }
   propWorker.postMessage(msg);
