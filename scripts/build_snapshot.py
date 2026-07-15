@@ -77,12 +77,25 @@ def main() -> None:
     ap.add_argument("--step-sec", type=float, default=30.0, help="screening grid step")
     ap.add_argument("--max-sats", type=int, default=0,
                     help="cap the catalog (0 = all) — for a fast local run")
+    ap.add_argument("--min-objects", type=int, default=0,
+                    help="abort (exit 1) if the fetched catalog has fewer than "
+                         "this many objects, BEFORE --max-sats — so a truncated "
+                         "or rate-limited fetch never publishes a near-empty "
+                         "snapshot (0 = off; CI passes a floor for --group active)")
     ap.add_argument("--out", default=os.path.join(_ROOT, "frontend", "snapshot.json"),
                     help="output path for snapshot.json")
     args = ap.parse_args()
 
     fetcher = GPFetcher()
     df = fetcher.fetch(args.group)
+    # Sanity floor: a valid-but-truncated fetch (rate-limited / partial upstream
+    # response) is non-empty JSON, so the empty-check alone won't catch it. Refuse
+    # to publish a snapshot of a fraction of the real catalog.
+    if args.min_objects and len(df) < args.min_objects:
+        print(f"ERROR: fetched {len(df)} objects for group '{args.group}', "
+              f"below the --min-objects floor of {args.min_objects} — refusing to "
+              f"build a snapshot from a truncated catalog.", file=sys.stderr)
+        sys.exit(1)
     if args.max_sats and len(df) > args.max_sats:
         df = df.head(args.max_sats).reset_index(drop=True)
 

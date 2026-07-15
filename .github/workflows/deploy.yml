@@ -181,23 +181,31 @@ jobs:
       # cascade as the reference (~40 min on the 4-vCPU runner — measured
       # 2026-07-15: Tier 1 ~8 min + Tier 2 ~31 min), which tripled the robot
       # job for a check that only guards CODE changes, not data refreshes. The
-      # engine's identity is already proven offline (581 tests incl. mutation-
+      # engine's identity is already proven offline (583 tests incl. mutation-
       # checked flip locks), across 4 catalogs (10.3), and in CI on live data
-      # (this gate, 2026-07-15: 308==308, 3,887==3,887). Cron runs refresh data
-      # with the validated engine (~10 min); the FULL gate still runs on every
-      # manual dispatch (rebuild_snapshot=true) and any push-triggered rebuild
-      # fallback — i.e., whenever a human changes something.
+      # (this gate, 2026-07-15: 308==308, 3,887==3,887).
+      #
+      # Engine/backend CODE changes are gated at PUSH time by a dedicated
+      # workflow, .github/workflows/ci.yml (pytest + this same two-tier A/B gate
+      # on live data), because deploy.yml's `push` trigger only fires on
+      # frontend/** and a push here REUSES the live snapshot (no rebuild → this
+      # step never runs). So by the time the cron rebuilds with new engine code,
+      # ci.yml has already proven it byte-identical — which is what makes the
+      # cron's gate-skip safe. This step still runs the FULL gate on every manual
+      # dispatch (rebuild_snapshot=true) and any first-deploy rebuild fallback,
+      # as a belt-and-suspenders check right before a real deploy.
       - name: A/B gate — accelerated screen == classic (byte-identical events)
         if: steps.decide.outputs.rebuild == 'true' && github.event_name != 'schedule'
         run: |
           set -e
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
           python scripts/ab_screen.py --source active --mode sfs \
-            --baseline classic --refine --max-sats 5000 --hours 24 --step 30
+            --baseline classic --refine --max-sats 5000 --hours 24 --step 30 \
+            --min-objects 8000
           echo "::endgroup::"
           echo "::group::Tier 2 — fused+refine vs fused+sieve+refine (full catalog, 6 h)"
           python scripts/ab_screen.py --source active --mode sfs \
-            --baseline fused --refine --hours 6 --step 30
+            --baseline fused --refine --hours 6 --step 30 --min-objects 8000
           echo "::endgroup::"
 
       # Fetch (cache hit from the step above) + run the real SFS screen + write
@@ -210,9 +218,13 @@ jobs:
       # the shared 4-vCPU runner, still well within the job budget. Display ==
       # screen (both the whole catalog), so "fully screened" stays honest.
       # --hours 24: a standard conjunction horizon; 72 h is ~3× the compute.
+      # --min-objects 8000: refuse to publish if the fetch came back truncated
+      # (a valid-but-partial upstream response is non-empty, so this floor — not
+      # the empty-check — is what catches it). This is the last guard on the cron
+      # path, which skips the A/B gate above. The real active catalog is ~16k.
       - name: Build snapshot.json (fetch active + screen offline)
         if: steps.decide.outputs.rebuild == 'true'
-        run: python scripts/build_snapshot.py --group active --hours 24
+        run: python scripts/build_snapshot.py --group active --hours 24 --min-objects 8000
 
       # Archive the fresh snapshot to the `data` branch as
       # snapshots/<ISO-ts>.json.gz (append-only). The `data` branch is an ORPHAN

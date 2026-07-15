@@ -58,10 +58,18 @@ from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E4
 from backend.core.tle_fetcher import GPFetcher                      # noqa: E402
 
 
-def _load(source: str, n: int | None, mode: str):
+def _load(source: str, n: int | None, mode: str, min_objects: int = 0):
     """Load the cached catalog exactly the way build_snapshot.py screens it:
     HEAD-slice to n, then (SFS mode) keep only handbook-screenable orbits."""
     df = GPFetcher().load_cached(source)
+    # Sanity floor on the RAW catalog (before the head-slice, so --max-sats can't
+    # defeat it): a truncated/rate-limited fetch would let both A and B screen the
+    # same tiny catalog, agree trivially, and PASS the gate on garbage. Refuse.
+    if min_objects and len(df) < min_objects:
+        print(f"\nERROR: catalog '{source}' has {len(df)} objects, below the "
+              f"--min-objects floor of {min_objects} — the A/B gate would pass "
+              f"trivially on a truncated catalog. Aborting.", file=sys.stderr)
+        sys.exit(1)
     if n and len(df) > n:
         df = df.head(n).reset_index(drop=True)
     if mode == "sfs":
@@ -107,12 +115,16 @@ def main() -> None:
     ap.add_argument("--refine", action="store_true",
                     help="candidate adds the Phase-10.4 C++ fine pre-cut "
                          "(fused+sieve+refine — the full Stage-1+2 flip)")
+    ap.add_argument("--min-objects", type=int, default=0,
+                    help="abort (exit 1) if the raw catalog has fewer than this "
+                         "many objects — so a truncated fetch can't PASS the gate "
+                         "trivially (0 = off; CI passes a floor for --source active)")
     args = ap.parse_args()
 
     start = (datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
              if args.start else datetime.now(timezone.utc).replace(microsecond=0))
 
-    satrecs, meta = _load(args.source, args.max_sats, args.mode)
+    satrecs, meta = _load(args.source, args.max_sats, args.mode, args.min_objects)
     cut = "SFS ellipsoids" if args.mode == "sfs" else f"{args.threshold} km"
     cand = "fused+sieve+refine" if args.refine else "fused+sieve"
     print(f"\nStage-1 A/B -- source={args.source} n={len(satrecs)} "

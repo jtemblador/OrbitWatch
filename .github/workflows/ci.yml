@@ -1,0 +1,116 @@
+# CI gate for the screening engine — guards CODE, independent of the deploy job.
+#
+# Why this exists (the hole it closes):
+#   deploy.yml's `push` trigger only fires on frontend/** + the workflow file, and
+#   even a push that DID trigger it just REUSES the live snapshot (no rebuild → the
+#   A/B gate never runs). So a change to orbitcore/** or backend/** used to reach
+#   `main` ungated, and the next 3×/day cron rebuild — which SKIPS the gate — would
+#   ship it. This workflow gates engine/backend/script changes at push time, so the
+#   deploy cron's "the engine is already validated" assumption is actually enforced.
+#
+# What it does NOT do: deploy. It has no pages/write permissions and touches no
+# secrets — it only proves the accelerated screen still equals the classic one and
+# the test suite is green. deploy.yml stays frontend-triggered for fast UI redeploys.
+#
+# Note: this is an alert + (with branch protection) a merge block. On a solo repo
+# that pushes straight to main without required checks, a red run does not physically
+# stop the next cron from deploying the offending commit — so treat a red CI run as
+# "revert or fix before the next scheduled rebuild." Enabling branch protection that
+# requires this workflow (via a PR flow) turns it into a hard block.
+
+name: CI — screening engine gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "orbitcore/**"
+      - "backend/**"
+      - "scripts/ab_screen.py"
+      - "scripts/build_snapshot.py"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "orbitcore/**"
+      - "backend/**"
+      - "scripts/ab_screen.py"
+      - "scripts/build_snapshot.py"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+  # Allow a manual run for spot-checks.
+  workflow_dispatch:
+
+# Read-only: this job builds and screens, it never writes to the repo or deploys.
+permissions:
+  contents: read
+
+# One CI run per ref; a newer push supersedes an in-flight one (unlike the deploy
+# `pages` group, cancelling a stale CI run is fine — it wasn't going to ship anything).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75   # full A/B gate is ~40 min on the 4-vCPU runner; headroom for the fetch/build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies (+ pybind11 for the C++ build)
+        run: pip install -r requirements.txt pybind11
+
+      # Build the pybind11 SGP4 module and drop the .so where the screen imports
+      # it (backend/) — mirrors deploy.yml's build so CI and prod build identically.
+      - name: Build the C++ SGP4 extension
+        run: |
+          cd orbitcore
+          mkdir -p build && cd build
+          cmake -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" ..
+          make -j"$(nproc)"
+          cp orbitcore*.so ../../backend/
+
+      # Fast fail: the offline, deterministic suite (incl. the mutation-checked
+      # TestFlipContract locks) runs in well under a minute. Catches most engine
+      # regressions before we pay for the live-data A/B gate below.
+      - name: Run the test suite
+        run: python -m pytest tests/ -q
+
+      # Populate the active-catalog cache ONCE so both A/B tiers screen identical
+      # elements (ab_screen reuses this <2 h cache instead of re-fetching).
+      - name: Fetch active catalog
+        run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('active'); print(f'fetched {len(d)} active objects')"
+
+      # The byte-identical proof on the REAL catalog — the same two-tier gate
+      # deploy.yml runs, moved here so it fires on engine/backend code changes
+      # (which deploy.yml's push path never does). ab_screen.py exits 0 iff the
+      # event lists match; `set -e` fails the step → the run goes red.
+      #   • Tier 1 — the COMPLETE contract (classic == fused+sieve+refine) at a
+      #     bounded scale where the classic path fits in memory (~8 min).
+      #   • Tier 2 — the FULL-catalog sieve check where classic can't run
+      #     (multi-GB): fused+refine (sieve OFF) vs fused+sieve+refine isolates
+      #     the sieve's event-level no-skip on the real full catalog — the one
+      #     thing offline tests can't construct. Both keep the C++ fine pre-cut,
+      #     so both stay memory-safe. 6 h window: no-skip risk is node-crossing
+      #     GEOMETRY (window-length-independent), so 6 h exercises every pair's
+      #     node line while keeping the sieve-OFF medium scan (~31 min) affordable.
+      - name: A/B gate — accelerated screen == classic (byte-identical events)
+        run: |
+          set -e
+          echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
+          python scripts/ab_screen.py --source active --mode sfs \
+            --baseline classic --refine --max-sats 5000 --hours 24 --step 30 \
+            --min-objects 8000
+          echo "::endgroup::"
+          echo "::group::Tier 2 — fused+refine vs fused+sieve+refine (full catalog, 6 h)"
+          python scripts/ab_screen.py --source active --mode sfs \
+            --baseline fused --refine --hours 6 --step 30 --min-objects 8000
+          echo "::endgroup::"

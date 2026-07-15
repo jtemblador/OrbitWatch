@@ -304,7 +304,10 @@ async def refresh_data(request: Request):
         old_fetch_time = None
 
     try:
-        new_df = fetcher.fetch(group)
+        # Fetch off the event loop: fetcher.fetch() is a blocking HTTP GET (up to
+        # a 30 s timeout, plus a curl fallback), and running it inline in this
+        # async handler would freeze every other request until it returns.
+        new_df = await run_in_threadpool(fetcher.fetch, group)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Refresh failed: {e}")
 
@@ -314,7 +317,12 @@ async def refresh_data(request: Request):
         status = "rate_limited"
     else:
         status = "fetched"
-        propagator.reload_data()
+        # reload_data() nulls the Satrec cache + name/norad indexes that the
+        # position/track/conjunction handlers read under _propagator_lock. Take
+        # the same lock here, or a request mid-flight can deref a half-cleared
+        # index (self._name_index.get(...) on None → AttributeError → 500).
+        async with _propagator_lock:
+            propagator.reload_data()
 
     return {
         "status": status,
