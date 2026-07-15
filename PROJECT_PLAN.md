@@ -1,11 +1,12 @@
 # OrbitWatch — Satellite Orbit Tracker + Conjunction Screener
-**Status:** Final sprint — Phase 9 (deploy as a static website)
-**Timeline:** Mar 20 – Jul 10, 2026
+**Status:** COMPLETE and LIVE (Phase 10 done, Jul 15 2026). Screens the full ~16k active catalog, gated byte-identical in CI. https://jtemblador.github.io/OrbitWatch/
+**Timeline:** Mar 20 – Jul 15, 2026
 
 > **Note:** this is the original planning doc, updated to reflect the finalized shape.
 > The project is a **geometric conjunction screener validated against CelesTrak SOCRATES**,
 > not an ML collision predictor — the ML risk classifier, Orekit, and Docker were dropped
-> (see *Decisions Made*). `CLAUDE.md` → Key Files is the living file map.
+> (see *Decisions Made*). For the current state see `README.md`; `CLAUDE.md` → Key Files
+> is the living file map, and `progress/roadmap.md` is the phase-by-phase log.
 
 ---
 
