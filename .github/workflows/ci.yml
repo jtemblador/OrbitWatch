@@ -97,9 +97,18 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 2 -O "$base/pck/earth_latest_high_prec.bpc"
           ls -la
 
-      # Fast fail: the offline, deterministic suite (incl. the mutation-checked
-      # TestFlipContract locks) runs in well under a minute. Catches most engine
-      # regressions before we pay for the live-data A/B gate below.
+      # The suite's default dataset is the cached `stations` group (ISS-based,
+      # ~30 objects). Like the SPICE kernels it lives under the gitignored
+      # backend/data/, so the API/propagator tests error with "No cached data for
+      # group 'stations'" until it's populated. Fetch it once (the same CelesTrak
+      # path the A/B gate uses for `active`); census asserts were made
+      # catalog-relative in 9.9, so a live count is fine.
+      - name: Provision the stations test catalog
+        run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('stations'); print(f'cached {len(d)} stations objects')"
+
+      # Fast fail: the suite (incl. the mutation-checked TestFlipContract locks)
+      # runs in well under a minute. Catches most engine regressions before we pay
+      # for the live-data A/B gate below.
       - name: Run the test suite
         run: python -m pytest tests/ -q
 
