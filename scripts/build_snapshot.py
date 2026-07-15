@@ -41,16 +41,26 @@ from backend.core.tle_fetcher import GPFetcher                   # noqa: E402
 _GZ_BUDGET_BYTES = 5_000_000  # ~5 MB gzipped target (see roadmap 9.2)
 
 
+# Phase 10.6: production runs the full accelerated engine — fused C++ coarse+
+# medium (10.1a), the time sieve (10.2), and the C++ fine stage (10.4). All
+# three are proven EVENT-byte-identical to the classic cascade (10.3 on live
+# catalogs; 10.5 mutation-checked offline) and gated again on every CI rebuild
+# by scripts/ab_screen.py, so the reported conjunctions are unchanged — this is
+# a speed/memory lever only (it's what makes screening the full ~16k catalog fit
+# the CI runner). Flip off ONLY to reproduce the pre-10 baseline for debugging.
+_ACCEL = dict(fused=True, sieve=True, refine=True)
+
+
 def _screen(satrecs, meta, start, args, timings):
     """SFS ellipsoid path (default) or legacy Euclidean, mirroring the app."""
     if args.mode == "sfs":
         volumes = [regime_for(m["periapsis_km"], m["eccentricity"], m["period_min"])
                    for m in meta]
         events = run_screen(satrecs, meta, start, args.hours, volumes=volumes,
-                            step_sec=args.step_sec, timings=timings)
+                            step_sec=args.step_sec, timings=timings, **_ACCEL)
         return events, {"window_hours": args.hours, "mode": "SFS", "step_sec": args.step_sec}
     events = run_screen(satrecs, meta, start, args.hours, threshold_km=args.threshold,
-                        step_sec=args.step_sec, timings=timings)
+                        step_sec=args.step_sec, timings=timings, **_ACCEL)
     return events, {"window_hours": args.hours, "mode": "Euclidean",
                     "threshold_km": args.threshold, "step_sec": args.step_sec}
 

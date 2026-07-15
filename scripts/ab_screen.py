@@ -15,20 +15,25 @@ CI job can gate on it.
     python scripts/ab_screen.py --source active --mode sfs --max-sats 5000 \
         --hours 24 --step 30
 
-    # Full catalogs: use --baseline fused. The classic path materializes the
-    # coarse survivor pairs as Python tuples (~5.4 GB at 16k sats) — the very
-    # thing 10.1a removed — so classic-vs-sieve at full scale measures memory
-    # pressure, not the sieve. fused-vs-sieve isolates the 10.2 lever, and
-    # fused==classic is already locked by tests + the 10.1a A/B.
-    python scripts/ab_screen.py --source active --mode sfs --hours 6 \
-        --step 30 --baseline fused
+    # Full catalog: use --baseline fused --refine. At 16k sats the classic path
+    # can't run (it re-materializes the ~5 GB Python pair list 10.1a removed AND
+    # the ~13 GB fine dicts #7), so classic-vs-flip measures memory pressure,
+    # not correctness. --baseline fused --refine compares fused+refine (sieve
+    # OFF) vs fused+sieve+refine: both keep the C++ fine pre-cut, so both stay
+    # memory-safe, and the diff isolates exactly the sieve's event-level no-skip
+    # on the full real catalog. (fused==classic is locked by tests + 10.1a.)
+    python scripts/ab_screen.py --source active --mode sfs --hours 24 \
+        --step 30 --baseline fused --refine
 
-Baselines:
-    classic  run_screen(fused=False)             (production today)
-    fused    run_screen(fused=True, sieve=False) (10.1a, proven == classic)
-Candidate is fused=True, sieve=True — plus refine=True (the Phase-10.4 C++
-fine pre-cut) when --refine is given. --baseline classic --refine is the full
-production flip 10.6 gates on.
+Baselines (A run):
+    classic  run_screen(fused=False)                  (production today; <=5k)
+    fused    run_screen(fused=True, sieve=False)       (10.1a, proven==classic)
+             + refine=True when --refine (keeps A memory-safe at full scale;
+             refine is event-null, so A is still a valid sieve-OFF reference)
+Candidate (B) is fused=True, sieve=True, plus refine=True when --refine (the
+Phase-10.4 C++ fine pre-cut). --baseline classic --refine is the complete
+production flip at a bounded scale; --baseline fused --refine is the full-scale
+sieve check. Both gate 10.6.
 
 --start defaults to now (UTC): a freshly fetched catalog should be screened
 near its epochs. Pass an explicit ISO timestamp to reproduce a prior run.
@@ -115,11 +120,20 @@ def main() -> None:
           f"step={args.step} s start={start.isoformat()}\n"
           f"baseline={args.baseline}  candidate={cand}", flush=True)
 
+    # The fused baseline honors --refine too, so the full-catalog A/B stays
+    # memory-safe: with sieve OFF the medium scan flags ~17M windows, and only
+    # the C++ fine pre-cut (refine) keeps them from materializing as ~13 GB of
+    # Python dicts (the scaling_tracker #7 wall). refine is event-null by
+    # construction, so A is still a valid sieve-OFF reference — the A/B isolates
+    # exactly the sieve. (classic can't refine — refine requires fused.)
+    fused_base = args.baseline == "fused"
+    base_refine = args.refine and fused_base
+    a_label = "fused+refine" if base_refine else args.baseline
     t0 = time.perf_counter()
     ev_a, tm_a = _screen(satrecs, meta, args, start,
-                         fused=(args.baseline == "fused"), sieve=False)
+                         fused=fused_base, sieve=False, refine=base_refine)
     t_a = time.perf_counter() - t0
-    print(f"  A ({args.baseline}):     {len(ev_a):>7,} events  "
+    print(f"  A ({a_label}):     {len(ev_a):>7,} events  "
           f"medium {tm_a['t_medium']:>7.1f} s  fine {tm_a['t_fine']:>6.1f} s  "
           f"windows {tm_a['n_windows']:>9,}  total {t_a:>6.1f} s", flush=True)
 
