@@ -1432,7 +1432,7 @@ namespace SGP4Funcs
 		satrec.operationmode = opsmode;
 		// new alpha5 or 9-digit number
 		#ifdef _MSC_VER
-						   strcpy_s(satrec.satnum, 6 * sizeof(char), satn);
+						   strcpy_s(satrec.satnum, sizeof(satrec.satnum), satn);
 		#else
 						   strcpy(satrec.satnum, satn);
 		#endif
@@ -2681,7 +2681,7 @@ namespace SGP4Funcs
 	*
 	*  this function solves keplers equation when the true anomaly is known.
 	*    the mean and eccentric, parabolic, or hyperbolic anomaly is also found.
-	*    the parabolic limit at 168ø is arbitrary. the hyperbolic anomaly is also
+	*    the parabolic limit at 168ï¿½ is arbitrary. the hyperbolic anomaly is also
 	*    limited. the hyperbolic sine is used because it's not double valued.
 	*
 	*  author        : david vallado                  719-573-2600   27 may 2002
@@ -2694,8 +2694,8 @@ namespace SGP4Funcs
 	*    nu          - true anomaly                   -2pi to 2pi rad
 	*
 	*  outputs       :
-	*    e0          - eccentric anomaly              0.0  to 2pi rad       153.02 ø
-	*    m           - mean anomaly                   0.0  to 2pi rad       151.7425 ø
+	*    e0          - eccentric anomaly              0.0  to 2pi rad       153.02 ï¿½
+	*    m           - mean anomaly                   0.0  to 2pi rad       151.7425 ï¿½
 	*
 	*  locals        :
 	*    e1          - eccentric anomaly, next value  rad

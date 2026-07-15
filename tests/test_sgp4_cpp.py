@@ -157,6 +157,31 @@ class TestSatrec:
         s.satnum = "25544"
         assert s.satnum == "25544"
 
+    def test_satnum_six_and_nine_digit(self):
+        """Catalog ids past the 5-digit cap must round-trip intact, not
+        overflow the (formerly char[6]) satnum field. Regression for the
+        buffer-overflow found in review: satnum is widened to char[10]."""
+        s = orbitcore.Satrec()
+        s.satnum = "270000"  # 6-digit — the imminent post-cap case
+        assert s.satnum == "270000"
+        s.satnum = "123456789"  # full 9-digit — Vallado's stated intent
+        assert s.satnum == "123456789"
+
+    def test_satnum_six_digit_via_sgp4init(self):
+        """A 6-digit id fed through sgp4init (the real screening path) must
+        survive the internal strcpy into satrec.satnum without corruption."""
+        satrec, _ = _init_from_tle(**ISS_TLE)
+        # Re-init with the ISS elements but a 6-digit catalog number.
+        s = orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "i", "270000",
+            satrec.jdsatepoch + satrec.jdsatepochF - 2433281.5,
+            satrec.bstar, satrec.ndot, satrec.nddot, satrec.ecco,
+            satrec.argpo, satrec.inclo, satrec.mo, satrec.no_kozai,
+            satrec.nodeo,
+        )
+        assert s.satnum == "270000"
+        assert s.error == 0
+
     def test_orbital_elements_after_init(self):
         satrec, _ = _init_from_tle(**ISS_TLE)
         assert satrec.error == 0

@@ -67,7 +67,9 @@ typedef enum
 
 typedef struct elsetrec
 {
-  char      satnum[6];
+  char      satnum[10];  // up to a 9-digit / alpha-5 id + NUL (see line 15 note);
+                         // was [6] upstream, too small for post-5-digit catalog ids
+                         // — sgp4init strcpy'd into it unbounded and overflowed.
   int       epochyr, epochtynumrev;
   int       error;
   char      operationmode;

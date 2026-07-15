@@ -38,8 +38,9 @@ void bind_satrec(py::module_& m) {
         .def_property("satnum",
             [](const elsetrec& s) { return std::string(s.satnum); },
             [](elsetrec& s, const std::string& val) {
-                strncpy(s.satnum, val.c_str(), 5);
-                s.satnum[5] = '\0';
+                // Bound to the field width (9 digits + NUL) — never overflow.
+                strncpy(s.satnum, val.c_str(), sizeof(s.satnum) - 1);
+                s.satnum[sizeof(s.satnum) - 1] = '\0';
             })
         .def_readwrite("classification", &elsetrec::classification)
         .def_readwrite("ephtype", &elsetrec::ephtype)
@@ -107,10 +108,12 @@ void bind_satrec(py::module_& m) {
             elsetrec satrec;
             memset(&satrec, 0, sizeof(elsetrec));
 
-            // satnum needs to be a char array
-            char satn[9];
-            strncpy(satn, satnum.c_str(), 8);
-            satn[8] = '\0';
+            // satnum needs to be a char array. Bound the copy to the elsetrec
+            // field width so the strcpy sgp4init does into satrec.satnum (a
+            // char[10] = 9 digits + NUL) can never overflow, whatever comes in.
+            char satn[sizeof(satrec.satnum)];
+            strncpy(satn, satnum.c_str(), sizeof(satn) - 1);
+            satn[sizeof(satn) - 1] = '\0';
 
             bool ok = SGP4Funcs::sgp4init(
                 whichconst, opsmode, satn, epoch,
