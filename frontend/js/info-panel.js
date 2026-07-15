@@ -155,7 +155,17 @@ function refreshPanelData(noradId) {
     // Client-side single-sat propagation (snapshot-data.js) — float64, so the
     // readout is exact even though the dots render from float32 batches.
     const pos = computePositionGd(noradId, simClock.getTimeMs());
-    if (!pos) return; // propagation failed at this time (decayed elements)
+    const tbody = document.querySelector("#info-panel-table tbody");
+    if (!pos) {
+      // Propagation failed at this time (decayed elements, or the clock ran far
+      // enough that they diverge). The title was already set to this satellite,
+      // so DON'T leave the previously-selected sat's numbers under it — show a
+      // clear no-data state instead of stale, misleading readings.
+      tbody.innerHTML =
+        `<tr><td class="info-label">NORAD ID</td><td class="info-value">${noradId}</td></tr>` +
+        `<tr><td class="info-label">Position</td><td class="info-value">no data at this time</td></tr>`;
+      return;
+    }
 
     const meta = satelliteMetadata.get(noradId);
 
@@ -178,7 +188,6 @@ function refreshPanelData(noradId) {
       );
     }
 
-    const tbody = document.querySelector("#info-panel-table tbody");
     tbody.innerHTML = rows
       .map(([label, value]) => `<tr><td class="info-label">${label}</td><td class="info-value">${value}</td></tr>`)
       .join("");
