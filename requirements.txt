@@ -1,9 +1,13 @@
 fastapi
 uvicorn
-scipy
-pandas
-pyarrow
-numpy
+# Numeric stack pinned: the CI A/B gate proves the accelerated screen is
+# byte-identical to the classic one, which rests on stable floating-point
+# behavior. Pinning these makes a green gate reproducible and stops an upstream
+# release from silently shifting results between one validated run and the next.
+numpy==2.4.4
+scipy==1.16.3
+pandas==2.3.3
+pyarrow==21.0.0
 matplotlib
 requests
 spiceypy

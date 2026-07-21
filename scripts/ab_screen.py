@@ -73,9 +73,20 @@ def _load(source: str, n: int | None, mode: str, min_objects: int = 0):
     if n and len(df) > n:
         df = df.head(n).reset_index(drop=True)
     if mode == "sfs":
+        pre = len(df)
         keep = [is_screenable(p, e, pr) for p, e, pr in
                 zip(df["periapsis"], df["eccentricity"], df["period"])]
         df = df[keep].reset_index(drop=True)
+        # Screened-subset floor (same rationale as the raw floor above): an
+        # is_screenable/regime regression that rejects almost everything would
+        # leave both A and B screening the same near-empty set, agree trivially
+        # (0 == 0), and PASS the gate. Refuse if under 25% survive the filter.
+        if min_objects and len(df) < 0.25 * pre:
+            print(f"\nERROR: only {len(df)} of {pre} objects are screenable "
+                  f"(< 25%) — is_screenable/regime likely regressed; the A/B gate "
+                  f"would pass trivially on a near-empty screen. Aborting.",
+                  file=sys.stderr)
+            sys.exit(1)
     return build_satrecs_and_meta(df)
 
 

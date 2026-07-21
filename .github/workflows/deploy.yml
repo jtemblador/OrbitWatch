@@ -84,7 +84,11 @@ jobs:
       pages: write
       id-token: write
     steps:
+      # fetch-depth 50: enough history for the "recent engine change" check below
+      # (the git log --since needs commits, not just the shallow tip).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
 
       # Decide reuse vs rebuild. Reuse = download the live snapshot into
       # frontend/. If that fetch fails (e.g. the very first deploy, before any
@@ -194,8 +198,29 @@ jobs:
       # cron's gate-skip safe. This step still runs the FULL gate on every manual
       # dispatch (rebuild_snapshot=true) and any first-deploy rebuild fallback,
       # as a belt-and-suspenders check right before a real deploy.
+      # Decide whether a SCHEDULED rebuild must still run the gate. Normally cron
+      # skips it (ci.yml already gated any push). But a push touching engine code
+      # landing shortly before a cron slot could deploy before ci.yml finishes
+      # validating that same commit. So: if any engine/backend/screening file
+      # changed in the last ~10 h (> the 8 h cron interval), do NOT skip — gate
+      # here too. Manual/push runs always gate regardless.
+      - name: Detect recent engine-code changes
+        id: codecheck
+        if: steps.decide.outputs.rebuild == 'true'
+        run: |
+          CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \
+            orbitcore/ backend/ scripts/ab_screen.py scripts/build_snapshot.py \
+            requirements.txt 2>/dev/null | grep -v '^$' | head -1 || true)
+          if [ -n "$CHANGED" ]; then
+            echo "engine_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Recent engine-code change detected — the A/B gate will run even on a scheduled rebuild."
+          else
+            echo "engine_changed=false" >> "$GITHUB_OUTPUT"
+            echo "No recent engine-code change."
+          fi
+
       - name: A/B gate — accelerated screen == classic (byte-identical events)
-        if: steps.decide.outputs.rebuild == 'true' && github.event_name != 'schedule'
+        if: steps.decide.outputs.rebuild == 'true' && (github.event_name != 'schedule' || steps.codecheck.outputs.engine_changed == 'true')
         run: |
           set -e
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"

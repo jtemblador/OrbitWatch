@@ -109,6 +109,17 @@ def main() -> None:
         screen_df = df[keep].reset_index(drop=True)
     else:
         screen_df = df
+    # Screened-subset floor: the raw --min-objects floor above can't catch an
+    # is_screenable/regime regression that rejects almost everything — the fetch
+    # is fine, but the SCREENED set collapses to ~0, so we'd publish a snapshot
+    # that displays ~16k sats yet stopped finding conjunctions. Active is ~99%
+    # screenable (nearly all of it is LEO + the GEO band); refuse if under 25%,
+    # a floor with enormous margin that only trips on a real regression.
+    if args.min_objects and args.mode == "sfs" and len(screen_df) < 0.25 * len(df):
+        print(f"ERROR: only {len(screen_df)} of {len(df)} objects are screenable "
+              f"(< 25%) — is_screenable/regime likely regressed; refusing to "
+              f"publish a snapshot that screens almost nothing.", file=sys.stderr)
+        sys.exit(1)
     n_skipped = len(df) - len(screen_df)
     print(f"catalog: {len(df)} objects (group={args.group}) — "
           f"screening {len(screen_df)}"
