@@ -229,6 +229,10 @@ function setConjOnly(scope) {
   // one batch even while PAUSED — masked-out sats carry ok=false, so without it
   // a group re-enabled while paused would stay invisible until unpause.
   if (typeof refreshSatellites === "function") refreshSatellites(true);
+  // The mode changed → refresh the POV badge (e.g. leaving conjunction-only view
+  // must stop it reading "All Conjunctions"). clearConjunctionVisuals above ran
+  // updatePovIndicator with the OLD conjOnlyActive, so re-run it now.
+  if (typeof updatePovIndicator === "function") updatePovIndicator();
 }
 
 initControls();

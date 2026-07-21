@@ -123,6 +123,13 @@ function flyToSat(id) {
 }
 
 function selectResult(id) {
+  // Clear any active conjunction focus/isolation FIRST. A focus can leave an
+  // isolationSet active while conjOnlyActive is null (e.g. group filter on →
+  // click a conjunction dot); without this, the isolation mask would keep the
+  // searched satellite hidden and only its stray trail/nadir would show.
+  // (selectSatellite → showConjunctionsFor re-establishes the correct isolation
+  // for the new selection.)
+  if (typeof clearConjunctionFocus === "function") clearConjunctionFocus();
   // Make sure it's actually visible: leave the conjunction-only view if on, and
   // un-hide the sat's group.
   if (typeof conjOnlyActive !== "undefined" && conjOnlyActive &&
@@ -130,8 +137,9 @@ function selectResult(id) {
     setConjOnly(conjOnlyActive); // turns it off
   }
   if (typeof revealGroups === "function") revealGroups([id]);
+  // selectSatellite frames the whole orbit (info-panel.js flyToOrbit); don't
+  // also flyToSat, which would override it with a close-in view.
   if (typeof selectSatellite === "function") selectSatellite(id);
-  flyToSat(id);
   input.value = getSatName(id);
   input.blur();
   closeResults();

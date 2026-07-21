@@ -107,6 +107,7 @@ function selectSatellite(noradId) {
   document.getElementById("trail-checkbox").checked = true;
   createNadirLine(noradId);
   computeAndRenderTrail(noradId);
+  flyToOrbit(noradId); // frame the whole orbit (esp. HEO/high orbits)
 
   // Show this satellite's conjunctions (conjunctions.js, if loaded)
   if (typeof showConjunctionsFor === "function") showConjunctionsFor(noradId);
@@ -115,6 +116,10 @@ function selectSatellite(noradId) {
   // re-sync the pair highlight around the selection change.
   if (typeof syncConjTrailVisibility === "function") syncConjTrailVisibility();
   if (typeof syncPairHighlight === "function") syncPairHighlight();
+  // Reflect the selection in the POV badge — covers the case showConjunctionsFor
+  // early-returns on (a satellite with no conjunctions), which would otherwise
+  // leave the badge stuck on "All Conjunctions".
+  if (typeof updatePovIndicator === "function") updatePovIndicator();
 
   viewer.scene.requestRender(); // show the selection now even if paused (requestRenderMode)
 }
@@ -334,6 +339,21 @@ function renderTrailFromCache() {
 
   buildTrailPrimitives(ecef);
   lastTrailRotation = performance.now();
+}
+
+// Frame the WHOLE orbit on selection. A HEO/high orbit (apoapsis tens of
+// thousands of km) sweeps far past a globe-filling view, so without this you only
+// see the near-Earth arc. A sphere centered at Earth's center with radius =
+// apoapsis contains the entire orbit (apoapsis is its farthest point), so flying
+// to it always frames the full loop — tight for LEO, zoomed way out for HEO.
+const _EARTH_RADIUS_M = 6371000;
+function flyToOrbit(noradId) {
+  const meta = satelliteMetadata.get(noradId);
+  if (!meta || !isFinite(meta.apoapsis_km)) return;
+  const radius = (meta.apoapsis_km * 1000 + _EARTH_RADIUS_M) * 1.15;
+  viewer.camera.flyToBoundingSphere(
+    new Cesium.BoundingSphere(Cesium.Cartesian3.ZERO, radius),
+    { duration: 1.2 });
 }
 
 function computeAndRenderTrail(noradId) {

@@ -86,20 +86,35 @@ document.body.appendChild(povEl);
 function updatePovIndicator() {
   const selName = (typeof selectedNoradId !== "undefined" && selectedNoradId !== null)
     ? getSatName(selectedNoradId) : null;
+  // The top of the stack depends on the mode: "All Conjunctions" only when the
+  // conjunction-only view is actually on; in plain browse mode it's satellites.
+  const conjMode = !!(typeof conjOnlyActive !== "undefined" && conjOnlyActive);
+  const top = conjMode ? "All Conjunctions" : "All Satellites";
+  let html = "";
+
   if (tcaZoomed && focusedPair) {
-    const up = selName ? "Conjunction View" : "All Conjunctions";
-    povEl.innerHTML =
+    const up = selName ? "Conjunction View" : top;
+    html =
       `<span class="pov-level">TCA View</span>` +
       `<span class="pov-ctx">${getSatName(focusedPair[0])} × ${getSatName(focusedPair[1])}</span>` +
       `<span class="pov-esc">Esc → ${up}</span>`;
   } else if (selName) {
-    povEl.innerHTML =
-      `<span class="pov-level">Conjunction View</span>` +
+    // A satellite is selected — name it. If its conjunction partners are also
+    // isolated on screen it's a "Conjunction View"; otherwise just the satellite
+    // and its orbit. Either way the badge shows the satellite, not "All …".
+    const hasPartners = (typeof isolationSet !== "undefined"
+      && isolationSet !== null && isolationSet.size > 1);
+    html =
+      `<span class="pov-level">${hasPartners ? "Conjunction View" : "Satellite"}</span>` +
       `<span class="pov-ctx">${selName}</span>` +
-      `<span class="pov-esc">Esc → All Conjunctions</span>`;
-  } else {
-    povEl.innerHTML = `<span class="pov-level">All Conjunctions</span>`;
+      `<span class="pov-esc">Esc → ${top}</span>`;
+  } else if (conjMode) {
+    html = `<span class="pov-level">All Conjunctions</span>`;
   }
+  // else: browse mode with nothing selected → no badge (don't claim a view).
+
+  povEl.innerHTML = html;
+  povEl.style.display = html ? "" : "none";
 }
 
 function isolateSats(ids) {
@@ -476,22 +491,33 @@ function drawConjunctionGeometry(e) {
  * out. doJump=false is a "soft focus" used elsewhere (see softFocusConjunction).
  */
 function focusConjunction(e, doJump = true) {
+  // Draw the geometry FIRST. If propagation fails for the pair at TCA (stale/
+  // decayed elements — drawConjunctionGeometry returns null and logs), bail
+  // WITHOUT committing focus/reveal/isolation state, so we never leave the globe
+  // isolated to two invisible sats with no orb or trails (an unexplained blank).
+  const cart = drawConjunctionGeometry(e);
+  if (!cart) return;
+
   focusedKey = eventKey(e);
   focusedPair = [e.sat1_norad_id, e.sat2_norad_id];
-  // Reveal ONLY the two participants (not their whole groups), exclusively — so
-  // switching conjunctions re-hides the previous pair. Already-visible ones are
-  // unaffected.
-  if (typeof revealSatsExclusive === "function") revealSatsExclusive(focusedPair);
-  // Isolation: the focused pair (plus any open selection — hiding the selected
-  // sat would trigger the filter teardown and tear this focus down mid-flight).
+  // Isolate BEFORE revealing. revealSatsExclusive() runs applyVisibilityState(),
+  // and if isolationSet still held the PREVIOUS focus's pair, the new pair's
+  // sats would read as filteredOut → handleParticipantHidden() → it sees the new
+  // focusedPair, thinks the focus is orphaned, and tears it all down mid-call
+  // (nulling the just-drawn orb → flyTo(null) throws). Committing isolationSet to
+  // the new pair first keeps the new participants "in", so no teardown fires when
+  // we refocus straight from one conjunction to another.
   const iso = new Set(focusedPair);
   if (typeof selectedNoradId !== "undefined" && selectedNoradId !== null) {
     iso.add(selectedNoradId);
   }
   isolateSats(iso);
+  // Reveal ONLY the two participants (not their whole groups), exclusively — so
+  // switching conjunctions re-hides the previous pair. Already-visible ones are
+  // unaffected. (No-op for display while isolation is active, but it sets
+  // revealedSats for when the focus later clears.)
+  if (typeof revealSatsExclusive === "function") revealSatsExclusive(focusedPair);
 
-  const cart = drawConjunctionGeometry(e);
-  if (!cart) return;
   syncPairHighlight(); // both participants get the highlight ring
 
   // In the Top-20 arc view, focusing a conjunction replaces the arc slices with
@@ -531,9 +557,10 @@ function focusConjunction(e, doJump = true) {
  * showConjunctionsFor (that's what triggered it → would recurse).
  */
 function softFocusConjunction(e) {
+  // Draw first; only commit focus state if the geometry actually rendered.
+  if (!drawConjunctionGeometry(e)) return;
   focusedKey = eventKey(e);
   focusedPair = [e.sat1_norad_id, e.sat2_norad_id];
-  if (!drawConjunctionGeometry(e)) return;
   syncPairHighlight(); // both participants get the highlight ring
   renderConjunctionList();
   viewer.scene.requestRender();
