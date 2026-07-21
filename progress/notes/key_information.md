@@ -544,6 +544,53 @@ Durable gotchas from the full-project code review:
 
 ---
 
+## Full-codebase review lessons (Task 10.8)
+
+Durable findings from the 8-agent full review + the UX round:
+
+1. **Co-location suppression must distinguish related from unrelated pairs.** The
+   most dangerous conjunction class (very close, low closing speed) looks exactly
+   like docked hardware. `_is_co_located` now suppresses cross-launch pairs ONLY
+   when truly co-moving (`<5 m/s` AND `<50 m`); same-launch keeps the `<0.5 km/s`
+   formation floor. Never suppress an unrelated pair on miss distance alone.
+
+2. **An `A==B` byte-identical gate needs a floor on the SCREENED subset, not just
+   the raw fetch.** Two identically-degraded inputs (e.g. an `is_screenable`
+   regression that rejects everything) agree trivially and pass. `ab_screen.py` +
+   `build_snapshot.py` now abort if <25% of the raw catalog survives the filter.
+
+3. **`ConjunctionScreener.screen` (the API path) must gate on `is_screenable`** like
+   `build_snapshot.py` does — else MEO/HEO orbits get the LEO-1 `_FALLBACK` volume,
+   which under-screens them radially (not a no-skip bound).
+
+4. **Blocking work (fetch/parse, CPU propagation) must never run inline in an async
+   handler.** The propagator's lazy first-load is warmed at startup via
+   `run_in_threadpool` (main.py lifespan); `/positions` + `/track` propagate via
+   `run_in_threadpool` under `_propagator_lock`. (Local-dev only — prod is static.)
+
+5. **Frontend focus/isolation is order-sensitive.** `revealSatsExclusive` runs
+   `applyVisibilityState`; if `isolationSet` still holds the OLD pair while
+   `focusedPair` is the NEW one, the orphan-teardown (`handleParticipantHidden`)
+   fires and tears the focus down mid-call. In `focusConjunction`: draw geometry →
+   set `focusedPair` → **isolate BEFORE reveal**.
+
+6. **The POV/zoom badge must refresh on MODE change, not just selection.**
+   `setConjOnly` and `selectSatellite` both call `updatePovIndicator`; the badge is
+   mode-aware (browse+nothing selected → hidden, not "All Conjunctions").
+
+7. **"Show the full orbit" = camera framing, not geometry.** The orbit trail always
+   spanned one full period; HEO looked partial only because the camera never
+   reframed. `flyToOrbit` (info-panel.js) flies to a bounding sphere sized to the
+   orbit's apoapsis on selection.
+
+8. **The engine + science are verified correct**: C++ SGP4 is bit-identical to the
+   Vallado `sgp4` reference (0 m across 2,400 comparisons incl. deep-space); frames/
+   units/GMST/RTN cross-checked; conjunction geometry reproduces a brute-force grid
+   to sub-mm; SOCRATES validation is genuinely same-method. No engine/science bug
+   found. Issues were all in the peripheral surfaces.
+
+---
+
 ## SGP4 Accuracy Expectations
 
 | Time from Epoch | Expected Error |
