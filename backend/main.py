@@ -17,6 +17,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -41,9 +42,19 @@ _MAX_SATS = int(os.environ["ORBITWATCH_MAX_SATS"]) if os.getenv("ORBITWATCH_MAX_
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Propagator is lazy — no data loaded until first request calls _ensure_data()
-    app.state.propagator = SatellitePropagator(
-        group=_GROUP, live=_LIVE, max_sats=_MAX_SATS)
+    prop = SatellitePropagator(group=_GROUP, live=_LIVE, max_sats=_MAX_SATS)
+    app.state.propagator = prop
+    # Warm the catalog ONCE at startup, off the event loop. The load is blocking
+    # (a parquet read, or in live mode a ~30 s CelesTrak fetch) — doing it here in
+    # a worker thread means the first real request doesn't freeze the event loop
+    # (and every other client with it) on the lazy first-load. run_in_threadpool
+    # keeps startup itself non-blocking; a failure here isn't fatal — the lazy
+    # path retries on first request.
+    try:
+        await run_in_threadpool(prop._ensure_data)
+    except Exception as e:  # noqa: BLE001 — startup must not crash on a fetch hiccup
+        print(f"[startup] catalog warm-up failed ({e}); "
+              "will lazy-load on first request")
     yield
 
 

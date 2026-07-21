@@ -35,12 +35,17 @@ def download_text(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
 def _download_via_curl(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
     """Fallback downloader using the system curl (robust TLS).
 
-    `-f` makes curl exit non-zero on HTTP >= 400; we surface those so the caller
-    treats them like other fetch failures (cache fallback).
+    Mirrors the `requests` path's contract: HTTP >= 400 is raised as
+    urllib.error.HTTPError (with the real status), so callers' 403/404 no-retry
+    logic fires regardless of which path served the request. We drop `-f` (which
+    would collapse every HTTP error into a bare exit 22) and instead read the
+    status via `-w`; a non-zero curl exit then means a genuine transport failure
+    (TLS/timeout/DNS), surfaced as RuntimeError like other fetch failures.
     """
     try:
         result = subprocess.run(
-            ["curl", "-fsS", "--max-time", "30", "-A", user_agent, url],
+            ["curl", "-sS", "--max-time", "30", "-A", user_agent,
+             "-w", "\n%{http_code}", url],
             capture_output=True, timeout=40, check=True,
         )
     except FileNotFoundError:
@@ -49,4 +54,17 @@ def _download_via_curl(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
         raise RuntimeError(
             f"curl download failed (exit {e.returncode}): "
             f"{e.stderr.decode('utf-8', 'replace')[:200]}")
-    return result.stdout.decode("utf-8")
+    # `-w "\n%{http_code}"` appends a newline + the status after the body.
+    body, sep, code = result.stdout.decode("utf-8").rpartition("\n")
+    try:
+        status = int(code)
+    except ValueError:
+        status = 0
+    if not sep or status == 0:
+        # curl exited 0 but emitted no parseable %{http_code} — don't return a
+        # possibly-truncated body as if it were a clean 200.
+        raise RuntimeError("curl fallback: no HTTP status in response")
+    if status >= 400:
+        raise urllib.error.HTTPError(
+            url, status, f"HTTP {status}", hdrs=None, fp=None)
+    return body

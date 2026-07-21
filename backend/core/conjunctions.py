@@ -31,7 +31,8 @@ from scipy.optimize import minimize_scalar
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import orbitcore
 from backend.core.coordinate_transforms import teme_to_rtn
-from backend.core.screening_volumes import gross_threshold_km, regime_for
+from backend.core.screening_volumes import (
+    gross_threshold_km, is_screenable, regime_for)
 
 # Optimizer stopping tolerance on the time variable, in minutes.
 # 1e-5 min = 0.6 ms — far finer than SGP4's positional accuracy warrants,
@@ -332,8 +333,9 @@ _DEFAULT_STEP_SEC = 60.0
 # from the same launch (formation), so an unrelated slow approach is never hidden.
 # Both floors are tunable; defaults keep the real Starlink 0.34 km @ 1.26 km/s
 # event and drop docked stations (~0 km, ~0 km/s).
-_V_REL_FLOOR_KM_S = 0.5      # below this a pair is co-moving, not crossing
-_MIN_MISS_FLOOR_KM = 0.05    # ~50 m: docked-module co-location artifact
+_V_REL_FLOOR_KM_S = 0.5       # same-launch formation-drift floor (co-deployed pieces)
+_V_CO_MOVING_KM_S = 0.005     # ~5 m/s: cross-launch co-location must be truly co-moving
+_MIN_MISS_FLOOR_KM = 0.05     # ~50 m: docked-module co-location artifact
 
 
 def _launch_id(object_id: str) -> str:
@@ -346,15 +348,23 @@ def _launch_id(object_id: str) -> str:
 
 def _is_co_located(event: dict, mi: dict, mj: dict) -> bool:
     """Conservative-drop test: a persistent-proximity (co-located) pair rather
-    than a crossing conjunction. Relative speed below the floor AND (within the
-    miss floor OR same launch)."""
-    if event["relative_speed_km_s"] >= _V_REL_FLOOR_KM_S:
-        return False
-    if event["miss_distance_km"] < _MIN_MISS_FLOOR_KM:
-        return True
+    than a crossing conjunction.
+
+    Same launch: co-deployed pieces / a parked formation — suppress below the
+    formation-drift floor (0.5 km/s), any miss.
+
+    Different launches: only suppress genuinely docked/co-moving hardware —
+    essentially zero relative speed (< ~5 m/s) AND touching (< 50 m). This is
+    the docked-module-assembled-from-multiple-launches case (e.g. ISS + a
+    visiting vehicle). Critically, two UNRELATED objects drifting < 50 m apart
+    at even tens of m/s is a genuine (and dangerous) close approach — NOT a
+    co-location artifact — so it must never be suppressed."""
+    v = event["relative_speed_km_s"]
     a = _launch_id(mi.get("object_id", ""))
     b = _launch_id(mj.get("object_id", ""))
-    return bool(a) and a == b
+    if bool(a) and a == b:                       # same launch
+        return v < _V_REL_FLOOR_KM_S
+    return v < _V_CO_MOVING_KM_S and event["miss_distance_km"] < _MIN_MISS_FLOOR_KM
 
 
 def _dedupe_to_unique_pairs(events: list[dict]) -> list[dict]:
@@ -692,6 +702,18 @@ class ConjunctionScreener:
         """
         satrecs, meta = self.propagator.get_all_satrecs()
         if threshold_km is None:
+            # Screen only orbits the SFS handbook actually covers (LEO 1-4 + the
+            # GEO band), matching the deployed snapshot pipeline. Objects outside
+            # those regimes have no genuine volume — regime_for would hand them
+            # the LEO-1 _FALLBACK, which under-screens a MEO/HEO orbit radially
+            # (NOT a no-skip bound) — so exclude them here rather than screen
+            # them with a wrong-size bubble. (Legacy Euclidean path screens all.)
+            keep = [
+                is_screenable(m["periapsis_km"], m["eccentricity"], m["period_min"])
+                for m in meta
+            ]
+            satrecs = [s for s, k in zip(satrecs, keep) if k]
+            meta = [m for m, k in zip(meta, keep) if k]
             volumes = [
                 regime_for(
                     m["periapsis_km"], m["eccentricity"], m["period_min"])

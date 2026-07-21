@@ -95,8 +95,12 @@ async def get_positions(request: Request, time: str | None = None):
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
+    # Off the event loop: get_all_positions loops sgp4() + transforms over the
+    # whole catalog (CPU-bound), which would otherwise block every other request
+    # for the full batch — same treatment /conjunctions already gets.
     async with _propagator_lock:
-        results, errors = propagator.get_all_positions(utc_dt)
+        results, errors = await run_in_threadpool(
+            propagator.get_all_positions, utc_dt)
 
     positions = [_format_position(r) for r in results]
     response = {
@@ -157,8 +161,10 @@ async def get_track(
     utc_dts = [utc_dt + step_size * i for i in range(steps)]
 
     try:
+        # Off the event loop: up to 500 propagation steps (Query steps <= 500).
         async with _propagator_lock:
-            results = propagator.get_positions_at_times(name, utc_dts)
+            results = await run_in_threadpool(
+                propagator.get_positions_at_times, name, utc_dts)
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=f"Propagation failed for NORAD ID {norad_id}: {e}")
 
