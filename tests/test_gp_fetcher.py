@@ -662,6 +662,109 @@ class TestDownloader:
             assert self.fetcher._download("https://x") == "VIA_CURL"
         curl.assert_called_once()
 
+    def test_connect_timeout_falls_back_to_curl(self):
+        """A dropped TCP handshake (the Aug 2026 CI failures) must reach curl."""
+        import requests
+        with patch(f"{self._MOD}.requests.get",
+                   side_effect=requests.exceptions.ConnectTimeout("connect")), \
+             patch(f"{self._MOD}._download_via_curl",
+                   return_value="VIA_CURL") as curl:
+            assert self.fetcher._download("https://x") == "VIA_CURL"
+        curl.assert_called_once()
+
+    def test_read_timeout_falls_back_to_curl(self):
+        """ReadTimeout subclasses Timeout but NOT ConnectionError, so a catch of
+        (SSLError, ConnectionError) silently skips the curl fallback — the real
+        gap behind the 2026-07-29 CI failure (its log shows no 'retrying via
+        curl' line at all). The fallback must fire for read timeouts too."""
+        import requests
+        with patch(f"{self._MOD}.requests.get",
+                   side_effect=requests.exceptions.ReadTimeout("read")), \
+             patch(f"{self._MOD}._download_via_curl",
+                   return_value="VIA_CURL") as curl:
+            assert self.fetcher._download("https://x") == "VIA_CURL"
+        curl.assert_called_once()
+
+
+class TestDownloadRetry:
+    """Transport failures get a bounded retry; real HTTP answers never do.
+
+    CelesTrak's documented limits make this asymmetry load-bearing: retrying a
+    403/404 gets the IP firewalled (>50 3xx/4xx in 2 h), while a timeout means
+    no response was received at all and costs them nothing. See
+    progress/notes/key_information.md #5.
+    """
+
+    _MOD = "backend.core.http_fetch"
+
+    def setup_method(self):
+        self.fetcher = GPFetcher(cache_dir=Path(tempfile.mkdtemp()))
+
+    def test_retries_transport_failure_then_succeeds(self):
+        """One dead attempt must not sink the fetch — the CI failure mode."""
+        import requests
+        from unittest.mock import MagicMock
+        ok = MagicMock(status_code=200, text="HELLO")
+        with patch(f"{self._MOD}.requests.get",
+                   side_effect=[requests.exceptions.ConnectTimeout("t"), ok]), \
+             patch(f"{self._MOD}._download_via_curl",
+                   side_effect=RuntimeError("curl exit 28")), \
+             patch(f"{self._MOD}.time.sleep") as slept:
+            assert self.fetcher._download("https://x", attempts=3) == "HELLO"
+        slept.assert_called()  # backed off rather than hammering
+
+    def test_never_retries_4xx(self):
+        """The IP-ban guard: a 403/404 is a real answer — exactly one request,
+        even when the caller asked for retries."""
+        import urllib.error
+        from unittest.mock import MagicMock
+        resp = MagicMock(status_code=403, reason="Forbidden")
+        with patch(f"{self._MOD}.requests.get", return_value=resp) as get, \
+             patch(f"{self._MOD}.time.sleep") as slept:
+            try:
+                self.fetcher._download("https://x", attempts=3)
+                assert False, "should have raised HTTPError"
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+        assert get.call_count == 1, f"retried a 403 {get.call_count}x — IP-ban risk"
+        slept.assert_not_called()
+
+    def test_gives_up_after_max_attempts(self):
+        """A sustained outage still fails — loudly, not silently forever."""
+        import requests
+        with patch(f"{self._MOD}.requests.get",
+                   side_effect=requests.exceptions.ConnectTimeout("t")) as get, \
+             patch(f"{self._MOD}._download_via_curl",
+                   side_effect=RuntimeError("curl exit 28")), \
+             patch(f"{self._MOD}.time.sleep"):
+            try:
+                self.fetcher._download("https://x", attempts=3)
+                assert False, "should have raised after exhausting attempts"
+            except RuntimeError:
+                pass
+        assert get.call_count == 3, f"expected 3 attempts, made {get.call_count}"
+
+    def test_bulk_fetch_opts_into_retry(self):
+        """Wiring lock: the bulk group fetch — the CI path that broke — must
+        actually request retries. Without this the retry code is dead weight."""
+        import json as _json
+        from core.tle_fetcher import BULK_FETCH_ATTEMPTS
+        assert BULK_FETCH_ATTEMPTS > 1
+        with patch.object(self.fetcher, "_download",
+                          return_value=_json.dumps([ISS_RECORD])) as dl:
+            self.fetcher.fetch("stations", force=True)
+        assert dl.call_args.kwargs.get("attempts") == BULK_FETCH_ATTEMPTS, \
+            f"bulk fetch did not opt into retry: {dl.call_args}"
+
+    def test_per_object_fetch_does_not_retry(self):
+        """fetch_by_catnr runs in a loop over many objects (socrates_compare),
+        so it must stay at one attempt — otherwise one outage becomes minutes
+        of stacked backoff per object."""
+        with patch.object(self.fetcher, "_download", return_value="[]") as dl:
+            self.fetcher.fetch_by_catnr(25544)
+        assert dl.call_args.kwargs.get("attempts", 1) == 1, \
+            f"per-object fetch opted into retry: {dl.call_args}"
+
 
 import urllib.error
 

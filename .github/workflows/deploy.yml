@@ -158,9 +158,55 @@ jobs:
       # Populate the active-catalog cache ONCE so the A/B gate and the snapshot
       # build below screen the identical elements (build_snapshot reuses this
       # <2 h cache instead of re-fetching).
+      #
+      # continue-on-error: CelesTrak is a free public service and goes dark
+      # occasionally (3 of the 60 scheduled runs before 2026-08-12 died here —
+      # connect/read timeouts, never an HTTP error). A missed data refresh is NOT
+      # a broken site: the live snapshot keeps serving and the next cron slot
+      # retries. So a fetch failure must not fail the deploy — the next step
+      # falls back to the live snapshot and warns. GPFetcher already retries
+      # transport failures (BULK_FETCH_ATTEMPTS) before we ever get here.
+      # timeout-minutes bounds the retry+backoff ladder (~6 min worst case).
       - name: Fetch active catalog
+        id: fetch
         if: steps.decide.outputs.rebuild == 'true'
+        continue-on-error: true
+        timeout-minutes: 12
         run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('active'); print(f'fetched {len(d)} active objects')"
+
+      # Fetch failed → skip this refresh and redeploy whatever is already live,
+      # rather than failing the build. Two things keep this honest:
+      #   • the ::warning:: is visible on the run summary, so a skipped refresh
+      #     is never silent;
+      #   • the staleness guard below HARD-FAILS if the live snapshot is already
+      #     >48 h old — i.e. the fetch has been failing across ~6 consecutive
+      #     cron slots, which is a real outage a human needs to look at, not a
+      #     blip worth swallowing.
+      - name: Fall back to the live snapshot if the fetch failed
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "::warning::CelesTrak fetch FAILED after retries — skipping this data refresh and redeploying the snapshot that is already live. The next scheduled run will retry."
+          if ! curl -fsSL -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL"; then
+            echo "::error::Catalog fetch failed AND the live snapshot could not be downloaded — there is nothing to publish."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, sys
+          from datetime import datetime, timezone
+
+          MAX_AGE_H = 48.0
+          meta = json.load(open("frontend/snapshot.json"))["meta"]
+          gen = datetime.fromisoformat(meta["generated_at"].replace("Z", "+00:00"))
+          age_h = (datetime.now(timezone.utc) - gen).total_seconds() / 3600.0
+          print(f"Live snapshot generated {gen.isoformat()} ({age_h:.1f} h old, "
+                f"{meta.get('n_satellites', '?')} satellites).")
+          if age_h > MAX_AGE_H:
+              print(f"::error::Live snapshot is {age_h:.1f} h old (limit {MAX_AGE_H:.0f} h) — "
+                    "the catalog fetch has now failed across multiple scheduled runs. "
+                    "Failing the build so this surfaces instead of quietly serving stale data.")
+              sys.exit(1)
+          PY
 
       # Phase-10.6 CI gate: the accelerated engine (fused C++ + time sieve + C++
       # fine stage) MUST produce byte-identical conjunction events to the classic
@@ -206,7 +252,7 @@ jobs:
       # here too. Manual/push runs always gate regardless.
       - name: Detect recent engine-code changes
         id: codecheck
-        if: steps.decide.outputs.rebuild == 'true'
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
         run: |
           CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \
             orbitcore/ backend/ scripts/ab_screen.py scripts/build_snapshot.py \
@@ -220,7 +266,7 @@ jobs:
           fi
 
       - name: A/B gate — accelerated screen == classic (byte-identical events)
-        if: steps.decide.outputs.rebuild == 'true' && (github.event_name != 'schedule' || steps.codecheck.outputs.engine_changed == 'true')
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success' && (github.event_name != 'schedule' || steps.codecheck.outputs.engine_changed == 'true')
         run: |
           set -e
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
@@ -248,7 +294,7 @@ jobs:
       # the empty-check — is what catches it). This is the last guard on the cron
       # path, which skips the A/B gate above. The real active catalog is ~16k.
       - name: Build snapshot.json (fetch active + screen offline)
-        if: steps.decide.outputs.rebuild == 'true'
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
         run: python scripts/build_snapshot.py --group active --hours 24 --min-objects 8000
 
       # Archive the fresh snapshot to the `data` branch as
@@ -269,9 +315,12 @@ jobs:
       # perfectly good snapshot. On failure the job keeps going (site still
       # ships) and the next step annotates a visible warning; the next scheduled
       # run retries the archive.
+      # Skipped when the fetch failed: the "fresh" snapshot is then just a copy
+      # of what's already live, and re-archiving it would pollute the append-only
+      # record with a duplicate that never came from a real screen.
       - name: Archive snapshot to the data branch
         id: archive
-        if: steps.decide.outputs.rebuild == 'true'
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
         continue-on-error: true
         run: |
           set -euo pipefail
