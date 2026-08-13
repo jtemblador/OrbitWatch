@@ -10,15 +10,58 @@ HTTP >= 400 is surfaced as urllib.error.HTTPError so callers can apply their own
 """
 
 import subprocess
+import time
 import urllib.error
 
 import requests
 
 DEFAULT_USER_AGENT = "OrbitWatch/1.0"
 
+# Backoff between retried TRANSPORT failures (seconds). Three attempts therefore
+# span ~3 min of upstream downtime, which covers the observed CelesTrak blips
+# (the 2026-08-12 CI outage went dark for >2 min) without hammering a service
+# that only publishes new elements every 2 h.
+_BACKOFF_SEC = (60.0, 120.0)
 
-def download_text(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
-    """GET `url` and return the response body as text (requests → curl fallback)."""
+
+def download_text(url: str, user_agent: str = DEFAULT_USER_AGENT,
+                  attempts: int = 1) -> str:
+    """GET `url` and return the response body as text (requests → curl fallback).
+
+    `attempts` > 1 adds a bounded retry with backoff, and applies ONLY to
+    transport failures — timeout / TLS / DNS, i.e. cases where no HTTP response
+    was received. A real HTTP answer (>= 400) is never retried: CelesTrak
+    firewalls an IP after >50 3xx/4xx errors in 2 h, so a 403/404 must fail on
+    the first try (see progress/notes/key_information.md #5). A timeout costs
+    them nothing, so retrying one is both safe and compliant.
+
+    Retry is opt-in per call site rather than the default because the
+    single-object `fetch_by_catnr` path runs in a loop over many objects, where
+    a blanket retry would multiply a single outage into minutes of backoff per
+    object. Bulk group fetches (the CI-critical path) opt in.
+    """
+    attempts = max(1, attempts)
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _download_once(url, user_agent)
+        except urllib.error.HTTPError:
+            # A real answer from the server — never retry (IP-ban risk).
+            raise
+        except (requests.exceptions.RequestException, RuntimeError) as e:
+            last_err = e
+            if attempt >= attempts:
+                break
+            delay = _BACKOFF_SEC[min(attempt - 1, len(_BACKOFF_SEC) - 1)]
+            print(f"  fetch attempt {attempt}/{attempts} failed "
+                  f"({type(e).__name__}); retrying in {delay:.0f}s…")
+            time.sleep(delay)
+    assert last_err is not None  # loop only exits here after a failure
+    raise last_err
+
+
+def _download_once(url: str, user_agent: str) -> str:
+    """One attempt: requests-with-certifi, falling back to system curl."""
     headers = {"User-Agent": user_agent}
     try:
         resp = requests.get(url, headers=headers, timeout=30)
@@ -27,7 +70,13 @@ def download_text(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
                 url, resp.status_code, resp.reason, hdrs=None, fp=None)
         return resp.text
     except (requests.exceptions.SSLError,
-            requests.exceptions.ConnectionError) as e:
+            requests.exceptions.ConnectionError,
+            # Timeout is listed separately on purpose: ReadTimeout subclasses
+            # Timeout but NOT ConnectionError, so omitting it silently skipped
+            # the curl fallback on read timeouts (the 2026-07-29 CI failure —
+            # its log has no "retrying via curl" line at all). ConnectTimeout
+            # does subclass ConnectionError and was already covered.
+            requests.exceptions.Timeout) as e:
         print(f"  requests fetch failed ({type(e).__name__}); retrying via curl…")
         return _download_via_curl(url, user_agent)
 

@@ -54,6 +54,13 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "tle"
 # Minimum time between fetches (CelesTrak updates every 2 hours)
 MIN_FETCH_INTERVAL = timedelta(hours=2)
 
+# Attempts for a BULK group fetch when the failure is transport-level (timeout /
+# TLS / DNS — never a 403/404, which would risk an IP ban). Retries are cheap
+# insurance here: this fetch runs 3x/day from CI and one unanswered request used
+# to fail the entire deploy. The per-object fetch_by_catnr path deliberately
+# keeps 1 attempt so a loop over many objects can't stack backoffs.
+BULK_FETCH_ATTEMPTS = 3
+
 
 def _derive_object_type(name: str) -> str:
     """Infer object type from a CelesTrak GP object name.
@@ -117,7 +124,11 @@ class GPFetcher:
                 return cached
 
         try:
-            raw_json = self._download(url)
+            # Bulk group fetch: retry transport failures. This is the CI-critical
+            # path (the robot job's `fetch('active')`), and a single unanswered
+            # request used to fail the whole deploy — CelesTrak went dark for
+            # >2 min on 2026-08-12 and the build died after one 61 s attempt.
+            raw_json = self._download(url, attempts=BULK_FETCH_ATTEMPTS)
             records = json.loads(raw_json)
             print(f"Fetched {group} GP data from CelesTrak ({len(records)} objects)")
         except urllib.error.HTTPError as e:
@@ -213,14 +224,18 @@ class GPFetcher:
 
     _USER_AGENT = "OrbitWatch/1.0"
 
-    def _download(self, url: str) -> str:
+    def _download(self, url: str, attempts: int = 1) -> str:
         """Download text from CelesTrak (requests → curl TLS fallback).
 
         Thin wrapper over the shared `http_fetch.download_text` (the robust
         downloader, also used by the SOCRATES fetcher); 4xx surfaces as
         urllib.error.HTTPError so fetch()'s 403/404 no-retry handling applies.
+
+        `attempts` > 1 retries TRANSPORT failures only (never a 403/404) — see
+        download_text. Bulk group fetches pass BULK_FETCH_ATTEMPTS; the
+        per-object path leaves it at 1 so a loop can't stack backoffs.
         """
-        return download_text(url, self._USER_AGENT)
+        return download_text(url, self._USER_AGENT, attempts=attempts)
 
     @staticmethod
     def _derive_orbit_params(mean_motion: float, eccentricity: float) -> dict:
