@@ -35,10 +35,18 @@ for _p in (_ROOT, os.path.join(_ROOT, "backend")):
 from backend.core.conjunctions import run_screen                 # noqa: E402
 from backend.core.propagator import build_satrecs_and_meta       # noqa: E402
 from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
-from backend.core.snapshot import build_snapshot                 # noqa: E402
+from backend.core.snapshot import archive_record, build_snapshot # noqa: E402
 from backend.core.tle_fetcher import GPFetcher                   # noqa: E402
 
 _GZ_BUDGET_BYTES = 5_000_000  # ~5 MB gzipped target (see roadmap 9.2)
+
+# meta.source per catalog supplier. Space-Track's blanket redistribution approval
+# for basic SSA data is "conditioned on appropriate citation" — this string is
+# that citation, and the site shows it.
+_SOURCE_LABELS = {
+    "celestrak": "CelesTrak {group}",
+    "spacetrack": "Space-Track.org (USSPACECOM) GP, CelesTrak {group} population",
+}
 
 
 # Phase 10.6: production runs the full accelerated engine — fused C++ coarse+
@@ -84,6 +92,19 @@ def main() -> None:
                          "snapshot (0 = off; CI passes a floor for --group active)")
     ap.add_argument("--out", default=os.path.join(_ROOT, "frontend", "snapshot.json"),
                     help="output path for snapshot.json")
+    ap.add_argument("--prev", default="",
+                    help="previous snapshot.json — carries each conjunction's "
+                         "prediction history forward (9.10). Missing or "
+                         "unreadable is non-fatal: the run just emits no history.")
+    ap.add_argument("--catalog-source", choices=sorted(_SOURCE_LABELS),
+                    default="celestrak",
+                    help="who supplied the cached elements — sets meta.source "
+                         "(the citation Space-Track's redistribution terms ask "
+                         "for). CI passes spacetrack when the CelesTrak fetch "
+                         "failed and the Space-Track fallback filled the cache.")
+    ap.add_argument("--archive-out", default="",
+                    help="also write the slim data-branch archive record "
+                         "(snapshot.archive_record) here, gzipped (10.10)")
     args = ap.parse_args()
 
     fetcher = GPFetcher()
@@ -139,8 +160,58 @@ def main() -> None:
           f"({args.mode}, {args.hours:.0f} h window)")
 
     generated_at = start.isoformat().replace("+00:00", "Z")
+
+    # 9.10: carry each conjunction's prediction history forward from the run
+    # before this one. This is the whole mechanism — one small file, no archive
+    # scan — so it stays O(current events) and the cron stays ~10 min.
+    #
+    # Deliberately non-fatal in every failure mode (absent on a first deploy,
+    # 404 while Pages redeploys, truncated download, malformed JSON): history is
+    # a nice-to-have layered on top of the snapshot, and losing it must never
+    # cost us the data refresh. A broken chain refills over the next ~3 runs.
+    prev = None
+    if args.prev:
+        try:
+            with open(args.prev, encoding="utf-8") as f:
+                prev = json.load(f)
+            n_prev = len(prev.get("conjunctions") or ())
+            print(f"history: reading {n_prev} conjunctions from {args.prev} "
+                  f"(generated {(prev.get('meta') or {}).get('generated_at')})")
+        except (OSError, ValueError) as exc:
+            print(f"WARNING: --prev {args.prev} unusable ({exc}) — "
+                  f"building without prediction history.", file=sys.stderr)
+            prev = None
+
+    # 10.10 run telemetry → meta.run. GitHub deletes run logs after 90 days, so
+    # without this the archive can't say how long a screen took or which
+    # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
+    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source}
+    for key, env in (("github_run_id", "GITHUB_RUN_ID"),
+                     ("github_event", "GITHUB_EVENT_NAME")):
+        if os.environ.get(env):
+            run[key] = os.environ[env]
+
     snap = build_snapshot(df, events, screen_params, generated_at,
-                          source=f"CelesTrak {args.group}")
+                          source=_SOURCE_LABELS[args.catalog_source].format(group=args.group),
+                          prev=prev, run=run)
+    n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
+    if prev:
+        pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0
+        snap["meta"]["run"]["history_pct"] = round(pct, 1)
+        print(f"history: {n_hist} of {len(snap['conjunctions'])} conjunctions "
+              f"carried a trail forward ({pct:.1f}%)")
+        # A rate of EXACTLY zero against a substantial previous run is not a data
+        # blip — a slid window still leaves ~16% of pairs recurring (measured over
+        # 41 days; the worst observed slot, across a 16 h cron gap, was 7.2%). Zero
+        # means the (pair, TCA ± 900 s) link itself broke, e.g. schema drift in
+        # a/b/tca/miss_km. Left unannounced that silently and permanently removes
+        # the feature from the site, since nobody reads a green cron's logs.
+        # Warn, never fail: history is cosmetic and must not block a data refresh.
+        if n_hist == 0 and n_prev >= 1000 and snap["conjunctions"]:
+            print(f"::warning::Prediction history collapsed to 0 trails despite a "
+                  f"previous snapshot with {n_prev} conjunctions — the "
+                  f"(pair, TCA ± 900 s) link is broken (schema drift?). The site "
+                  f"still publishes; see task 9.10.", file=sys.stderr)
 
     # allow_nan=False: fail loudly if any NaN/inf slipped through rather than
     # emit a bare `NaN` token that the browser's JSON.parse would reject.
@@ -156,6 +227,13 @@ def main() -> None:
     if gz > _GZ_BUDGET_BYTES:
         print(f"  ⚠ over the ~{_GZ_BUDGET_BYTES / 1e6:.0f} MB gzipped budget "
               f"— trim the catalog or drop fields")
+
+    if args.archive_out:
+        rec = json.dumps(archive_record(snap), separators=(",", ":"), allow_nan=False)
+        with gzip.open(args.archive_out, "wt", encoding="utf-8") as f:
+            f.write(rec)
+        print(f"wrote archive record {args.archive_out}: "
+              f"{os.path.getsize(args.archive_out) / 1e6:.2f} MB gzipped ({gz / 1e6:.2f} full)")
 
 
 if __name__ == "__main__":

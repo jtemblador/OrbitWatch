@@ -41,6 +41,18 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "spacetrack"
 
 # < 30 req/min → keep ≥ 2.2 s between requests (margin under the cap).
 MIN_REQUEST_INTERVAL_S = 2.2
+
+# The API guidelines' one-shot query for "the newest propagable element set for
+# all on-orbit objects", widened from >now-10 to >now-30 days so stale-but-listed
+# members of the active population still come back (its max element age runs
+# ~28 d). ~32k objects / ~36 MB (10.3). Guidelines cap it at once per hour; CI
+# only sends it after the CelesTrak fetch has already failed.
+CATALOG_QUERY = "/class/gp/decay_date/null-val/epoch/%3Enow-30/format/json"
+
+# A refilled group must cover at least this share of the requested population,
+# or the refill is refused — a partial response must not become the catalog.
+# Not 1.0: a few objects reenter between the live snapshot and the refill.
+MIN_POPULATION_COVERAGE = 0.95
 HTTP_TIMEOUT_S = 90
 _USER_AGENT = "OrbitWatch/1.0 (validation; contact tembladorjose@yahoo.com)"
 
@@ -175,6 +187,11 @@ class SpaceTrackFetcher:
                 f"/orderby/{urllib.parse.quote('NORAD_CAT_ID asc')}/format/json")
         return self._parse(self._query(path))
 
+    def fetch_catalog(self) -> pd.DataFrame:
+        """Newest elset for every on-orbit object — ONE bulk class/gp request
+        (CATALOG_QUERY). Not cached: callers keep only the slice they need."""
+        return self._parse(self._query(CATALOG_QUERY))
+
     def fetch_history(self, norad_ids, epoch_start: datetime,
                       epoch_end: datetime, force: bool = False) -> pd.DataFrame:
         """All historical elsets (class/gp_history) for `norad_ids` whose EPOCH
@@ -240,6 +257,62 @@ class BulkGPAdapter:
         return pick.drop(columns="_epoch_utc").reset_index(drop=True)
 
 
+def refill_group_cache(group: str, norad_ids, st: SpaceTrackFetcher | None = None,
+                       gp: GPFetcher | None = None,
+                       min_coverage: float = MIN_POPULATION_COVERAGE,
+                       labels: dict | None = None) -> pd.DataFrame:
+    """Refill a GPFetcher group cache from Space-Track, keeping the group's
+    population — the CelesTrak-outage fallback (10.10; 10.3 ran it by hand).
+
+    Space-Track has no "active" group, so the caller supplies the population:
+    CI passes the NORAD ids of the snapshot that is already live. Objects
+    launched since that snapshot are missed for this one run. The cache is
+    written with a fresh fetch_time, so the next GPFetcher.fetch(group) uses it
+    instead of retrying CelesTrak.
+
+    `labels` ({norad_id: (name, type)}, e.g. from population_from_snapshot)
+    overrides Space-Track's names/types with the population source's: the two
+    name 16% of the active catalog differently ("TIANHE" vs "CSS (TIANHE)") and
+    Space-Track types ~600 of its payloads UNKNOWN, which would make search,
+    station grouping and type filters flicker for one run. Elements are never
+    touched.
+
+    Raises SpaceTrackError (and writes nothing) on an empty population or when
+    fewer than `min_coverage` of the ids come back.
+    """
+    ids = set(_sorted_ids(norad_ids))
+    if not ids:
+        raise SpaceTrackError("Refusing to refill from an empty population.")
+    cat = (st or SpaceTrackFetcher()).fetch_catalog()
+    df = cat[cat["norad_cat_id"].isin(ids)] if not cat.empty else cat
+    if not df.empty:
+        # class/gp is already newest-per-object; dedupe defensively anyway.
+        df = (df.sort_values("epoch").drop_duplicates("norad_cat_id", keep="last")
+                .reset_index(drop=True))
+    if len(df) < min_coverage * len(ids):
+        raise SpaceTrackError(
+            f"Space-Track returned {len(df)} of {len(ids)} requested objects "
+            f"(< {min_coverage:.0%}) — refusing to refill '{group}' from a "
+            f"partial catalog.")
+    if labels:
+        df = df.copy()
+        for col, i in (("object_name", 0), ("object_type", 1)):
+            keep = df[col]
+            df[col] = [(labels[n][i] or k) if n in labels else k
+                       for n, k in zip(df["norad_cat_id"], keep)]
+    (gp or GPFetcher())._cache_to_parquet(df, group)
+    return df
+
+
+def population_from_snapshot(path) -> dict:
+    """{NORAD id: (OBJECT_NAME, OBJECT_TYPE)} for every satellite in a
+    snapshot.json — the population AND its labels for refill_group_cache."""
+    with open(path, encoding="utf-8") as f:
+        snap = json.load(f)
+    return {int(s["NORAD_CAT_ID"]): (s.get("OBJECT_NAME"), s.get("OBJECT_TYPE"))
+            for s in snap.get("satellites") or []}
+
+
 def _sorted_ids(norad_ids) -> list[int]:
     return sorted({int(n) for n in norad_ids})
 
@@ -247,3 +320,24 @@ def _sorted_ids(norad_ids) -> list[int]:
 def _cache_key(ids: list[int], e0: str, e1: str) -> str:
     raw = f"{','.join(map(str, ids))}|{e0}|{e1}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+if __name__ == "__main__":
+    import sys
+
+    # `python -m backend.core.spacetrack_fetcher refill <group> <snapshot.json>`
+    # refills the <group> cache from Space-Track over the population in
+    # <snapshot.json> — what deploy.yml runs when the CelesTrak fetch fails.
+    # Exit 1 on any failure so the workflow can fall back further.
+    if len(sys.argv) == 4 and sys.argv[1] == "refill":
+        try:
+            pop = population_from_snapshot(sys.argv[3])
+            df = refill_group_cache(sys.argv[2], pop.keys(), labels=pop)
+        except (SpaceTrackError, OSError, ValueError, KeyError) as e:
+            print(f"Space-Track refill failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"refilled {sys.argv[2]} from Space-Track: {len(df)} of {len(pop)} objects")
+    else:
+        print("usage: python -m backend.core.spacetrack_fetcher refill <group> <snapshot.json>",
+              file=sys.stderr)
+        sys.exit(2)

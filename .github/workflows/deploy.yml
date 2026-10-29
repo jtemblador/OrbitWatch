@@ -26,7 +26,11 @@
 #     slots can be tuned against the actual observed cadence.
 #   • Every rebuild ARCHIVES the fresh snapshot as snapshots/<ISO-ts>.json.gz on
 #     an orphan `data` branch (append-only; NEVER merged into main → no history
-#     bloat on the code branch). That archive backs the 9.10 evolution view.
+#     bloat on the code branch). Since 10.10 the archived copy is a slim record
+#     (~50% of the full gz). That archive backs the 9.10 evolution analysis.
+#   • 10.10: if CelesTrak is down, the same population is refilled from
+#     Space-Track (secrets SPACETRACK_USER / SPACETRACK_PASS) before falling back
+#     to re-serving the live snapshot.
 
 name: Deploy to GitHub Pages
 
@@ -35,6 +39,10 @@ on:
     inputs:
       rebuild_snapshot:
         description: "Re-fetch + re-screen the catalog (~8 min). Off = redeploy reusing the live snapshot (~1 min)."
+        type: boolean
+        default: false
+      force_spacetrack:
+        description: "With rebuild: skip CelesTrak and fill the catalog from Space-Track (exercises the outage fallback)."
         type: boolean
         default: false
   # The robot job: rebuild the snapshot 3×/day (UTC). Spaced ~8 h; the 13:17 slot
@@ -75,7 +83,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Job-level override: this job (and only this job) needs `contents: write` for
     # the archive push. Job permissions REPLACE the top-level set, so pages/
     # id-token are re-listed (configure-pages / upload-pages-artifact need them).
@@ -86,7 +94,7 @@ jobs:
     steps:
       # fetch-depth 50: enough history for the "recent engine change" check below
       # (the git log --since needs commits, not just the shallow tip).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 50
 
@@ -136,7 +144,7 @@ jobs:
 
       - name: Set up Python 3.12
         if: steps.decide.outputs.rebuild == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -155,38 +163,105 @@ jobs:
           make -j"$(nproc)"
           cp orbitcore*.so ../../backend/
 
+      # The snapshot that is live right now, downloaded once up front. Two uses:
+      #   • 9.10 prediction history — the previous snapshot is the ONLY input
+      #     the trail needs. Each rebuild carries `hist` forward exactly one run
+      #     (backend/core/snapshot.py :: carry_forward_history), so the cost is
+      #     O(current events) and constant in the archive's size — reading the
+      #     growing `data` branch instead would put a ~500 MB clone on the cron
+      #     path;
+      #   • 10.10 Space-Track fallback — its satellites ARE the active population
+      #     (Space-Track has no "active" group to ask for).
+      # Fetched before the gate rather than after: `concurrency: pages` holds any
+      # other publish until this run ends, so the live file can't change under us.
+      #
+      # Failure is non-fatal by design. History is layered on top of the
+      # snapshot, never a precondition for it: a 404 on the very first deploy or
+      # a truncated body must not cost us the data refresh. build_snapshot treats
+      # a missing or malformed --prev as "no history" and warns; a broken chain
+      # refills over the next ~3 runs.
+      #
+      # Deliberately NOT frontend/snapshot.json: that path is the OUTPUT the
+      # build writes and Pages publishes. Downloading over it here would republish
+      # the stale snapshot if the build then failed.
+      - name: Fetch the live snapshot (prediction history + fallback population)
+        if: steps.decide.outputs.rebuild == 'true'
+        run: |
+          if ! curl -fsSL --max-time 120 -o prev-snapshot.json "$LIVE_SNAPSHOT_URL"; then
+            rm -f prev-snapshot.json
+            echo "::warning::Could not fetch the live snapshot — this rebuild emits no prediction history and has no population for a Space-Track fallback."
+          fi
+
       # Populate the active-catalog cache ONCE so the A/B gate and the snapshot
       # build below screen the identical elements (build_snapshot reuses this
       # <2 h cache instead of re-fetching).
       #
       # continue-on-error: CelesTrak is a free public service and goes dark
-      # occasionally (3 of the 60 scheduled runs before 2026-08-12 died here —
-      # connect/read timeouts, never an HTTP error). A missed data refresh is NOT
-      # a broken site: the live snapshot keeps serving and the next cron slot
-      # retries. So a fetch failure must not fail the deploy — the next step
-      # falls back to the live snapshot and warns. GPFetcher already retries
-      # transport failures (BULK_FETCH_ATTEMPTS) before we ever get here.
+      # occasionally (16 of 229 scheduled runs between 2026-08-12 and 10-29 —
+      # connect/read timeouts, never an HTTP error). A failure here hands over
+      # to the Space-Track fallback below. GPFetcher already retries transport
+      # failures (BULK_FETCH_ATTEMPTS) before we ever get here.
       # timeout-minutes bounds the retry+backoff ladder (~6 min worst case).
-      - name: Fetch active catalog
+      - name: Fetch active catalog (CelesTrak)
         id: fetch
-        if: steps.decide.outputs.rebuild == 'true'
+        if: steps.decide.outputs.rebuild == 'true' && github.event.inputs.force_spacetrack != 'true'
         continue-on-error: true
         timeout-minutes: 12
         run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('active'); print(f'fetched {len(d)} active objects')"
 
-      # Fetch failed → skip this refresh and redeploy whatever is already live,
-      # rather than failing the build. Two things keep this honest:
+      # 10.10: CelesTrak down → refill the SAME population from Space-Track
+      # (one bulk class/gp query, sliced to the live snapshot's NORAD ids; >=95%
+      # coverage or it refuses). The elements are the same 18 SDS GP sets
+      # CelesTrak republishes; objects launched since the live snapshot are
+      # missed for this one run. Space-Track's blanket redistribution approval
+      # for basic SSA data requires citation — build_snapshot writes it into
+      # meta.source and the site shows it. continue-on-error: if this fails too,
+      # the step after next falls back to the live snapshot as before.
+      - name: Fall back to Space-Track if CelesTrak failed
+        id: stfetch
+        if: steps.decide.outputs.rebuild == 'true' && (steps.fetch.outcome == 'failure' || github.event.inputs.force_spacetrack == 'true')
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          SPACETRACK_USER: ${{ secrets.SPACETRACK_USER }}
+          SPACETRACK_PASS: ${{ secrets.SPACETRACK_PASS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SPACETRACK_USER" ] || [ -z "$SPACETRACK_PASS" ]; then
+            echo "::warning::SPACETRACK_USER / SPACETRACK_PASS secrets are not set — no Space-Track fallback."
+            exit 1
+          fi
+          if [ ! -s prev-snapshot.json ]; then
+            echo "::warning::No live snapshot to take the population from — no Space-Track fallback."
+            exit 1
+          fi
+          python -m backend.core.spacetrack_fetcher refill active prev-snapshot.json
+          echo "::notice::Catalog filled from Space-Track (CelesTrak fetch failed or force_spacetrack was set)."
+
+      - name: Resolve catalog source
+        id: catalog
+        if: steps.decide.outputs.rebuild == 'true'
+        run: |
+          if [ "${{ steps.fetch.outcome }}" = "success" ]; then SRC=celestrak
+          elif [ "${{ steps.stfetch.outcome }}" = "success" ]; then SRC=spacetrack
+          else SRC=none; fi
+          echo "source=$SRC" >> "$GITHUB_OUTPUT"
+          if [ "$SRC" = "none" ]; then echo "ok=false" >> "$GITHUB_OUTPUT"; else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+          echo "Catalog source: $SRC"
+
+      # Both fetches failed → skip this refresh and redeploy whatever is already
+      # live, rather than failing the build. Two things keep this honest:
       #   • the ::warning:: is visible on the run summary, so a skipped refresh
       #     is never silent;
       #   • the staleness guard below HARD-FAILS if the live snapshot is already
       #     >48 h old — i.e. the fetch has been failing across ~6 consecutive
       #     cron slots, which is a real outage a human needs to look at, not a
       #     blip worth swallowing.
-      - name: Fall back to the live snapshot if the fetch failed
-        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'failure'
+      - name: Fall back to the live snapshot if every fetch failed
+        if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok != 'true'
         run: |
           set -euo pipefail
-          echo "::warning::CelesTrak fetch FAILED after retries — skipping this data refresh and redeploying the snapshot that is already live. The next scheduled run will retry."
+          echo "::warning::CelesTrak AND Space-Track catalog fetches FAILED — skipping this data refresh and redeploying the snapshot that is already live. The next scheduled run will retry."
           if ! curl -fsSL -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL"; then
             echo "::error::Catalog fetch failed AND the live snapshot could not be downloaded — there is nothing to publish."
             exit 1
@@ -252,7 +327,7 @@ jobs:
       # here too. Manual/push runs always gate regardless.
       - name: Detect recent engine-code changes
         id: codecheck
-        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
+        if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
         run: |
           CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \
             orbitcore/ backend/ scripts/ab_screen.py scripts/build_snapshot.py \
@@ -266,7 +341,7 @@ jobs:
           fi
 
       - name: A/B gate — accelerated screen == classic (byte-identical events)
-        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success' && (github.event_name != 'schedule' || steps.codecheck.outputs.engine_changed == 'true')
+        if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true' && (github.event_name != 'schedule' || steps.codecheck.outputs.engine_changed == 'true')
         run: |
           set -e
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
@@ -294,11 +369,20 @@ jobs:
       # the empty-check — is what catches it). This is the last guard on the cron
       # path, which skips the A/B gate above. The real active catalog is ~16k.
       - name: Build snapshot.json (fetch active + screen offline)
-        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
-        run: python scripts/build_snapshot.py --group active --hours 24 --min-objects 8000
+        if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
+        run: |
+          python scripts/build_snapshot.py --group active --hours 24 \
+            --min-objects 8000 --prev prev-snapshot.json \
+            --catalog-source ${{ steps.catalog.outputs.source }} \
+            --archive-out archive-snapshot.json.gz
 
       # Archive the fresh snapshot to the `data` branch as
-      # snapshots/<ISO-ts>.json.gz (append-only). The `data` branch is an ORPHAN
+      # snapshots/<ISO-ts>.json.gz (append-only). Since 10.10 this is the SLIM
+      # record build_snapshot wrote (snapshot.archive_record: meta + every
+      # conjunction + columnar name/type/epoch/n/e/i, ~50% of the full gz) —
+      # the full OMM is re-fetchable from Space-Track gp_history by
+      # (NORAD_CAT_ID, EPOCH); the screen output is not. Earlier files are full
+      # snapshots; meta.archive.format tells them apart. The `data` branch is an ORPHAN
       # (no shared history with main) so the growing archive never bloats the
       # code branch. Done in a linked git worktree under $RUNNER_TEMP so the main
       # checkout's frontend/ (uploaded to Pages below) is untouched. The pushed
@@ -315,12 +399,12 @@ jobs:
       # perfectly good snapshot. On failure the job keeps going (site still
       # ships) and the next step annotates a visible warning; the next scheduled
       # run retries the archive.
-      # Skipped when the fetch failed: the "fresh" snapshot is then just a copy
+      # Skipped when every fetch failed: the "fresh" snapshot is then just a copy
       # of what's already live, and re-archiving it would pollute the append-only
       # record with a duplicate that never came from a real screen.
       - name: Archive snapshot to the data branch
         id: archive
-        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
+        if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -347,7 +431,7 @@ jobs:
           WT="$RUNNER_TEMP/data-wt"
           if [ "$rc" -eq 0 ]; then
             # Extend the existing archive. Base the worktree on FETCH_HEAD, not
-            # origin/data: checkout@v4's narrow refspec doesn't create a
+            # origin/data: checkout's narrow refspec doesn't create a
             # refs/remotes/origin/data tracking ref, but a fetch of an explicit
             # ref always sets FETCH_HEAD (verified locally).
             git fetch --depth=1 origin data
@@ -366,12 +450,12 @@ jobs:
           fi
 
           mkdir -p "$WT/snapshots"
-          gzip -c frontend/snapshot.json > "$WT/snapshots/${TS}.json.gz"
+          cp archive-snapshot.json.gz "$WT/snapshots/${TS}.json.gz"
           git -C "$WT" add "snapshots/${TS}.json.gz"
           git -C "$WT" commit -q -m "Archive snapshot ${TS}"
           git -C "$WT" push origin data
           git worktree remove --force "$WT"
-          echo "Archived snapshots/${TS}.json.gz ($(gzip -c frontend/snapshot.json | wc -c) bytes gz)."
+          echo "Archived snapshots/${TS}.json.gz ($(wc -c < archive-snapshot.json.gz) bytes gz, slim record)."
 
       # Surface an archive failure loudly WITHOUT failing the run (the site still
       # shipped). continue-on-error masks the red X, so annotate a warning that's
@@ -395,20 +479,20 @@ jobs:
           printf 'const CESIUM_ION_TOKEN = "%s";\n' "$ION_TOKEN" > frontend/js/config.js
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: frontend
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

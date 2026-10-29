@@ -1177,3 +1177,109 @@ The `false` parameter means the callback is NOT constant (positions change every
 - Script load order: app → clock → satellites → info-panel → controls
 - Frontend-only changes, no backend modifications
 - Week 5 complete — all tasks done
+
+---
+
+## 9.10 — prediction-evolution trail (Aug 18, 2026)
+
+**Linking a conjunction across runs needs (pair, TCA ± 900 s) — the pair ALONE is
+wrong.** `_dedupe_to_unique_pairs` keeps exactly one event per unordered pair per
+24 h window (the closest), and co-orbiting satellites — Starlink shells above all
+— conjunct repeatedly. So as the window slides, "the closest encounter for this
+pair" becomes a *different encounter*. Measured on consecutive archived runs:
+matching by pair alone gives a **median |ΔTCA| of 22,597 s (~6.3 h)**, i.e. mostly
+unrelated approaches. With the ±900 s gate the realized link rate is **~16% of all
+events, 31–33% of the displayed closest-500** (the closest events are the sticky
+ones), and the deepest trail observed across 41 days is **4 points**.
+⚠ Do not widen the de-dupe to raise that rate — the engine is CI-gated
+byte-identical (10.6).
+
+**Read the previous snapshot, never the archive.** The `data` branch is 147 MB and
+grows ~3.6 MB/day; cloning it on the cron path would dominate the ~10-min rebuild.
+Carrying `hist` forward one run from the live `snapshot.json` is O(current events)
+and constant in archive size. A broken chain self-heals over ~3 runs.
+
+**`datetime.timestamp()` on a NAIVE datetime silently uses LOCAL time.** Always
+`.replace(tzinfo=timezone.utc)` first when a stamp may be naive — the drift is
+hours, and invisible in a UTC-configured CI runner (test-locked in
+`TestCarryForwardHistory.test_naive_timestamps_are_read_as_utc`).
+
+**Timestamps that reach the browser should be epoch seconds, not ISO strings.**
+Compact, and it sidesteps the 9.3 Safari trap entirely (WebKit's `Date` rejects a
+non-3-digit fractional-second field that V8 accepts → silent NaN, invisible in
+local dev).
+
+**`preserveAspectRatio="none"` on an inline SVG stretches its text.** A 200-unit
+viewBox rendered into a 260 px panel scales glyphs ~1.3× horizontally. Use the
+default (uniform) aspect ratio with `width:100%; height:auto` instead.
+
+**Any new frontend field must tolerate being absent.** A frontend-only push takes
+`deploy.yml`'s REUSE path, which redeploys in ~1 min while serving the snapshot
+already live — so new code routinely runs against an older schema. Verify every
+frontend change against a pre-change snapshot, not only a freshly built one.
+
+**JS `isFinite` COERCES — use `Number.isFinite` for validation.** `isFinite(null)`,
+`isFinite("")`, and `isFinite([])` are all **true** (each coerces to 0), so a
+"validate this is a number" filter built on the global lets `null` through and
+plots it as 0. Found in 9.10's trail filter by the Node harness: a
+`[null, missKm]` point passed validation and rendered at epoch 0, ~496,000 h
+before TCA. `Number.isFinite` does no coercion and is the right primitive
+anywhere a value arrives from JSON.
+
+**A green mutation is not a locked guard.** 9.10's first sparkline harness went
+20/20 while the flat-trail guard was deleted — the checks asserted properties
+(equal values → equal heights) that held with or without it. Locking a guard
+means asserting the thing it *changes*: a near-flat trail must use LESS than the
+full plot band, and a genuine large swing must use ALL of it. Always delete the
+guard and confirm a check goes red before believing it is covered.
+
+## 10.10 — ops audit + hardening (Oct 29, 2026)
+
+**Space-Track and CelesTrak disagree on names and types for the SAME elements.**
+Over the 16,819-object active catalog, 2,697 names differ (CelesTrak curates them:
+"CSS (TIANHE)" vs Space-Track "TIANHE", amateur designators like "(AO-7)") and 622
+CelesTrak-derived PAYLOADs are typed UNKNOWN on Space-Track. The station regex,
+search and type filters key on these, so the Space-Track fallback keeps the live
+snapshot's labels (`refill_group_cache(labels=...)`) and takes only the elements.
+NORAD ids and the 9.10 history link are unaffected.
+
+**Space-Track redistribution of basic GP data is allowed — with citation.** The API
+guidelines grant USSPACECOM's blanket approval "conditioned on appropriate
+citation"; `meta.source` carries it when Space-Track fed the run. The bulk
+`class/gp` query is limited to once per hour — fallback-only use is far under it.
+
+**CelesTrak's TLS is blocked from this Mac** (same as 10.3) — refresh local caches
+from Space-Track (`python -m backend.core.spacetrack_fetcher refill <group> <snapshot.json>`,
+needs `.env` exported). A stale local `stations` cache fails
+`test_epoch_age_is_reasonable`; that is the cache, not the code.
+
+**A green cron run is not a refreshed site.** The fetch step is
+`continue-on-error`; before 10.10, 16 of 229 scheduled runs (7%) re-served the old
+snapshot and only a `::warning::` annotation said so. Count refreshes from the
+archive or `meta.run`, not from run conclusions.
+
+**GitHub cron is late, and getting later.** Start delay vs the :17 slots: median
+2.0 h (Jul), 0.8 h (Aug), 4.0 h (Sep), 4.6 h (Oct); worst 7.9 h. The "trail
+SOCRATES by ~1 h" alignment no longer holds. Two slots of 339 were dropped.
+
+**The 60-day schedule auto-disable did not fire** at 71 days without a push to
+main — the bot's `data`-branch archive commits count as repo activity.
+
+**GitHub deletes run logs after 90 days** (July's were gone by Oct 29), which is why
+screen time / catalog source now live in `meta.run` inside each archived snapshot.
+
+**`actions/checkout` ≥ v6 keeps credentials in a separate file** but adds an
+`includeIf` for `.git/worktrees/*`, so the archive push from its linked worktree
+still authenticates.
+
+**CARTO's dark basemap now needs an API key** (seen Oct 29): keyless requests get an
+"API KEY REQUIRED" tile, regardless of referrer. Replaced in 10.10 by NASA GIBS
+`VIIRS_Black_Marble` (EPSG:3857, keyless, CORS `*`, max level 8 → `maximumLevel: 8`).
+Raw it is near-black at globe zoom — `brightness: 1.8, gamma: 1.15` on the layer
+(3.0 washes the oceans out). Its coastline/label overlays are dark-on-transparent
+or empty in 3857, so none are used.
+
+**Starlink is lowering its ~550 km shells** (SpaceX's 2026 plan, ~550 → ~480 km),
+and it dominates the event count: Starlink–Starlink pairs went from 61% to 79% of
+all conjunctions Jul → Oct; in the 450–475 km band conjunctions scale with
+population^2.03. See `docs/findings/starlink-shell-lowering.md`.

@@ -49,12 +49,34 @@ const _GNSS_RE = /\b(GPS|NAVSTAR|GLONASS|GALILEO|BEIDOU)\b/;
 // 5k-catalog view, with 15 fps + occlusion-skip (satellites.js) as headroom.
 const CONJ_DISPLAY_CAP = 500;
 
+// 10.10 cross-constellation filter. 80% of events are Starlink × Starlink —
+// pairs the operator's own fleet coordination handles. Pairs that cross
+// operators are the ones that need two parties talking, so the list can hide
+// same-constellation pairs. Matched on the catalog name family (curated, not
+// exhaustive — an unlisted constellation's internal pairs stay visible).
+const _CONSTELLATION_RE =
+  /^(STARLINK|ONEWEB|KUIPER|QIANFAN|HULIANWANG|IRIDIUM|GLOBALSTAR|ORBCOMM|FLOCK|SKYSAT|LEMUR|HAWK|ICEYE|GEESAT|JILIN)\b/;
+
+function constellationOf(name) {
+  const m = _CONSTELLATION_RE.exec(name || "");
+  if (!m) return null;
+  return m[1] === "SKYSAT" ? "FLOCK" : m[1]; // both Planet
+}
+
+/** True if both participants of a raw snapshot conjunction share a constellation. */
+function isSameConstellation(c) {
+  const fam = constellationOf(c.a_name);
+  return fam !== null && fam === constellationOf(c.b_name);
+}
+
 // Populated by loadSnapshot(); consumed as globals by the other modules
 // (matches the project's existing plain-globals style).
 const satelliteMetadata = new Map(); // norad_id -> derived metadata (see below)
 let snapshotMeta = null;             // snapshot.json "meta" block
 let snapshotSatellites = [];         // raw OMM records (worker init payload)
 let snapshotConjunctions = [];       // adapted events, closest-first (capped)
+let snapshotCrossConjunctions = [];  // same, minus same-constellation pairs (capped)
+let snapshotCrossTotal = 0;          // cross-constellation events in the FULL snapshot
 
 // Per-satellite satrec cache for main-thread single-sat computations (info
 // panel, trails, TCA orb). json2satrec is the expensive call (~15 µs) — cache
@@ -142,6 +164,13 @@ function _adaptConjunction(c) {
     t_km: c.rtn_km[1],
     n_km: c.rtn_km[2],
     screening_regime: c.regime,
+    // 9.10: what THIS encounter was predicted to be on earlier runs, as
+    // [[epochSeconds, missKm], ...] oldest-first. Absent on ~two thirds of
+    // events (a pair must survive with a stable TCA across runs), and absent
+    // from EVERY event in a pre-9.10 snapshot — which a frontend-only redeploy
+    // still serves, since that path reuses the live snapshot rather than
+    // re-screening. Downstream must treat null as the ordinary case.
+    history: c.hist || null,
   };
 }
 
@@ -167,6 +196,11 @@ const snapshotReady = (async () => {
   // Events are closest-first in the snapshot (run_screen sorts by miss).
   snapshotConjunctions =
     snap.conjunctions.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
+  // Filtered BEFORE the cap, so the filter shows the closest CAP cross-
+  // constellation events — not just the few that made the overall top CAP.
+  const cross = snap.conjunctions.filter((c) => !isSameConstellation(c));
+  snapshotCrossTotal = cross.length;
+  snapshotCrossConjunctions = cross.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
 
   console.log(
     `snapshot: ${snap.meta.n_satellites} satellites, ` +

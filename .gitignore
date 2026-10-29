@@ -34,16 +34,29 @@ backend/data/tle/*.txt
 backend/data/tle/*.json
 backend/data/tle/*.parquet
 backend/data/conjunctions/*.parquet
+backend/data/spacetrack/
+backend/data/socrates/
 
 # Internal docs (not for public repo)
 PROJECT_DEEP_DIVE.md
 progress/future_project_ideas/
+docs/PIPELINE.md
 
 # Claude Code settings
 .claude/
 
 # Superpowers brainstorm sessions
 .superpowers/
+
+# Local tool state (notes vault, browser-automation scratch)
+.obsidian/
+.playwright-mcp/
+
+# Saved third-party reference pages + local screenshots (reading copies only)
+misc/spacetrk/
+progress/week6and7_planning/Space-Track.org_elsets*
+sparkline-flat.png
+tests/images/
 
 # IDE
 .vscode/

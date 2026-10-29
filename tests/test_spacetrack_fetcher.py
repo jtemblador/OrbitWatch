@@ -24,13 +24,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 import core.spacetrack_fetcher as stmod  # noqa: E402
 from core.spacetrack_fetcher import (  # noqa: E402
+    CATALOG_QUERY,
     BulkGPAdapter,
     SpaceTrackError,
     SpaceTrackFetcher,
     _cache_key,
     _coerce_numeric,
     _sorted_ids,
+    population_from_snapshot,
+    refill_group_cache,
 )
+from core.tle_fetcher import GPFetcher  # noqa: E402
 
 UTC = timezone.utc
 
@@ -272,6 +276,85 @@ class TestFetch:
         assert f.fetch_latest([]).empty
         assert f.fetch_history([], datetime(2026, 1, 1, tzinfo=UTC),
                                datetime(2026, 1, 2, tzinfo=UTC)).empty
+
+
+# ----------------------------------------------------------------------------
+def _catalog_fetcher(monkeypatch, tmp_path, ids):
+    """A SpaceTrackFetcher whose bulk catalog query returns `ids` (all strings,
+    as Space-Track sends them) and records the paths it was asked for."""
+    f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path / "st")
+    f.paths = []
+
+    def fake_query(path):
+        f.paths.append(path)
+        return json.dumps([_st_record(i, "2026-10-28T12:00:00") for i in ids])
+    monkeypatch.setattr(f, "_query", fake_query)
+    return f
+
+
+class TestCatalogFallback:
+    """10.10: refill a GPFetcher group cache from Space-Track when CelesTrak is
+    down — the pattern 10.3 ran by hand, now what CI runs on a fetch failure."""
+
+    def test_fetch_catalog_is_one_bulk_gp_query(self, monkeypatch, tmp_path):
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1, 2])
+        assert len(f.fetch_catalog()) == 2
+        assert f.paths == [CATALOG_QUERY]
+        assert CATALOG_QUERY.startswith("/class/gp/decay_date/null-val/")
+        assert "gp_history" not in CATALOG_QUERY
+
+    def test_refill_keeps_only_the_population(self, monkeypatch, tmp_path):
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1, 2, 3, 4])
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        df = refill_group_cache("active", [1, 2, 3], st=f, gp=gp)
+        assert sorted(df["norad_cat_id"]) == [1, 2, 3]
+        assert sorted(gp.load_cached("active")["norad_cat_id"]) == [1, 2, 3]
+
+    def test_refilled_cache_counts_as_fresh(self, monkeypatch, tmp_path):
+        # The whole point: build_snapshot's fetcher.fetch('active') must take
+        # this cache instead of re-trying the CelesTrak that just failed.
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1, 2])
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        refill_group_cache("active", [1, 2], st=f, gp=gp)
+        fresh = gp._load_if_fresh("active")
+        assert fresh is not None and len(fresh) == 2
+
+    def test_low_coverage_refuses_and_writes_nothing(self, monkeypatch, tmp_path):
+        # A truncated Space-Track response must not become the published catalog.
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1])
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        with pytest.raises(SpaceTrackError, match="1 of 4"):
+            refill_group_cache("active", [1, 2, 3, 4], st=f, gp=gp)
+        assert not (tmp_path / "tle" / "active.parquet").exists()
+
+    def test_empty_population_never_queries(self, monkeypatch, tmp_path):
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1])
+        with pytest.raises(SpaceTrackError, match="population"):
+            refill_group_cache("active", [], st=f, gp=GPFetcher(cache_dir=tmp_path / "tle"))
+        assert f.paths == []
+
+    def test_labels_keep_the_live_names_and_types(self, monkeypatch, tmp_path):
+        # Space-Track and CelesTrak name 16% of the active catalog differently
+        # ("TIANHE" vs "CSS (TIANHE)") and type ~600 payloads UNKNOWN. A
+        # fallback run keeps Space-Track's ELEMENTS but the live snapshot's
+        # labels, so search, station grouping and type filters don't flicker.
+        f = _catalog_fetcher(monkeypatch, tmp_path, [1, 2])
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        df = refill_group_cache("active", [1, 2], st=f, gp=gp,
+                                labels={1: ("CSS (TIANHE)", "PAYLOAD")})
+        rows = df.set_index("norad_cat_id")
+        assert rows.loc[1, "object_name"] == "CSS (TIANHE)"
+        assert rows.loc[1, "object_type"] == "PAYLOAD"
+        assert rows.loc[2, "object_name"] == "OBJ-2"          # unlabeled → Space-Track's
+        assert rows.loc[1, "mean_motion"] == 15.5              # elements untouched
+
+    def test_population_from_snapshot(self, tmp_path):
+        p = tmp_path / "snapshot.json"
+        p.write_text(json.dumps({"meta": {}, "satellites": [
+            {"NORAD_CAT_ID": 25544, "OBJECT_NAME": "ISS (ZARYA)", "OBJECT_TYPE": "PAYLOAD"},
+            {"NORAD_CAT_ID": 101195, "OBJECT_NAME": "X"}]}))
+        assert population_from_snapshot(p) == {25544: ("ISS (ZARYA)", "PAYLOAD"),
+                                               101195: ("X", None)}
 
 
 # ----------------------------------------------------------------------------
