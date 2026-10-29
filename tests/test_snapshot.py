@@ -18,8 +18,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from core.snapshot import (  # noqa: E402
+    ARCHIVE_ELEMENT_KEYS,
+    ARCHIVE_FORMAT,
     SCHEMA_VERSION,
     _conjunction,
+    archive_record,
     carry_forward_history,
     _epoch_iso,
     _num,
@@ -201,6 +204,74 @@ class TestBuildSnapshot:
         ids = {s["NORAD_CAT_ID"] for s in snap["satellites"]}
         for c in snap["conjunctions"]:
             assert c["a"] in ids and c["b"] in ids
+
+    def test_run_telemetry_lands_in_meta(self):
+        # GitHub deletes run logs after 90 days; meta.run is what survives in
+        # the archive (screen time, which catalog source fed the run).
+        run = {"screen_seconds": 812.5, "catalog_source": "spacetrack"}
+        snap = build_snapshot(pd.DataFrame([_row()]), [], {}, "t", run=run)
+        assert snap["meta"]["run"] == run
+
+    def test_no_run_key_without_telemetry(self):
+        # Absent, not null — the pre-10.10 meta shape is unchanged.
+        assert "run" not in build_snapshot(pd.DataFrame([_row()]), [], {}, "t")["meta"]
+
+
+def _full_snapshot():
+    df = pd.DataFrame([_row(norad_cat_id=25544, object_name="ISS (ZARYA)"),
+                       _row(norad_cat_id=12345, object_name="COSMOS DEB",
+                            object_type="DEBRIS", mean_motion=14.9)])
+    prev = {"meta": {"generated_at": _PREV_GEN},
+            "conjunctions": [_cj(a=25544, b=12345,
+                                 tca="2026-06-01T18:00:00+00:00", miss_km=2.0)]}
+    return build_snapshot(df, [_event(sat2_name="COSMOS DEB")], {"mode": "SFS"},
+                          "2026-07-03T00:00:00Z",
+                          "CelesTrak active", prev=prev, run={"screen_seconds": 1.0})
+
+
+class TestArchiveRecord:
+    def test_drops_full_omm_keeps_meta_conjunctions_elements(self):
+        rec = archive_record(_full_snapshot())
+        assert set(rec) == {"meta", "conjunctions", "elements"}
+        assert rec["meta"]["archive"]["format"] == ARCHIVE_FORMAT
+        assert rec["meta"]["n_satellites"] == 2 and rec["meta"]["run"] == {"screen_seconds": 1.0}
+
+    def test_elements_are_columnar_and_aligned(self):
+        snap = _full_snapshot()
+        el = archive_record(snap)["elements"]
+        assert list(el) == list(ARCHIVE_ELEMENT_KEYS)
+        assert all(len(col) == len(snap["satellites"]) for col in el.values())
+        for i, sat in enumerate(snap["satellites"]):
+            for k in ARCHIVE_ELEMENT_KEYS:
+                assert el[k][i] == sat[k]
+        # (NORAD_CAT_ID, EPOCH) is the Space-Track gp_history key that recovers
+        # the dropped full element set — both must survive.
+        assert {"NORAD_CAT_ID", "EPOCH"} <= set(el)
+
+    def test_conjunction_names_move_to_elements(self):
+        snap = _full_snapshot()
+        rec = archive_record(snap)
+        c = rec["conjunctions"][0]
+        assert not {"a_name", "b_name", "a_type", "b_type"} & set(c)
+        assert c["hist"] == snap["conjunctions"][0]["hist"]    # 9.10 trail kept
+        assert c["miss_km"] == snap["conjunctions"][0]["miss_km"]
+        # every dropped name is still recoverable through the elements table
+        names = dict(zip(rec["elements"]["NORAD_CAT_ID"], rec["elements"]["OBJECT_NAME"]))
+        full = snap["conjunctions"][0]
+        assert names[c["a"]] == full["a_name"] and names[c["b"]] == full["b_name"]
+
+    def test_does_not_mutate_the_published_snapshot(self):
+        snap = _full_snapshot()
+        before = json.dumps(snap, sort_keys=True)
+        archive_record(snap)
+        assert json.dumps(snap, sort_keys=True) == before
+
+    def test_strict_json_and_empty_snapshot(self):
+        rec = archive_record(build_snapshot(pd.DataFrame(columns=list(_row().index)),
+                                            [], {}, "t"))
+        assert rec["conjunctions"] == [] and all(v == [] for v in rec["elements"].values())
+        json.loads(json.dumps(archive_record(_full_snapshot()), allow_nan=False),
+                   parse_constant=_reject_const)
 
 
 class TestCarryForwardHistory:

@@ -35,10 +35,18 @@ for _p in (_ROOT, os.path.join(_ROOT, "backend")):
 from backend.core.conjunctions import run_screen                 # noqa: E402
 from backend.core.propagator import build_satrecs_and_meta       # noqa: E402
 from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
-from backend.core.snapshot import build_snapshot                 # noqa: E402
+from backend.core.snapshot import archive_record, build_snapshot # noqa: E402
 from backend.core.tle_fetcher import GPFetcher                   # noqa: E402
 
 _GZ_BUDGET_BYTES = 5_000_000  # ~5 MB gzipped target (see roadmap 9.2)
+
+# meta.source per catalog supplier. Space-Track's blanket redistribution approval
+# for basic SSA data is "conditioned on appropriate citation" — this string is
+# that citation, and the site shows it.
+_SOURCE_LABELS = {
+    "celestrak": "CelesTrak {group}",
+    "spacetrack": "Space-Track.org (USSPACECOM) GP, CelesTrak {group} population",
+}
 
 
 # Phase 10.6: production runs the full accelerated engine — fused C++ coarse+
@@ -88,6 +96,15 @@ def main() -> None:
                     help="previous snapshot.json — carries each conjunction's "
                          "prediction history forward (9.10). Missing or "
                          "unreadable is non-fatal: the run just emits no history.")
+    ap.add_argument("--catalog-source", choices=sorted(_SOURCE_LABELS),
+                    default="celestrak",
+                    help="who supplied the cached elements — sets meta.source "
+                         "(the citation Space-Track's redistribution terms ask "
+                         "for). CI passes spacetrack when the CelesTrak fetch "
+                         "failed and the Space-Track fallback filled the cache.")
+    ap.add_argument("--archive-out", default="",
+                    help="also write the slim data-branch archive record "
+                         "(snapshot.archive_record) here, gzipped (10.10)")
     args = ap.parse_args()
 
     fetcher = GPFetcher()
@@ -165,11 +182,22 @@ def main() -> None:
                   f"building without prediction history.", file=sys.stderr)
             prev = None
 
+    # 10.10 run telemetry → meta.run. GitHub deletes run logs after 90 days, so
+    # without this the archive can't say how long a screen took or which
+    # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
+    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source}
+    for key, env in (("github_run_id", "GITHUB_RUN_ID"),
+                     ("github_event", "GITHUB_EVENT_NAME")):
+        if os.environ.get(env):
+            run[key] = os.environ[env]
+
     snap = build_snapshot(df, events, screen_params, generated_at,
-                          source=f"CelesTrak {args.group}", prev=prev)
+                          source=_SOURCE_LABELS[args.catalog_source].format(group=args.group),
+                          prev=prev, run=run)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0
+        snap["meta"]["run"]["history_pct"] = round(pct, 1)
         print(f"history: {n_hist} of {len(snap['conjunctions'])} conjunctions "
               f"carried a trail forward ({pct:.1f}%)")
         # A rate of EXACTLY zero against a substantial previous run is not a data
@@ -199,6 +227,13 @@ def main() -> None:
     if gz > _GZ_BUDGET_BYTES:
         print(f"  ⚠ over the ~{_GZ_BUDGET_BYTES / 1e6:.0f} MB gzipped budget "
               f"— trim the catalog or drop fields")
+
+    if args.archive_out:
+        rec = json.dumps(archive_record(snap), separators=(",", ":"), allow_nan=False)
+        with gzip.open(args.archive_out, "wt", encoding="utf-8") as f:
+            f.write(rec)
+        print(f"wrote archive record {args.archive_out}: "
+              f"{os.path.getsize(args.archive_out) / 1e6:.2f} MB gzipped ({gz / 1e6:.2f} full)")
 
 
 if __name__ == "__main__":

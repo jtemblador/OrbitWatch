@@ -40,6 +40,17 @@ HISTORY_MAX_POINTS = 3
 # the pair alone would splice unrelated approaches into one trail.
 TCA_MATCH_WINDOW_S = 900.0
 
+# 10.10 slim archive record (see `archive_record`). The data branch keeps every
+# run's screen output — the one thing that can't be reproduced later — but not
+# the full OMM, which Space-Track gp_history returns by (NORAD_CAT_ID, EPOCH).
+# Name/type/mean elements stay so population analytics (e.g. which altitude band
+# a constellation sits in) still run straight off the archive. ~50% of the full
+# record gzipped (measured on the live 16.8k snapshot).
+ARCHIVE_FORMAT = "slim-v1"
+ARCHIVE_ELEMENT_KEYS = ("NORAD_CAT_ID", "EPOCH", "OBJECT_NAME", "OBJECT_TYPE",
+                        "MEAN_MOTION", "ECCENTRICITY", "INCLINATION")
+_ARCHIVE_DROPPED_CONJ_KEYS = {"a_name", "b_name", "a_type", "b_type"}
+
 # df column -> json2satrec OMM key. SGP4-essential + identity fields (EPOCH is
 # handled separately as a naive-UTC ISO string).
 _OMM_MAP = {
@@ -244,6 +255,7 @@ def build_snapshot(
     generated_at: str,
     source: str = "CelesTrak",
     prev: dict | None = None,
+    run: dict | None = None,
 ) -> dict:
     """Assemble the static-site snapshot dict from a catalog frame + screen events.
 
@@ -256,6 +268,9 @@ def build_snapshot(
         prev:          the previous snapshot dict, to carry conjunction history
                        forward (9.10). Omit — or pass one that is missing or
                        malformed — and no `hist` is emitted at all.
+        run:           per-run telemetry (screen time, catalog source, CI run id)
+                       → `meta.run`. CI logs expire after 90 days; the archive
+                       doesn't. Omitted → no `run` key.
     """
     sats = [_satellite(rec) for rec in catalog_df.to_dict("records")]
     conj = [_conjunction(e) for e in events]
@@ -269,16 +284,40 @@ def build_snapshot(
         m = catalog_df["epoch_age_days"].max()
         if isinstance(m, (int, float)) and math.isfinite(float(m)):
             max_age = round(float(m), 2)
+    meta = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "source": source,
+        "n_satellites": len(sats),
+        "n_conjunctions": len(conj),
+        "screen": screen_params,
+        "max_epoch_age_days": max_age,
+    }
+    if run:
+        meta["run"] = run
+    return {"meta": meta, "satellites": sats, "conjunctions": conj}
+
+
+def archive_record(snap: dict) -> dict:
+    """The slim record the data branch keeps for one published snapshot (10.10).
+
+    Keeps `meta` (tagged with the archive format) and every conjunction —
+    screen output is not reproducible after the fact — but replaces the full
+    per-satellite OMM with columnar `elements` (ARCHIVE_ELEMENT_KEYS), and drops
+    the conjunction rows' names/types, which `elements` already carries by NORAD
+    id. Pure; never mutates the published snapshot.
+    """
+    sats = snap.get("satellites") or []
+    meta = dict(snap.get("meta") or {})
+    meta["archive"] = {
+        "format": ARCHIVE_FORMAT,
+        "dropped": "full OMM (re-fetch from Space-Track gp_history by "
+                   "NORAD_CAT_ID + EPOCH); conjunction names/types (see elements)",
+    }
     return {
-        "meta": {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": generated_at,
-            "source": source,
-            "n_satellites": len(sats),
-            "n_conjunctions": len(conj),
-            "screen": screen_params,
-            "max_epoch_age_days": max_age,
-        },
-        "satellites": sats,
-        "conjunctions": conj,
+        "meta": meta,
+        "conjunctions": [{k: v for k, v in c.items()
+                          if k not in _ARCHIVE_DROPPED_CONJ_KEYS}
+                         for c in snap.get("conjunctions") or []],
+        "elements": {k: [s.get(k) for s in sats] for k in ARCHIVE_ELEMENT_KEYS},
     }
