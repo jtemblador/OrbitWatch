@@ -254,6 +254,18 @@ class TestUnitConversions(unittest.TestCase):
 # 2. Single Satellite Propagation
 # ===========================================================================
 
+class TestEnsureDataPublishOrder(unittest.TestCase):
+    def test_df_is_published_only_after_its_indexes(self):
+        """Another thread that sees _df set must never find the indexes None
+        (review round 1): if index building fails, _df must stay unpublished."""
+        from unittest.mock import patch
+        prop = SatellitePropagator()
+        with patch.object(prop, "_build_indexes", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                prop._ensure_data()
+        self.assertIsNone(prop._df)
+
+
 class TestSingleSatPropagation(unittest.TestCase):
     """Test propagation of individual satellites."""
 
@@ -707,26 +719,19 @@ class TestPerformance(unittest.TestCase):
         self.assertLess(elapsed, 1.0,
             f"Took {elapsed:.3f}s for 100 time steps (limit: 1.0s)")
 
-    def test_repeated_lookups_faster_than_first(self):
-        """Cached Satrec lookups should be faster than cold init."""
+    def test_repeated_lookups_reuse_the_cached_satrec(self):
+        """Repeated propagation of one satellite reuses ONE cached Satrec.
+        (Was a cold-vs-warm timing test that could not fail — the cold time
+        included the parquet load. Asserts the caching behaviour instead.)"""
         prop = SatellitePropagator()
         now = datetime.now(timezone.utc)
-
-        # Cold: first call initializes Satrec + loads data
-        start = time.perf_counter()
         prop.get_position("ISS (ZARYA)", now)
-        cold_time = time.perf_counter() - start
-
-        # Warm: Satrec and data already cached
-        times = [now + timedelta(seconds=i) for i in range(10)]
-        start = time.perf_counter()
-        for t in times:
-            prop.get_position("ISS (ZARYA)", t)
-        warm_time = (time.perf_counter() - start) / 10
-
-        # Warm lookup should be faster (or at least not slower)
-        self.assertLess(warm_time, cold_time * 2,
-            f"Warm={warm_time:.5f}s, Cold={cold_time:.5f}s")
+        self.assertEqual(len(prop._satrec_cache), 1)
+        cached = next(iter(prop._satrec_cache.values()))
+        for i in range(10):
+            prop.get_position("ISS (ZARYA)", now + timedelta(seconds=i))
+        self.assertEqual(len(prop._satrec_cache), 1)
+        self.assertIs(next(iter(prop._satrec_cache.values())), cached)
 
     def test_index_lookup_is_constant_time(self):
         """Name lookup via index should not scale with dataset size."""
@@ -781,7 +786,7 @@ class TestScalability(unittest.TestCase):
         prop._df = df
 
         start = time.perf_counter()
-        prop._build_indexes()
+        prop._build_indexes(df)
         elapsed = time.perf_counter() - start
 
         self.assertEqual(len(prop._name_index), n)
@@ -790,26 +795,23 @@ class TestScalability(unittest.TestCase):
             f"Index build for {n} sats took {elapsed:.3f}s")
 
     def test_simulated_6000_sat_lookup(self):
-        """Looking up satellites in a 6000-entry index should be instant."""
+        """find_by_norad_id returns the RIGHT row across a 6000-entry catalog,
+        incl. ids past the 5-digit TLE cap. (Was a timing test of a bare
+        dict.get that never called the code under test.)"""
         n = 6000
         df = pd.DataFrame({
             "object_name": [f"STARLINK-{i}" for i in range(n)],
-            "norad_cat_id": list(range(50000, 50000 + n)),
+            "norad_cat_id": list(range(97000, 97000 + n)),   # crosses 99,999
         })
 
         prop = SatellitePropagator()
+        prop._build_indexes(df)
         prop._df = df
-        prop._name_index = {f"STARLINK-{i}": i for i in range(n)}
-        prop._norad_index = {50000 + i: i for i in range(n)}
-
-        # 1000 random lookups by name
-        start = time.perf_counter()
-        for i in range(0, n, 6):  # 1000 lookups
-            prop._name_index.get(f"STARLINK-{i}")
-        elapsed = time.perf_counter() - start
-
-        self.assertLess(elapsed, 0.01,
-            f"1000 index lookups took {elapsed:.5f}s")
+        for i in range(0, n, 6):
+            row = prop.find_by_norad_id(97000 + i)
+            self.assertEqual(row["object_name"], f"STARLINK-{i}")
+        with self.assertRaises(KeyError):
+            prop.find_by_norad_id(97000 + n)
 
     def test_satrec_cache_memory_estimate(self):
         """Verify Satrec objects are lightweight enough for 6000 sats."""

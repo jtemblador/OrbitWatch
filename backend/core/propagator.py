@@ -192,9 +192,12 @@ class SatellitePropagator:
                 df = slice_to_shell(df, max_sats=self.max_sats)
 
             # Positional indexing (get_all_satrecs / _find_satellite use iloc on
-            # index labels) requires a clean 0..n-1 RangeIndex.
-            self._df = df.reset_index(drop=True)
-            self._build_indexes()
+            # index labels) requires a clean 0..n-1 RangeIndex. Indexes are built
+            # BEFORE _df is published: another thread that sees _df set must
+            # never find the indexes still None.
+            df = df.reset_index(drop=True)
+            self._build_indexes(df)
+            self._df = df
         return self._df
 
     def catalog_size(self) -> int:
@@ -223,9 +226,8 @@ class SatellitePropagator:
             "max_epoch_age_days": round(float(max_age_days), 2),
         }
 
-    def _build_indexes(self):
+    def _build_indexes(self, df: pd.DataFrame):
         """Build O(1) lookup indexes from the DataFrame."""
-        df = self._df
         self._name_index = dict(zip(df["object_name"].str.upper(), df.index))
         self._norad_index = dict(zip(df["norad_cat_id"].astype(int), df.index))
 

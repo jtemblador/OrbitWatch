@@ -14,6 +14,8 @@ Validates:
 import math
 import os
 import sys
+
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -224,14 +226,12 @@ class TestEndToEnd:
 
         parquet = Path(__file__).parent.parent / "backend" / "data" / "tle" / "stations.parquet"
         if not parquet.exists():
-            print("  SKIP (no cached TLE data)")
-            return
+            pytest.skip("no cached stations TLE data")
 
         df = pd.read_parquet(parquet)
         iss = df[df["norad_cat_id"] == 25544]
         if iss.empty:
-            print("  SKIP (ISS not in cache)")
-            return
+            pytest.skip("ISS not in the cached stations group")
 
         row = iss.iloc[0]
         sat = Satrec()
@@ -274,8 +274,7 @@ class TestEndToEnd:
 
         parquet = Path(__file__).parent.parent / "backend" / "data" / "tle" / "stations.parquet"
         if not parquet.exists():
-            print("  SKIP (no cached TLE data)")
-            return
+            pytest.skip("no cached stations TLE data")
 
         df = pd.read_parquet(parquet)
         errors = 0
