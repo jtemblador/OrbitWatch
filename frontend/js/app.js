@@ -17,13 +17,23 @@ if (typeof CESIUM_ION_TOKEN === "undefined" || CESIUM_ION_TOKEN === "YOUR_CESIUM
 Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
 const viewer = new Cesium.Viewer("cesiumContainer", {
-  // CartoDB dark tiles — country borders + labels on a dark background.
-  // Dark base makes satellite points pop visually.
+  // NASA Black Marble (VIIRS night lights) via NASA GIBS — keyless, public
+  // domain. Dark base makes satellite points pop visually. Replaced CartoDB's
+  // dark tiles in 10.10: CARTO began answering keyless requests with an
+  // "API KEY REQUIRED" image (Oct 2026). GIBS serves this layer in Web
+  // Mercator up to level 8, so the provider is capped there (Cesium upsamples
+  // when zoomed closer instead of requesting tiles that don't exist).
+  // Raw Black Marble is near-black at whole-globe zoom (the globe vanished into
+  // space); brightness/gamma lift the land and oceans to a dark navy that still
+  // lets the satellite dots pop (tuned headless: 3.0 washed the oceans out).
   baseLayer: new Cesium.ImageryLayer(
     new Cesium.UrlTemplateImageryProvider({
-      url: "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      credit: "Map tiles by CartoDB, under CC BY 3.0. Data by OpenStreetMap, under ODbL.",
-    })
+      url: "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/" +
+           "default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png",
+      maximumLevel: 8,
+      credit: "Imagery: NASA Black Marble (VIIRS), via NASA GIBS / ESDIS.",
+    }),
+    { brightness: 1.8, gamma: 1.15 }
   ),
   terrain: undefined,
 
