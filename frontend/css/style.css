@@ -307,6 +307,24 @@ html, body, #cesiumContainer {
   padding: 4px 0;
 }
 
+/* "Hide same-constellation pairs" (10.10) — sits under the sticky header */
+#conjunction-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid #222;
+  font-size: 11px;
+  color: #aaa;
+  cursor: pointer;
+  user-select: none;
+}
+#conjunction-filter input {
+  margin: 0;
+  accent-color: #ff9800;
+  cursor: pointer;
+}
+
 /* Freshness line — snapshot age + validation-report link (9.3) */
 #conjunction-freshness {
   padding: 6px 10px;

@@ -223,7 +223,12 @@ function focusedConjunctionInvolves(noradId) {
 const conjPanel = document.createElement("div");
 conjPanel.id = "conjunction-list";
 conjPanel.innerHTML =
-  `<div id="conjunction-header">Conjunctions</div><div id="conjunction-body"></div>`;
+  `<div id="conjunction-header">Conjunctions</div>` +
+  `<label id="conjunction-filter" title="Pairs inside one constellation (80% are ` +
+  `Starlink × Starlink) are handled by that operator's own fleet coordination. ` +
+  `Cross-operator pairs are the ones that need two parties talking.">` +
+  `<input type="checkbox" id="conj-hide-same"> Hide same-constellation pairs</label>` +
+  `<div id="conjunction-body"></div>`;
 document.body.appendChild(conjPanel);
 
 const detailPanel = document.createElement("div");
@@ -705,9 +710,10 @@ function renderConjunctionList() {
     ? satelliteMetadata.size : "—";
   // With the display cap (snapshot-data.js) the UI works with the closest N of
   // the full screened set — say so, so the count stays honest.
+  const noun = conjHideSameConstellation ? "cross-constellation pairs" : "pairs";
   const pairsLabel = conjEvents.length < conjTotalCount
-    ? `closest ${conjEvents.length} of ${conjTotalCount} pairs`
-    : `${conjTotalCount} pairs`;
+    ? `closest ${conjEvents.length} of ${conjTotalCount.toLocaleString()} ${noun}`
+    : `${conjTotalCount.toLocaleString()} ${noun}`;
   document.getElementById("conjunction-header").textContent =
     `Conjunctions · ${pairsLabel} · ${satCount} sats`;
 
@@ -841,11 +847,15 @@ function renderFreshness() {
     ` title="Screening validated against CelesTrak SOCRATES">validation ↗</a>`;
 }
 
-// --- Load: events come pre-computed in the snapshot (screened offline) ---
+// --- The active conjunction set (all pairs, or cross-constellation only) ---
 
-snapshotReady.then(() => {
-  conjTotalCount = snapshotMeta.n_conjunctions;
-  conjEvents = snapshotConjunctions; // SFS-screened, suppressed, de-duped, closest-first
+/** Make `events` (adapted, closest-first, capped) THE conjunction set every view
+ *  reads: the list, the per-satellite index, and the participant set behind the
+ *  "All" dots + worker mask. */
+function useConjunctionSet(events, total) {
+  conjTotalCount = total;
+  conjEvents = events;
+  conjListShown = CONJ_LIST_MAX;
   conjByNorad.clear();
   conjParticipants.clear();
   for (const e of conjEvents) {
@@ -855,6 +865,42 @@ snapshotReady.then(() => {
       conjParticipants.add(id);
     }
   }
+}
+
+// 10.10 "Hide same-constellation pairs" (see snapshot-data.js). Swaps the whole
+// set, not just the list rows, so arcs, participant dots and the worker mask
+// all agree with what the list says.
+let conjHideSameConstellation = false;
+
+function setHideSameConstellation(on) {
+  if (on === conjHideSameConstellation) return;
+  conjHideSameConstellation = on;
+  // A selection/focus belongs to the old set (its partners may be gone) →
+  // back to All first, which also drops isolation and redraws the list.
+  const hasSelection =
+    typeof selectedNoradId !== "undefined" && selectedNoradId !== null;
+  if (hasSelection || focusedKey !== null) exitToAll();
+  if (on) useConjunctionSet(snapshotCrossConjunctions, snapshotCrossTotal);
+  else useConjunctionSet(snapshotConjunctions, snapshotMeta.n_conjunctions);
+  renderConjunctionList();
+  if (typeof resetParticipantMask === "function") resetParticipantMask();
+  if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "top20") {
+    renderConjOnlyArcs("top20");
+  }
+  if (typeof applyVisibilityState === "function") applyVisibilityState();
+  // force: the participant mask changed, so land one batch even while paused.
+  if (typeof refreshSatellites === "function") refreshSatellites(true);
+  viewer.scene.requestRender();
+}
+
+document.getElementById("conj-hide-same").addEventListener("change", (ev) =>
+  setHideSameConstellation(ev.target.checked));
+
+// --- Load: events come pre-computed in the snapshot (screened offline) ---
+
+snapshotReady.then(() => {
+  // SFS-screened, suppressed, de-duped, closest-first
+  useConjunctionSet(snapshotConjunctions, snapshotMeta.n_conjunctions);
   renderConjunctionList();
   renderFreshness();
   setInterval(renderFreshness, 60000); // the age ticks while the tab stays open

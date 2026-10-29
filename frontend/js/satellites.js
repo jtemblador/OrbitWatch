@@ -341,9 +341,14 @@ _hoverHandler.setInputAction((move) => {
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
 // Cached "which sats are conjunction participants" mask, in worker-index order.
-// Built once (participants don't change) and reused to skip non-participant
-// propagation in the "All" conjunction view.
+// Reused to skip non-participant propagation in the "All" conjunction view;
+// rebuilt only when the participant set changes (the 10.10 same-constellation
+// filter swaps it — see resetParticipantMask).
 let _participantMask = null;
+
+function resetParticipantMask() {
+  _participantMask = null;
+}
 function participantMask() {
   if (_participantMask) return _participantMask;
   const n = snapshotSatellites.length;
