@@ -1067,6 +1067,29 @@ class TestTimeSieve:
                 d = np.mod(d + np.pi, 2 * np.pi) - np.pi
             assert np.abs(d).max() < 1e-8, f"{field}: {np.abs(d).max()}"
 
+    def test_non_elliptic_anchor_is_a_failed_anchor(self):
+        """Review round 1 (10.10): an osculating state with ecc >= 1 has a NaN
+        mean anomaly (sqrt(1 - ecc)), and a NaN phase slips past every `x <= c`
+        guard in the window builder — the pair's window list comes out EMPTY
+        and the pair is dropped unscanned (a no-skip violation). The anchor
+        must instead read as FAILED, which routes every pair it's in to the
+        conservative whole-window scan, and must not leak the non-elliptic
+        elements. Mean ecc 0.998 at 1 rev/day osculates to ecc ~1.00005 at
+        epoch (measured; the pre-fix engine reported exactly that, ok or not).
+        """
+        no_kozai = 1.0 * 2 * math.pi / 1440.0
+        sat = orbitcore.sgp4init(orbitcore.GravConst.WGS72, "i", "99999",
+                                 10100.0, 0.0, 0.0, 0.0, 0.998, 0.0,
+                                 math.radians(63.4), 0.0, no_kozai, 0.0)
+        assert sat.error == 0, "fixture must be a valid SGP4 init"
+        jd0 = sat.jdsatepoch + sat.jdsatepochF
+        a = orbitcore._sieve_anchors([sat], jd0, jd0 + 1.0)
+        assert a["ok"][0] == 0
+        for field in ("ecc", "lam_rate", "m_rate", "curv", "u0"):
+            v = a[field][0]
+            assert math.isfinite(v), f"{field} leaked a non-finite value: {v}"
+        assert a["ecc"][0] < 1.0, f"non-elliptic ecc leaked: {a['ecc'][0]}"
+
     def test_sieve_events_identical_at_shell_scale(self):
         """The whole point: run_screen(sieve=True) == run_screen(sieve=False)
         event-for-event on the dense shell (>1000 real Euclidean events — a
