@@ -163,6 +163,15 @@ class TestBuildSnapshot:
         df = pd.DataFrame([_row(epoch_age_days=1.0), _row(epoch_age_days=4.567)])
         assert build_snapshot(df, [], {}, "t")["meta"]["max_epoch_age_days"] == 4.57
 
+    def test_max_epoch_age_is_measured_at_generation_not_parse_time(self):
+        # epoch_age_days is frozen when the cache was PARSED; a run that serves
+        # an older cache would understate element age. With a real generated_at
+        # the age is (generated_at - epoch), whatever the stale column says.
+        df = pd.DataFrame([_row(epoch=pd.Timestamp("2026-06-01T00:00:00", tz="UTC"),
+                                epoch_age_days=0.1)])
+        snap = build_snapshot(df, [], {}, "2026-06-11T00:00:00Z")
+        assert snap["meta"]["max_epoch_age_days"] == 10.0
+
     def test_all_nan_age_is_none_not_nan(self):
         df = pd.DataFrame([_row(epoch_age_days=float("nan"))])
         assert build_snapshot(df, [], {}, "t")["meta"]["max_epoch_age_days"] is None
@@ -420,3 +429,86 @@ class TestOMMCrossValidation:
             _e, r_ref, _v = sat_ref.sgp4(jd, 6.0 / 24.0)   # +6 h
             r_cpp, _vc = orbitcore.sgp4(sat_cpp, 360.0)    # +360 min
             assert math.dist(r_ref, r_cpp) < 0.01          # < 10 m (km units)
+
+
+# --- scripts/build_snapshot.py wiring (review round 1: main() had no test) ---
+
+def _load_script(name):
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts", f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"_script_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestBuildSnapshotMain:
+    """End-to-end through the real main(): flags → screen → files. The catalog
+    is the deterministic synthetic shell (real sgp4init, no network)."""
+
+    @pytest.fixture
+    def run_main(self, monkeypatch, tmp_path):
+        from core.demo_seed import build_synthetic_shell
+        bs = _load_script("build_snapshot")
+        shell = build_synthetic_shell(n=40)
+
+        class FakeFetcher:
+            def fetch(self, group):
+                return shell.copy()
+        monkeypatch.setattr(bs, "GPFetcher", FakeFetcher)
+
+        def run(*extra, env=None):
+            for k, v in (env or {}).items():
+                monkeypatch.setenv(k, v)
+            out = tmp_path / "snapshot.json"
+            monkeypatch.setattr(sys, "argv", ["build_snapshot.py", "--hours", "1",
+                                              "--out", str(out), *extra])
+            bs.main()
+            return json.loads(out.read_text())
+        return run, tmp_path
+
+    def test_spacetrack_source_is_cited_and_archive_is_slim_json(self, run_main):
+        import gzip
+        run, tmp = run_main
+        arch = tmp / "arch.json.gz"
+        snap = run("--catalog-source", "spacetrack", "--archive-out", str(arch),
+                   env={"GITHUB_SHA": "abc123", "GITHUB_RUN_ID": "42"})
+        assert snap["meta"]["source"].startswith("Space-Track.org (USSPACECOM)")
+        run_meta = snap["meta"]["run"]
+        assert run_meta["catalog_source"] == "spacetrack"
+        assert run_meta["git_sha"] == "abc123" and run_meta["github_run_id"] == "42"
+        rec = json.loads(gzip.decompress(arch.read_bytes()), parse_constant=_reject_const)
+        assert rec["meta"]["archive"]["format"] == "slim-v1"
+        assert len(rec["conjunctions"]) == snap["meta"]["n_conjunctions"]
+        assert len(rec["elements"]["NORAD_CAT_ID"]) == snap["meta"]["n_satellites"]
+
+    def test_conjunction_floor_refuses_to_publish(self, run_main):
+        run, tmp = run_main
+        with pytest.raises(SystemExit) as exc:
+            run("--min-conjunctions", "1000000000")
+        assert exc.value.code == 1
+        assert not (tmp / "snapshot.json").exists()
+
+    def test_prev_that_is_valid_json_but_not_a_snapshot_is_not_fatal(self, run_main):
+        run, tmp = run_main
+        for junk in ("[]", "null", '"text"'):
+            prev = tmp / "prev.json"
+            prev.write_text(junk)
+            snap = run("--prev", str(prev))
+            assert all("hist" not in c for c in snap["conjunctions"])
+
+
+class TestAbScreenFloor:
+    def test_agreeing_on_zero_events_fails_with_a_floor(self, monkeypatch):
+        ab = _load_script("ab_screen")
+        monkeypatch.setattr(ab, "_load", lambda *a, **k: ([], []))
+        monkeypatch.setattr(ab, "_screen", lambda *a, **k: (
+            [], {"t_medium": 1.0, "t_fine": 0.0, "n_windows": 0}))
+        monkeypatch.setattr(sys, "argv", ["ab_screen.py", "--min-events", "5"])
+        with pytest.raises(SystemExit) as exc:
+            ab.main()
+        assert exc.value.code == 1
+        monkeypatch.setattr(sys, "argv", ["ab_screen.py"])   # no floor: 0 == 0 passes
+        with pytest.raises(SystemExit) as exc:
+            ab.main()
+        assert exc.value.code == 0

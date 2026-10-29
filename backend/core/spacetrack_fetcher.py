@@ -204,7 +204,11 @@ class SpaceTrackFetcher:
         e1 = epoch_end.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
         cache = self.cache_dir / f"gphist_{_cache_key(ids, e0, e1)}.parquet"
-        if cache.exists() and not force:
+        # Only a CLOSED window is immutable: one reaching today can still gain
+        # elsets, so caching it "forever" would hide everything published after
+        # the first fetch. Open windows are always re-queried and never cached.
+        closed = epoch_end.astimezone(timezone.utc).date() < datetime.now(timezone.utc).date()
+        if cache.exists() and not force and closed:
             # The cached frame's fetch_time/epoch_age_days are from first fetch and
             # thus stale, but harmless: matching keys on absolute `epoch`, and
             # _attach_epoch_ok recomputes element age at TCA from it.
@@ -215,7 +219,7 @@ class SpaceTrackFetcher:
                 f"/EPOCH/{e0}--{e1}"
                 f"/orderby/{urllib.parse.quote('EPOCH asc')}/format/json")
         df = self._parse(self._query(path))
-        if not df.empty:
+        if not df.empty and closed:
             df.to_parquet(cache, index=False)
         return df
 

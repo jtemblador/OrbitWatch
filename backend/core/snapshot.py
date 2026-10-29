@@ -279,9 +279,18 @@ def build_snapshot(
             conj, prev.get("conjunctions"),
             (prev.get("meta") or {}).get("generated_at"))
     # NaN would serialize to a bare `NaN` token that JS JSON.parse rejects — guard it.
+    # Measured at GENERATION time from the epochs: the epoch_age_days column is
+    # frozen when the cache was parsed, so an older cache would understate it.
+    # (Falls back to the column when generated_at isn't a timestamp.)
     max_age = None
-    if len(catalog_df) and "epoch_age_days" in catalog_df.columns:
-        m = catalog_df["epoch_age_days"].max()
+    if len(catalog_df):
+        gen = _epoch_seconds(generated_at)
+        m = None
+        if gen is not None and "epoch" in catalog_df.columns:
+            epochs = pd.to_datetime(catalog_df["epoch"], utc=True)
+            m = (gen - epochs.map(lambda t: t.timestamp())).max() / 86400.0
+        elif "epoch_age_days" in catalog_df.columns:
+            m = catalog_df["epoch_age_days"].max()
         if isinstance(m, (int, float)) and math.isfinite(float(m)):
             max_age = round(float(m), 2)
     meta = {

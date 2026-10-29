@@ -257,6 +257,19 @@ class TestFetch:
         df2 = f.fetch_history([25544], d0, d1)   # immutable → cache hit
         assert len(calls) == 1 and len(df2) == 1
 
+    def test_open_window_is_never_cached(self, monkeypatch, tmp_path):
+        # A window reaching today can still gain elsets — a "forever" cache
+        # would hide every one published after the first fetch.
+        f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path)
+        calls = []
+        monkeypatch.setattr(f, "_query", lambda p: calls.append(p) or json.dumps(
+            [_st_record(25544, "2026-10-28T12:00:00")]))
+        now = datetime.now(UTC)
+        f.fetch_history([25544], now.replace(day=1), now)
+        f.fetch_history([25544], now.replace(day=1), now)
+        assert len(calls) == 2
+        assert not list(tmp_path.glob("gphist_*.parquet"))
+
     def test_fetch_latest_uses_gp_class(self, monkeypatch, tmp_path):
         f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path)
         seen = {}
@@ -365,3 +378,28 @@ class TestLiveSpaceTrack:
         df = f.fetch_history([25544], datetime(2026, 6, 20, tzinfo=UTC),
                              datetime(2026, 6, 26, tzinfo=UTC))
         assert not df.empty and (df["norad_cat_id"] == 25544).all()
+
+
+class TestRefillCLI:
+    """`python -m backend.core.spacetrack_fetcher` — deploy.yml relies on the
+    exit codes: 0 refilled, 1 failed (fall back further), 2 usage."""
+
+    def _run(self, *args):
+        import subprocess
+        root = os.path.join(os.path.dirname(__file__), "..")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SPACETRACK_")}
+        return subprocess.run([sys.executable, "-m", "backend.core.spacetrack_fetcher", *args],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=60)
+
+    def test_usage_error_exits_2(self):
+        assert self._run().returncode == 2
+
+    def test_missing_population_file_exits_1(self):
+        r = self._run("refill", "active", "/nonexistent/snapshot.json")
+        assert r.returncode == 1 and "refill failed" in r.stderr
+
+    def test_missing_credentials_exit_1_without_any_request(self, tmp_path):
+        p = tmp_path / "snap.json"
+        p.write_text(json.dumps({"satellites": [{"NORAD_CAT_ID": 25544}]}))
+        r = self._run("refill", "active", str(p))
+        assert r.returncode == 1 and "credentials not set" in r.stderr

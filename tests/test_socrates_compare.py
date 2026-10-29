@@ -141,6 +141,36 @@ class TestOrchestrator:
         with pytest.raises(RuntimeError, match="No GP data"):
             compare_against_socrates(soc, EmptyFetcher())
 
+    def test_403_stops_the_fetch_loop(self):
+        """A 403 means CelesTrak already firewalled us — every further request
+        deepens the block, so the loop must stop at the first one (review
+        round 1). A 404 is per-object and must NOT stop it."""
+        from core.socrates_compare import compare_against_socrates
+        soc = pd.DataFrame([_soc_row(i, i + 1000, "2026-06-28 12:00:00", 0.5)
+                            for i in range(3)])            # 6 distinct objects
+
+        class BlockedFetcher:
+            calls = 0
+
+            def fetch_by_catnr(self, nid):
+                BlockedFetcher.calls += 1
+                raise ValueError(f"CelesTrak returned HTTP 403 for NORAD ID {nid}")
+
+        with pytest.raises(RuntimeError, match="403"):
+            compare_against_socrates(soc, BlockedFetcher())
+        assert BlockedFetcher.calls == 1
+
+        class MissingFetcher:
+            calls = 0
+
+            def fetch_by_catnr(self, nid):
+                MissingFetcher.calls += 1
+                raise ValueError(f"CelesTrak returned HTTP 404 for NORAD ID {nid}")
+
+        with pytest.raises(RuntimeError, match="No GP data"):
+            compare_against_socrates(soc, MissingFetcher())
+        assert MissingFetcher.calls == 6                    # every id still tried
+
     def test_wiring_drops_missing_and_attaches_epoch_ok(self, monkeypatch):
         import core.socrates_compare as scmod
         from core.demo_seed import build_synthetic_shell

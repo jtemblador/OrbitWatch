@@ -99,6 +99,10 @@ def _download_via_curl(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
         )
     except FileNotFoundError:
         raise RuntimeError("curl not available for fallback download")
+    except subprocess.TimeoutExpired:
+        # A transport failure like any other — RuntimeError so the caller's
+        # retry ladder sees it (TimeoutExpired would bypass it).
+        raise RuntimeError("curl download timed out")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"curl download failed (exit {e.returncode}): "
