@@ -1,5 +1,6 @@
-fastapi
-uvicorn
+fastapi==0.162.0
+uvicorn==0.54.0
+# Everything pinned (the rest at the versions CI ran green on, 2026-10-29).
 # Numeric stack pinned: the CI A/B gate proves the accelerated screen is
 # byte-identical to the classic one, which rests on stable floating-point
 # behavior. Pinning these makes a green gate reproducible and stops an upstream
@@ -8,7 +9,7 @@ numpy==2.4.4
 scipy==1.16.3
 pandas==2.3.3
 pyarrow==21.0.0
-matplotlib
-requests
-spiceypy
-sgp4
+matplotlib==3.11.2
+requests==2.34.2
+spiceypy==8.3.0
+sgp4==2.27

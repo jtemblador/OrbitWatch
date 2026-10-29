@@ -59,6 +59,8 @@ jobs:
     timeout-minutes: 75   # full A/B gate is ~40 min on the 4-vCPU runner; headroom for the fetch/build
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false   # read-only job; never needs the token later
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
@@ -136,9 +138,10 @@ jobs:
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
           python scripts/ab_screen.py --source active --mode sfs \
             --baseline classic --refine --max-sats 5000 --hours 24 --step 30 \
-            --min-objects 8000
+            --min-objects 8000 --min-events 50
           echo "::endgroup::"
           echo "::group::Tier 2 — fused+refine vs fused+sieve+refine (full catalog, 6 h)"
           python scripts/ab_screen.py --source active --mode sfs \
-            --baseline fused --refine --hours 6 --step 30 --min-objects 8000
+            --baseline fused --refine --hours 6 --step 30 --min-objects 8000 \
+            --min-events 1000
           echo "::endgroup::"
