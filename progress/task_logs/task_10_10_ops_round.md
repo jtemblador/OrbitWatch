@@ -37,7 +37,46 @@
 
 ## Debris / full-catalog feasibility (measured, not shipped)
 
-_Pending — filled in when the local 32,816-object screen finishes._
+Full Space-Track catalog (32,816 objects: 18,955 payloads, 10,376 debris, 2,212
+rocket bodies, 1,273 unknown), 24 h SFS screen, this Mac (16 GB, = the CI runner):
+**did not finish.** After 3,701 s wall it had used 340 s CPU vs 2,345 s system
+time — thrashing (16 GB swap + ~57 GB in the compressor); killed. At ~5.4e8
+candidate pairs the engine's per-pair scan state alone is ~20 GB (the C++
+reviewer's independent estimate agrees). **Debris screening needs a memory
+redesign (streamed/blocked pair processing), not a bigger cron.** For contrast,
+the active catalog (16.6k): 443 s / 3.1 GB locally.
+
+## Review round 1 (full codebase, 5 parallel reviewers)
+
+C++ engine / Python pipeline / CI+deploy / frontend / API+tests. **0 critical.**
+Fixed (each confirmed in code first; tests red-before-green where testable):
+
+| Area | Fix |
+|---|---|
+| Engine | NaN sieve anchor (osculating ecc ≥ 1) produced an empty window list → pair dropped unscanned (no-skip violation). Now a failed anchor → whole-window; NaN-safe guards; NaN fine rows survive; uint32 guards. Old vs new engine on the real 16.6k catalog: **8,412 == 8,412 events**, identical. |
+| Frontend | XSS sink: catalog names into innerHTML unescaped (5 sinks) → `escapeHtml`; SRI on CDN tags; jump-to-TCA first batch at stale time; paused time edits didn't move dots; filter tick before load; Escape on focused checkbox; misleading "No conjunctions" text; arc rebuild per click. |
+| Pipeline | No conjunction floor (0-event screen published green; 0 == 0 passed the A/B) → `--min-conjunctions` / `--min-events`; non-dict `--prev` was fatal; ages measured at generation; SOCRATES loop kept hitting CelesTrak after a 403; parser null-name crash; open gp_history window cached forever. |
+| CI | Cron gate decision used commit dates (old-dated commits skipped the gate) → diff vs the live snapshot's `git_sha`; write token readable by pip/cmake → `persist-credentials: false` + step-scoped push auth; archive ran before publish was certain; CDN-cached snapshot could roll the site back; truncated CelesTrak didn't trigger the fallback; timeouts; deps pinned. |
+| API / tests | Unlocked reads raced `/refresh`; unbounded screen cost; error text leaks; far-future time 500s. Two tests that could not fail, two tautological timing tests, print-and-return skips → real assertions. |
+
+## Review round 2 (what round 1 missed)
+
+Regression review of the round-1 diff + an adversarial tester in an isolated
+worktree. Fixed: Space-Track refill sorted by epoch (gate slice ≠ normal run)
+→ CelesTrak's NORAD order; the new gate decision failed OPEN on a `git diff`
+error → fails closed. Measured Tier-1 floor margin: 2,165 events vs floor 50.
+
+The adversarial tester reproduced 5 more (all fixed test-first): `/track`
+resolved by NAME (599 shared names → another object's track); `--prev` still
+fatal for some shapes (+ a last-resort rebuild without history); the stale
+warning read the frozen age column; one malformed SGP4 field could kill the
+Space-Track fallback or draw a fake equatorial orbit (parser now requires
+finite SGP4 fields — drops 0 of 60k+ real objects); `max_points=0` kept all.
+Held up: ~12k concurrent API requests incl. 759 reloads (0 errors, no deadlock),
+every `--prev` junk shape, archive/history on the real 16.8k snapshot, the
+20,000-step bound, all innerHTML sinks.
+
+**Tests:** 610 → 645 pytest (+35), Node harnesses 22 + 12.
 
 ## Not done (decisions)
 

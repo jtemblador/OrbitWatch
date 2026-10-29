@@ -1283,3 +1283,34 @@ or empty in 3857, so none are used.
 and it dominates the event count: Starlink–Starlink pairs went from 61% to 79% of
 all conjunctions Jul → Oct; in the 450–475 km band conjunctions scale with
 population^2.03. See `docs/findings/starlink-shell-lowering.md`.
+
+### 10.10 review rounds — durable lessons
+
+**NaN slips through `x <= c` guards.** Every comparison with NaN is false, so a
+guard written `if (g <= 1.0) return false` lets a NaN through to code that then
+"succeeds" with an empty result — in the sieve, a dropped pair. Write guards as
+`if (!(g > 1.0))` (NaN fails closed) and reject non-finite values at the source.
+
+**Gate decisions can't trust commit dates.** Work committed earlier and merged
+later carries old dates; `git log --since` let it skip the cron's A/B gate. Diff
+engine paths against the git SHA the LIVE snapshot was built from
+(`meta.run.git_sha`), and fail closed if the diff errors.
+
+**`persist-credentials: false` + a step-scoped push** is the pattern for a job
+that installs third-party packages and also pushes: push with
+`git -c http.https://github.com/.extraheader="AUTHORIZATION: basic <b64 x-access-token:TOKEN>"`
+(mask the base64 too). Anonymous fetch/ls-remote work on a public repo.
+
+**CelesTrak serves the active group in ascending NORAD-id order** (0 inversions
+over 16,819). Anything rebuilding that group (the Space-Track refill) must keep
+that order or every head-slice (the gate's `--max-sats 5000`) changes.
+
+**Satellite names are not unique** (599 active rows share one; 70 are "OBJECT A").
+Key everything by NORAD id; the name index keeps the last row per name.
+
+**The full ~33k catalog (incl. debris) does not fit 16 GB** with the current
+engine: a 24 h screen thrashed for an hour and never finished (~5.4e8 pairs ×
+~40 B of scan state). Debris screening needs streamed/blocked pair processing.
+
+**Two sides agreeing on zero is not a pass.** The A/B gate and the snapshot both
+need an event floor (`--min-events`, `--min-conjunctions`).
