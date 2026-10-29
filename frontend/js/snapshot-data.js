@@ -69,6 +69,14 @@ function isSameConstellation(c) {
   return fam !== null && fam === constellationOf(c.b_name);
 }
 
+/** The cross-constellation view of raw (closest-first) snapshot conjunctions:
+ *  FILTER, then cap — so the view holds the closest `cap` cross-operator events,
+ *  not just the few that made the overall top `cap`. Returns the raw records. */
+function crossConstellationSet(conjunctions, cap) {
+  const cross = conjunctions.filter((c) => !isSameConstellation(c));
+  return { total: cross.length, shown: cross.slice(0, cap) };
+}
+
 // Populated by loadSnapshot(); consumed as globals by the other modules
 // (matches the project's existing plain-globals style).
 const satelliteMetadata = new Map(); // norad_id -> derived metadata (see below)
@@ -198,9 +206,9 @@ const snapshotReady = (async () => {
     snap.conjunctions.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
   // Filtered BEFORE the cap, so the filter shows the closest CAP cross-
   // constellation events — not just the few that made the overall top CAP.
-  const cross = snap.conjunctions.filter((c) => !isSameConstellation(c));
-  snapshotCrossTotal = cross.length;
-  snapshotCrossConjunctions = cross.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
+  const cross = crossConstellationSet(snap.conjunctions, CONJ_DISPLAY_CAP);
+  snapshotCrossTotal = cross.total;
+  snapshotCrossConjunctions = cross.shown.map(_adaptConjunction);
 
   console.log(
     `snapshot: ${snap.meta.n_satellites} satellites, ` +
