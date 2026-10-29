@@ -61,6 +61,13 @@ MIN_FETCH_INTERVAL = timedelta(hours=2)
 # keeps 1 attempt so a loop over many objects can't stack backoffs.
 BULK_FETCH_ATTEMPTS = 3
 
+# OMM fields SGP4 actually consumes — each must be a finite number (see _parse_json).
+_SGP4_FIELDS = (
+    "MEAN_MOTION", "ECCENTRICITY", "INCLINATION", "RA_OF_ASC_NODE",
+    "ARG_OF_PERICENTER", "MEAN_ANOMALY", "BSTAR", "MEAN_MOTION_DOT",
+    "MEAN_MOTION_DDOT",
+)
+
 
 def _derive_object_type(name: str) -> str:
     """Infer object type from a CelesTrak GP object name.
@@ -314,7 +321,18 @@ class GPFetcher:
         skipped = 0
         for rec in records:
             try:
-                # Validate required SGP4 fields exist
+                # Every field SGP4 consumes must be a finite number (and the id
+                # an int). A malformed one otherwise either kills the whole batch
+                # downstream (a "" BSTAR breaks the parquet write — the entire
+                # Space-Track fallback) or is silently zeroed into a fake orbit.
+                for key in _SGP4_FIELDS:
+                    v = rec[key]
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                            or not math.isfinite(v):
+                        raise ValueError(f"{key} is not a finite number: {v!r}")
+                if isinstance(rec["NORAD_CAT_ID"], bool) or \
+                        not isinstance(rec["NORAD_CAT_ID"], int):
+                    raise ValueError(f"NORAD_CAT_ID is not an int: {rec['NORAD_CAT_ID']!r}")
                 mean_motion = rec["MEAN_MOTION"]
                 eccentricity = rec["ECCENTRICITY"]
 

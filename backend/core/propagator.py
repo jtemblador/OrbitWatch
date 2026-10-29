@@ -413,3 +413,12 @@ class SatellitePropagator:
         """
         row = self._find_satellite(name)
         return [self._propagate_row(row, dt) for dt in utc_dts]
+
+    def get_positions_at_times_by_norad_id(
+        self, norad_id: int, utc_dts: list[datetime]
+    ) -> list[dict]:
+        """get_positions_at_times keyed by NORAD id — the unambiguous key.
+        Names are NOT unique (599 active-catalog rows share one, e.g. "OBJECT
+        A"), and the name index keeps only the last row per name."""
+        row = self.find_by_norad_id(norad_id)
+        return [self._propagate_row(row, dt) for dt in utc_dts]

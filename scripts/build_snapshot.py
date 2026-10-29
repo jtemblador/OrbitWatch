@@ -25,6 +25,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
+
 # Resolve imports whether run as `python scripts/build_snapshot.py` or elsewhere:
 # project root for `backend.*`, backend/ for the orbitcore .so.
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -173,7 +175,10 @@ def main() -> None:
         sys.exit(1)
     # Stale-elements warning: a supplier serving old elements with a 200 would
     # otherwise publish as "updated just now". Normal median age is ~0.8 d.
-    med_age = float(df["epoch_age_days"].median()) if len(df) else 0.0
+    # Measured from the EPOCHS at screen start — the epoch_age_days column is
+    # frozen when the cache was parsed, so a stale cache would hide here.
+    med_age = (float((start - pd.to_datetime(df["epoch"], utc=True))
+                     .dt.total_seconds().median()) / 86400.0) if len(df) else 0.0
     if med_age > 3.0:
         print(f"::warning::Median element age is {med_age:.1f} d (normally < 1 d) — "
               f"the upstream catalog may be stale.", file=sys.stderr)
@@ -197,11 +202,14 @@ def main() -> None:
             # must degrade the same way as unparseable JSON — never fatal.
             if not isinstance(prev, dict):
                 raise ValueError(f"not a snapshot object ({type(prev).__name__})")
+            if not isinstance(prev.get("conjunctions") or [], list) or \
+               not isinstance(prev.get("meta") or {}, dict):
+                raise ValueError("snapshot 'conjunctions'/'meta' have the wrong shape")
             n_prev = len(prev.get("conjunctions") or ())
             print(f"history: reading {n_prev} conjunctions from {args.prev} "
                   f"(generated {(prev.get('meta') or {}).get('generated_at')})")
-        except (OSError, ValueError) as exc:
-            print(f"WARNING: --prev {args.prev} unusable ({exc}) — "
+        except (OSError, ValueError, RecursionError) as exc:   # RecursionError: deep nesting
+            print(f"WARNING: --prev {args.prev} unusable ({exc!r:.200}) — "
                   f"building without prediction history.", file=sys.stderr)
             prev = None
 
@@ -217,9 +225,21 @@ def main() -> None:
         if os.environ.get(env):
             run[key] = os.environ[env]
 
-    snap = build_snapshot(df, events, screen_params, generated_at,
-                          source=_SOURCE_LABELS[args.catalog_source].format(group=args.group),
-                          prev=prev, run=run)
+    source = _SOURCE_LABELS[args.catalog_source].format(group=args.group)
+    try:
+        snap = build_snapshot(df, events, screen_params, generated_at,
+                              source=source, prev=prev, run=run)
+    except Exception as exc:   # noqa: BLE001 — history must never cost the refresh
+        if prev is None:
+            raise
+        # Last resort for the "never fatal" contract: whatever shape the live
+        # file had, rebuild once without it. Otherwise every later cron reads
+        # the same poisoned prev and fails identically until fixed by hand.
+        print(f"WARNING: prediction history failed ({exc!r:.200}) — "
+              f"building without it.", file=sys.stderr)
+        prev = None
+        snap = build_snapshot(df, events, screen_params, generated_at,
+                              source=source, prev=None, run=run)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0

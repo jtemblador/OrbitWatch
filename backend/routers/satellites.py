@@ -165,10 +165,12 @@ async def get_track(
         # /refresh nulls the NORAD index, so a lookup outside it can hit None.
         # Off the event loop: up to 500 propagation steps (Query steps <= 500).
         async with _propagator_lock:
-            row = await run_in_threadpool(propagator.find_by_norad_id, norad_id)
-            name = row["object_name"]
+            # By NORAD id end to end: names are not unique, so a name round-trip
+            # can propagate a DIFFERENT object that shares it.
             results = await run_in_threadpool(
-                propagator.get_positions_at_times, name, utc_dts)
+                propagator.get_positions_at_times_by_norad_id, norad_id, utc_dts)
+            name = (results[0]["name"] if results else
+                    propagator.find_by_norad_id(norad_id)["object_name"])
     except KeyError:
         raise HTTPException(status_code=404, detail=f"NORAD ID {norad_id} not found")
     except RuntimeError as e:

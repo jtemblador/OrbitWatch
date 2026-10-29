@@ -147,6 +147,19 @@ class TestConjunction:
         assert c["tca"] == "2026-06-01T18:00:00+00:00"   # passed through untouched
 
 
+class TestHistoryRobustness:
+    def test_infinite_ids_in_prev_are_skipped_not_raised(self):
+        # json reads 1e999 as inf; int(inf) raises OverflowError.
+        prev = [_cj(a=float("inf"), b=200), _cj(a=100, b=200, miss_km=2.0)]
+        out = carry_forward_history([_cj()], prev, _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 2.0]]
+
+    def test_zero_max_points_keeps_no_history(self):
+        prev = [_cj(miss_km=2.0)]
+        out = carry_forward_history([_cj()], prev, _PREV_GEN, max_points=0)
+        assert "hist" not in out[0]
+
+
 class TestBuildSnapshot:
     def test_meta_and_shape(self):
         df = pd.DataFrame([_row(), _row(norad_cat_id=200, object_name="B")])
@@ -452,6 +465,8 @@ class TestBuildSnapshotMain:
         bs = _load_script("build_snapshot")
         shell = build_synthetic_shell(n=40)
 
+        shell["epoch_age_days"] = 0.1   # a frozen, wrong "fresh" column
+
         class FakeFetcher:
             def fetch(self, group):
                 return shell.copy()
@@ -482,6 +497,13 @@ class TestBuildSnapshotMain:
         assert len(rec["conjunctions"]) == snap["meta"]["n_conjunctions"]
         assert len(rec["elements"]["NORAD_CAT_ID"]) == snap["meta"]["n_satellites"]
 
+    def test_stale_warning_measures_age_from_the_epochs(self, run_main, capsys, monkeypatch):
+        # The epoch_age_days COLUMN is frozen at cache-parse time; the stale
+        # warning must measure the epochs themselves (round-2 adversarial).
+        run, tmp = run_main
+        snap = run()
+        assert "Median element age" in capsys.readouterr().err   # shell epoch is June
+
     def test_conjunction_floor_refuses_to_publish(self, run_main):
         run, tmp = run_main
         with pytest.raises(SystemExit) as exc:
@@ -491,7 +513,13 @@ class TestBuildSnapshotMain:
 
     def test_prev_that_is_valid_json_but_not_a_snapshot_is_not_fatal(self, run_main):
         run, tmp = run_main
-        for junk in ("[]", "null", '"text"'):
+        for junk in ("[]", "null", '"text"',
+                     # round-2 adversarial repros: each crashed the build
+                     '{"conjunctions": 5}', '{"meta": [1, 2]}',
+                     '{"meta": {"generated_at": "2026-06-01T00:00:00Z"}, '
+                     '"conjunctions": [{"a": 1e999, "b": 2, '
+                     '"tca": "2026-06-01T00:00:00Z", "miss_km": 1.0}]}',
+                     "[" * 100000 + "]" * 100000):
             prev = tmp / "prev.json"
             prev.write_text(junk)
             snap = run("--prev", str(prev))

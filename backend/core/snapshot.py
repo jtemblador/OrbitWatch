@@ -212,8 +212,8 @@ def carry_forward_history(conjunctions, prev_conjunctions, prev_generated_at,
         null or [], so the ~69% with no trail cost zero bytes.
     """
     prev_epoch = _epoch_seconds(prev_generated_at)
-    if prev_epoch is None or not prev_conjunctions:
-        return [dict(c) for c in conjunctions]
+    if prev_epoch is None or not prev_conjunctions or max_points <= 0:
+        return [dict(c) for c in conjunctions]   # ([-0:] would keep everything)
 
     # pair -> (tca_epoch, miss_km, prior trail). A plain dict, not a list of
     # candidates: run_screen emits exactly one event per pair per window.
@@ -222,8 +222,8 @@ def carry_forward_history(conjunctions, prev_conjunctions, prev_generated_at,
         try:
             key = _pair_key(prev_rec["a"], prev_rec["b"])
             miss = float(prev_rec["miss_km"])
-        except (KeyError, TypeError, ValueError):
-            continue
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue   # OverflowError: json reads 1e999 as inf, int(inf) raises
         tca = _epoch_seconds(prev_rec.get("tca"))
         if tca is None or not math.isfinite(miss):
             continue

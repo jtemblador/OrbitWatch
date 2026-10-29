@@ -266,6 +266,25 @@ class TestEnsureDataPublishOrder(unittest.TestCase):
         self.assertIsNone(prop._df)
 
 
+class TestDuplicateNames(unittest.TestCase):
+    def test_track_by_norad_id_ignores_a_shared_name(self):
+        """599 active-catalog rows share a name with another object (70 are
+        "OBJECT A"). A track resolved by NAME returned the last such object's
+        positions for every one of them (round-2 adversarial test). The
+        NORAD-keyed path must propagate the requested object."""
+        from backend.core.demo_seed import build_synthetic_shell
+        shell = build_synthetic_shell(n=3)
+        shell["object_name"] = "OBJECT A"                 # all three collide
+        prop = SatellitePropagator()
+        prop._build_indexes(shell)
+        prop._df = shell
+        t = [datetime(2026, 6, 1, 1, 0, tzinfo=timezone.utc)]
+        ids = [int(i) for i in shell["norad_cat_id"]]
+        firsts = [prop.get_positions_at_times_by_norad_id(i, t)[0] for i in ids]
+        self.assertEqual([r["norad_id"] for r in firsts], ids)
+        self.assertEqual(len({(round(r["lat"], 6), round(r["lon"], 6)) for r in firsts}), 3)
+
+
 class TestSingleSatPropagation(unittest.TestCase):
     """Test propagation of individual satellites."""
 
