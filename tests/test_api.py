@@ -588,7 +588,10 @@ class TestRefreshMocked(unittest.TestCase):
             resp = client.post("/api/refresh")
 
         self.assertEqual(resp.status_code, 502)
-        self.assertIn("Network down", resp.json()["detail"])
+        # The upstream error text (URLs, curl stderr) stays in the server log —
+        # the client gets a generic message (review round 1).
+        self.assertNotIn("Network down", resp.json()["detail"])
+        self.assertIn("Refresh failed", resp.json()["detail"])
 
     def test_502_on_value_error(self):
         """Non-RuntimeError exceptions also produce 502."""
@@ -972,6 +975,30 @@ class TestConjunctions(unittest.TestCase):
         comps = schema["components"]["schemas"]
         self.assertIn("ConjunctionEvent", comps)
         self.assertIn("ConjunctionResponse", comps)
+
+
+
+class TestReviewRound1Guards(unittest.TestCase):
+    """Guards added in the 10.10 review round — each fails if its fix is reverted."""
+
+    def test_conjunctions_rejects_an_oversized_step_count(self):
+        # 72 h at 1 s = 259,200 steps: the screen would hold the global lock for
+        # its whole run, stalling every /positions and /track request.
+        resp = client.get("/api/conjunctions",
+                          params={"duration_hours": 72, "step_sec": 1})
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("time steps", resp.json()["detail"])
+
+    def test_track_far_future_time_is_a_422_not_a_500(self):
+        # datetime + timedelta past year 9999 raises OverflowError.
+        resp = client.get("/api/positions/25544/track",
+                          params={"time": "9999-12-31T23:00:00Z",
+                                  "duration_min": 1440, "steps": 500})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_unknown_norad_track_is_404_with_the_lookup_under_the_lock(self):
+        resp = client.get("/api/positions/1/track")
+        self.assertEqual(resp.status_code, 404)
 
 
 if __name__ == "__main__":

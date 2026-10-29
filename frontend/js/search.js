@@ -89,7 +89,7 @@ function renderResults() {
   resultsEl.innerHTML = matches.map((id, i) => `
     <div class="search-result${i === highlighted ? " highlighted" : ""}" data-id="${id}">
       <span class="search-dot" style="background:${dotColor(id)}"></span>
-      <span class="search-name">${getSatName(id)}</span>
+      <span class="search-name">${escapeHtml(getSatName(id))}</span>
       <span class="search-id">${id}</span>
     </div>`).join("");
   resultsEl.style.display = "block";

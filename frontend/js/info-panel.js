@@ -194,7 +194,7 @@ function refreshPanelData(noradId) {
     }
 
     tbody.innerHTML = rows
-      .map(([label, value]) => `<tr><td class="info-label">${label}</td><td class="info-value">${value}</td></tr>`)
+      .map(([label, value]) => `<tr><td class="info-label">${label}</td><td class="info-value">${escapeHtml(value)}</td></tr>`)
       .join("");
 
   } catch (err) {

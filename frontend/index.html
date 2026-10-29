@@ -7,14 +7,22 @@
   <!-- Inline SVG favicon (no binary asset, no 404) -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%9B%B0%EF%B8%8F</text></svg>">
 
-  <!-- Cesium.js (pinned version) -->
-  <script src="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Cesium.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Widgets/widgets.css">
+  <!-- Cesium.js (pinned version + SRI: a tampered CDN file is refused, not run.
+       Bumping a version means recomputing the hash:
+       curl -sL URL | openssl dgst -sha384 -binary | openssl base64 -A) -->
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Cesium.js"
+          integrity="sha384-JJ/fUIEuLmLPu3Jjt71Np7RRIf/7/hyH1gy3GwH81MTzU+dKixJTCN9IQj7wHR0T"
+          crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.139.1/Build/Cesium/Widgets/widgets.css"
+        integrity="sha384-ghEeMdcWWzRv/BPeUcX835vcKDGrxvROXisl/Btpv3GeekBUXTSPVcFJpI1Tcrgp"
+        crossorigin="anonymous">
 
   <!-- satellite.js (pinned) — in-browser SGP4 from the snapshot's OMM elements.
        Cross-validated against our C++ engine (0.00 m on identical elements);
        the worker (js/propagation-worker.js) importScripts the same pinned URL. -->
-  <script src="https://cdn.jsdelivr.net/npm/satellite.js@6.0.1/dist/satellite.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@6.0.1/dist/satellite.min.js"
+          integrity="sha384-ks/q8WwP74/nmNCaw/3Kj9Iv2xK5DsfHUJx18wEND2nHyRN7wjPfXjJF1Ejyj1lH"
+          crossorigin="anonymous"></script>
 
   <!-- App styles (relative paths — the site deploys under a GitHub Pages subpath) -->
   <link rel="stylesheet" href="css/style.css">

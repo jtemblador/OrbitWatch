@@ -237,31 +237,30 @@ class TestSgp4Init:
         satrec, _ = _init_from_tle(**ISS_TLE, opsmode="i")
         assert satrec.error == 0
 
-    def test_invalid_eccentricity_raises(self):
-        """Eccentricity >= 1 should cause initialization to fail."""
-        try:
-            orbitcore.sgp4init(
-                orbitcore.GravConst.WGS72, "a", "99999", 27084.0,
-                0.0, 0.0, 0.0,
-                1.5,   # eccentricity > 1 — invalid
-                0.0, 0.5, 0.0, 0.06, 0.0,
-            )
-            # If it doesn't raise, check error field
-        except RuntimeError:
-            pass  # Expected
+    def test_invalid_eccentricity_is_rejected(self):
+        """Eccentricity >= 1 must fail initialization. The engine reports it
+        through satrec.error (SGP4 error 1: mean eccentricity out of range)
+        rather than raising — this used to be a try/except-pass that could
+        never fail."""
+        sat = orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "a", "99999", 27084.0,
+            0.0, 0.0, 0.0,
+            1.5,   # eccentricity > 1 — invalid
+            0.0, 0.5, 0.0, 0.06, 0.0,
+        )
+        assert sat.error == 1
 
-    def test_zero_mean_motion_raises(self):
-        """Zero mean motion should fail."""
-        try:
-            orbitcore.sgp4init(
-                orbitcore.GravConst.WGS72, "a", "99999", 27084.0,
-                0.0, 0.0, 0.0,
-                0.001, 0.0, 0.5, 0.0,
-                0.0,  # zero mean motion
-                0.0,
-            )
-        except (RuntimeError, ZeroDivisionError):
-            pass  # Expected
+    def test_zero_mean_motion_is_rejected(self):
+        """Zero mean motion must fail initialization (SGP4 error 2: mean motion
+        out of range), reported via satrec.error — formerly unfailable."""
+        sat = orbitcore.sgp4init(
+            orbitcore.GravConst.WGS72, "a", "99999", 27084.0,
+            0.0, 0.0, 0.0,
+            0.001, 0.0, 0.5, 0.0,
+            0.0,  # zero mean motion
+            0.0,
+        )
+        assert sat.error == 2
 
     def test_wgs72_vs_wgs84_produce_different_results(self):
         """Same elements with different gravity models should differ."""

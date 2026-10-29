@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -79,6 +80,16 @@ Osc osculate(elsetrec* sat, double jd) {
                                       std::sqrt(1.0 + o.ecc) * std::cos(nu / 2.0));
     o.M = E - o.ecc * std::sin(E);
     o.a = 1.0 / std::max(2.0 / rmag - v2 / mu, 1e-12);
+    // A non-elliptic or non-finite osculating set (e.g. a reentering object:
+    // sqrt(1 - ecc) is NaN once ecc >= 1) must read as a FAILED anchor, which
+    // routes every pair it's in to the whole-window scan. Left ok=true, the NaN
+    // phase fails every `x <= c` guard downstream and the pair's window list
+    // silently comes out empty — a dropped pair (review round 1).
+    if (!(o.ecc < 1.0) || !std::isfinite(o.inc) || !std::isfinite(o.raan) ||
+        !std::isfinite(o.argp) || !std::isfinite(o.M) || !std::isfinite(o.a) ||
+        !std::isfinite(o.u)) {
+        return o;
+    }
     o.ok = true;
     return o;
 }
@@ -193,6 +204,10 @@ AnchorSet build_anchors(const std::vector<elsetrec*>& sats,
                 wrap_pi((e1.argp + e1.M) - lam_m - ref_half) + ref_half;
             a.curv[s] = 1.5 * std::fabs(d2 - d1) / 2.0;
         }
+        if (!std::isfinite(a.lam_rate[s]) || !std::isfinite(a.m_rate[s]) ||
+            !std::isfinite(a.raan_dot[s]) || !std::isfinite(a.curv[s])) {
+            a.ok[s] = 0;   // same conservative fallback as a failed propagation
+        }
     }
     return a;
 }
@@ -211,14 +226,16 @@ bool sat_windows(const AnchorSet& a, size_t s,
     const double T = jd1 - jd0;
     const double node_rate = wrap_pi(un1 - un0) / T;
     const double g = a.lam_rate[s] - node_rate;    // phase rate vs the node
-    if (g <= 1.0) return false;                    // < ~0.16 rev/day: degenerate
+    // Guards are written `!(x > c)` so a NaN reads as "can't bound" (keep the
+    // pair whole-window) instead of slipping past a `x <= c` test.
+    if (!(g > 1.0)) return false;                  // < ~0.16 rev/day: degenerate
 
     const double e = a.ecc[s];
-    if (e >= 0.9) return false;
+    if (!(e < 0.9)) return false;
     // Slowest angular rate along the orbit (apogee) — conservative du -> dt.
     const double udot_min =
         a.m_rate[s] * (1.0 - e) * (1.0 - e) / std::pow(1.0 - e * e, 1.5);
-    if (udot_min <= 1.0) return false;
+    if (!(udot_min > 1.0)) return false;
     // Crossing times are enumerated from a LINEAR phase model anchored on the
     // exact osculating u at jd0; the equation of center drifts the true phase
     // by at most ~2*EoC_max either way, absorbed as extra time width (cheap —
@@ -228,7 +245,7 @@ bool sat_windows(const AnchorSet& a, size_t s,
     const double dt_half = du / udot_min + 2.0 * eoc_max / g + step_day;
 
     const double spacing = PI / g;                 // node-to-node, days
-    if (2.0 * dt_half >= spacing) return false;    // windows merge: keep whole
+    if (!(2.0 * dt_half < spacing)) return false;  // windows merge (or NaN): keep whole
 
     // Crossings at phase = 0 (mod pi); phase(t) = phi0 + g*(t - jd0).
     double phi0 = std::fmod(a.u0[s] - un0, PI);
@@ -250,6 +267,11 @@ SieveIndex build_sieve_index(const AnchorSet& a,
                              double threshold_km, const SieveParams& params)
 {
     const size_t npairs = P.size();
+    // The index stores pair ids, step numbers and range offsets as uint32.
+    // ~5.4e8 pairs at 33k sats is far below the limit; fail loudly, never wrap.
+    if (npairs >= std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error("build_sieve_index: too many pairs for uint32 indices");
+    }
     const double dt_day = step_sec / 86400.0;
     const double step_day = dt_day;
     const long nsteps =
@@ -292,7 +314,7 @@ SieveIndex build_sieve_index(const AnchorSet& a,
 
             const double xi = D_eff / (a.rp[i] * sinIR_min);
             const double xj = D_eff / (a.rp[j] * sinIR_min);
-            if (xi >= 1.0 || xj >= 1.0) {
+            if (!(xi < 1.0) || !(xj < 1.0)) {   // NaN -> whole, too
                 whole = true;   // near-coplanar: no angular constraint (oracle rule)
             } else {
                 // Node-path NONLINEARITY margin (review catch): the crossing
@@ -355,6 +377,9 @@ SieveIndex build_sieve_index(const AnchorSet& a,
             }
             if (have) idx.ranges.emplace_back(prev_lo, prev_hi);
             else ++idx.n_dropped;
+        }
+        if (idx.ranges.size() >= std::numeric_limits<uint32_t>::max()) {
+            throw std::length_error("build_sieve_index: too many ranges for uint32 offsets");
         }
         idx.range_offset[p + 1] = (uint32_t)idx.ranges.size();
     }
@@ -723,7 +748,9 @@ std::vector<MediumResult> refine_rows(
 
         if (axes == nullptr) {
             // Euclidean report cut: miss <= threshold (+ margin).
-            keep[k] = (norm(dba) <= cut) ? 1 : 0;
+            const double miss = norm(dba);
+            // Non-finite -> hand back to Python (conservative), like a failure.
+            keep[k] = (!std::isfinite(miss) || miss <= cut) ? 1 : 0;
             continue;
         }
 
@@ -749,7 +776,8 @@ std::vector<MediumResult> refine_rows(
         const double rr = dot(dba, Rh) / (vol.r + margin_km);
         const double tt = dot(dba, Th) / (vol.t + margin_km);
         const double nn = dot(dba, Nh) / (vol.n + margin_km);
-        keep[k] = (rr * rr + tt * tt + nn * nn <= 1.0) ? 1 : 0;
+        const double q = rr * rr + tt * tt + nn * nn;
+        keep[k] = (!std::isfinite(q) || q <= 1.0) ? 1 : 0;   // NaN survives
     }
 
     std::vector<MediumResult> survivors;

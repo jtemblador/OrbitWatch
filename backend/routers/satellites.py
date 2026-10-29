@@ -3,6 +3,7 @@ Satellite metadata, position, and data refresh endpoints.
 """
 
 import asyncio
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,7 @@ from backend.models.schemas import (
 )
 
 router = APIRouter(prefix="/api")
+_log = logging.getLogger(__name__)
 
 
 @router.get("/satellites", response_model=SatelliteListResponse)
@@ -29,7 +31,10 @@ async def list_satellites(request: Request):
     # Phase 1: single shared propagator, always "stations".
     # Multi-group support deferred to Phase 2.
     propagator = request.app.state.propagator
-    df = propagator._ensure_data()
+    # Under the lock (a concurrent /refresh nulls the cached frame) and off the
+    # event loop (a cold _ensure_data reads parquet / may fetch).
+    async with _propagator_lock:
+        df = await run_in_threadpool(propagator._ensure_data)
     group = propagator.group
     now = datetime.now(timezone.utc)
 
@@ -148,23 +153,26 @@ async def get_track(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
-    # Look up satellite name from NORAD ID
-    try:
-        row = propagator.find_by_norad_id(norad_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"NORAD ID {norad_id} not found")
-
-    name = row["object_name"]
-
     # Generate evenly-spaced time steps
     step_size = timedelta(minutes=duration_min / steps)
-    utc_dts = [utc_dt + step_size * i for i in range(steps)]
+    try:
+        utc_dts = [utc_dt + step_size * i for i in range(steps)]
+    except OverflowError:
+        raise HTTPException(status_code=422, detail=f"Time out of range: {time}")
 
     try:
+        # The lookup AND the propagation run under the lock: a concurrent
+        # /refresh nulls the NORAD index, so a lookup outside it can hit None.
         # Off the event loop: up to 500 propagation steps (Query steps <= 500).
         async with _propagator_lock:
+            # By NORAD id end to end: names are not unique, so a name round-trip
+            # can propagate a DIFFERENT object that shares it.
             results = await run_in_threadpool(
-                propagator.get_positions_at_times, name, utc_dts)
+                propagator.get_positions_at_times_by_norad_id, norad_id, utc_dts)
+            name = (results[0]["name"] if results else
+                    propagator.find_by_norad_id(norad_id)["object_name"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"NORAD ID {norad_id} not found")
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=f"Propagation failed for NORAD ID {norad_id}: {e}")
 
@@ -222,6 +230,10 @@ def _max_screen_sats() -> int:
 # a request waits on it.
 _propagator_lock = asyncio.Lock()
 
+# /conjunctions work bound: duration_hours * 3600 / step_sec time steps. The
+# default (24 h / 60 s) is 1,440; this allows e.g. 72 h at 13 s.
+_MAX_SCREEN_STEPS = 20_000
+
 
 @router.get("/conjunctions", response_model=ConjunctionResponse)
 async def get_conjunctions(
@@ -250,9 +262,21 @@ async def get_conjunctions(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid time format: {time}")
 
+    # Bound the work per request: the screen holds the global lock for its whole
+    # run, so a 72 h / 1 s request (60x the default) would stall every
+    # /positions and /track call behind it.
+    n_steps = duration_hours * 3600.0 / step_sec
+    if n_steps > _MAX_SCREEN_STEPS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"duration_hours / step_sec gives {n_steps:,.0f} time steps; "
+                    f"the limit is {_MAX_SCREEN_STEPS:,}. Use a coarser step_sec "
+                    f"or a shorter window."))
+
     # Refuse an oversized synchronous screen up front (see _max_screen_sats).
     cap = _max_screen_sats()
-    n_sats = propagator.catalog_size()
+    async with _propagator_lock:
+        n_sats = await run_in_threadpool(propagator.catalog_size)
     if n_sats > cap:
         raise HTTPException(
             status_code=413,
@@ -275,10 +299,13 @@ async def get_conjunctions(
                 screener.screen, start_utc, duration_hours, threshold_km,
                 step_sec, timings=stats)
     except ValueError as e:
-        # e.g. a screening window shorter than the time step
+        # e.g. a screening window shorter than the time step (our own message)
         raise HTTPException(status_code=422, detail=str(e))
+    except OverflowError:
+        raise HTTPException(status_code=422, detail=f"Time out of range: {time}")
 
-    freshness = propagator.data_freshness()
+    async with _propagator_lock:
+        freshness = propagator.data_freshness()
     return {
         "count": len(events),
         "screening_start": start_utc.isoformat(),
@@ -314,8 +341,10 @@ async def refresh_data(request: Request):
         # a 30 s timeout, plus a curl fallback), and running it inline in this
         # async handler would freeze every other request until it returns.
         new_df = await run_in_threadpool(fetcher.fetch, group)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Refresh failed: {e}")
+    except Exception:
+        # The detail (URLs, curl stderr) goes to the server log, not the client.
+        _log.exception("refresh of group %r failed", group)
+        raise HTTPException(status_code=502, detail="Refresh failed: upstream catalog unavailable.")
 
     new_fetch_time = pd.Timestamp(new_df["fetch_time"].iloc[0])
 

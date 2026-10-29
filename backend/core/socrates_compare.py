@@ -238,6 +238,15 @@ def compare_against_socrates(
         nid = int(raw)
         try:
             df_i = gp_fetcher.fetch_by_catnr(nid)
+        except ValueError as e:
+            # A 403 means CelesTrak has already rate-limited/firewalled this IP;
+            # carrying on through up to max_objects more ids only deepens the
+            # block (key_information #5). Stop. A 404 is per-object: skip it.
+            if "HTTP 403" in str(e):
+                raise RuntimeError(
+                    f"CelesTrak answered 403 at NORAD {nid} — stopping the "
+                    f"per-object fetch loop instead of sending more requests.") from e
+            df_i = None
         except Exception:
             df_i = None
         if df_i is None or df_i.empty:

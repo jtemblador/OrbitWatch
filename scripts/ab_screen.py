@@ -130,6 +130,10 @@ def main() -> None:
                     help="abort (exit 1) if the raw catalog has fewer than this "
                          "many objects — so a truncated fetch can't PASS the gate "
                          "trivially (0 = off; CI passes a floor for --source active)")
+    ap.add_argument("--min-events", type=int, default=0,
+                    help="FAIL (exit 1) if the screens find fewer events than "
+                         "this — two sides that both regressed to ~0 agree "
+                         "trivially and would otherwise PASS (0 = off)")
     args = ap.parse_args()
 
     start = (datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
@@ -177,6 +181,11 @@ def main() -> None:
     print(f"  medium speedup {speedup:.1f}x   process peak RSS {peak_gb:.2f} GB "
           f"(dominated by the baseline run)")
 
+    if identical and len(ev_a) < args.min_events:
+        print(f"\nFAIL: both sides agree, but on only {len(ev_a):,} events "
+              f"(< --min-events {args.min_events}) — a shared regression, not a "
+              f"pass.\n")
+        sys.exit(1)
     if identical:
         print(f"\nPASS: {len(ev_a):,} events byte-identical.\n")
         sys.exit(0)

@@ -84,6 +84,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    # Bounds a hung curl / stuck screen: without it a wedged run holds the
+    # `pages` concurrency group for GitHub's 6 h default and every cron queues
+    # behind it. A gated rebuild is ~65 min today; 150 leaves room to grow.
+    timeout-minutes: 150
     # Job-level override: this job (and only this job) needs `contents: write` for
     # the archive push. Job permissions REPLACE the top-level set, so pages/
     # id-token are re-listed (configure-pages / upload-pages-artifact need them).
@@ -94,9 +98,13 @@ jobs:
     steps:
       # fetch-depth 50: enough history for the "recent engine change" check below
       # (the git log --since needs commits, not just the shallow tip).
+      # persist-credentials: false — the write token must not sit in git config
+      # for every later step (pip install, cmake, the built .so). Only the
+      # archive push gets it, via that step's env (review round 1).
       - uses: actions/checkout@v7
         with:
           fetch-depth: 50
+          persist-credentials: false
 
       # Decide reuse vs rebuild. Reuse = download the live snapshot into
       # frontend/. If that fetch fails (e.g. the very first deploy, before any
@@ -118,8 +126,19 @@ jobs:
             REBUILD=true
             echo "Rebuild requested (manual dispatch)."
           fi
+          # force_spacetrack only means something on a rebuild — imply it rather
+          # than silently reusing the live snapshot.
+          if [ "${{ github.event.inputs.force_spacetrack }}" = "true" ]; then
+            REBUILD=true
+            echo "Rebuild implied by force_spacetrack."
+          fi
           if [ "$REBUILD" = "false" ]; then
-            if curl -fsSL -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL"; then
+            # ?cb= busts the Pages CDN cache (~10 min max-age): a frontend push
+            # right after a cron deploy must not re-publish the PREVIOUS
+            # snapshot. Then validate it — curl -f only catches HTTP errors.
+            if curl -fsSL --max-time 120 --retry 2 -o frontend/snapshot.json \
+                 "$LIVE_SNAPSHOT_URL?cb=$GITHUB_RUN_ID" \
+               && python3 -c "import json,sys; m=json.load(open('frontend/snapshot.json'))['meta']; sys.exit(0 if m['n_satellites'] >= 8000 else 1)"; then
               echo "Reusing live snapshot ($(wc -c < frontend/snapshot.json) bytes) — no re-screen."
             else
               echo "::warning::No live snapshot to reuse — forcing a rebuild."
@@ -187,7 +206,7 @@ jobs:
       - name: Fetch the live snapshot (prediction history + fallback population)
         if: steps.decide.outputs.rebuild == 'true'
         run: |
-          if ! curl -fsSL --max-time 120 -o prev-snapshot.json "$LIVE_SNAPSHOT_URL"; then
+          if ! curl -fsSL --max-time 120 --retry 2 -o prev-snapshot.json "$LIVE_SNAPSHOT_URL?cb=$GITHUB_RUN_ID"; then
             rm -f prev-snapshot.json
             echo "::warning::Could not fetch the live snapshot — this rebuild emits no prediction history and has no population for a Space-Track fallback."
           fi
@@ -207,7 +226,9 @@ jobs:
         if: steps.decide.outputs.rebuild == 'true' && github.event.inputs.force_spacetrack != 'true'
         continue-on-error: true
         timeout-minutes: 12
-        run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('active'); print(f'fetched {len(d)} active objects')"
+        # A truncated-but-200 response must count as a FAILED fetch (so the
+        # Space-Track fallback runs) rather than fail later at --min-objects.
+        run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('active'); print(f'fetched {len(d)} active objects'); assert len(d) >= 8000, 'truncated catalog'"
 
       # 10.10: CelesTrak down → refill the SAME population from Space-Track
       # (one bulk class/gp query, sliced to the live snapshot's NORAD ids; >=95%
@@ -262,7 +283,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::warning::CelesTrak AND Space-Track catalog fetches FAILED — skipping this data refresh and redeploying the snapshot that is already live. The next scheduled run will retry."
-          if ! curl -fsSL -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL"; then
+          if ! curl -fsSL --max-time 120 --retry 2 -o frontend/snapshot.json "$LIVE_SNAPSHOT_URL?cb=$GITHUB_RUN_ID"; then
             echo "::error::Catalog fetch failed AND the live snapshot could not be downloaded — there is nothing to publish."
             exit 1
           fi
@@ -328,13 +349,30 @@ jobs:
       - name: Detect recent engine-code changes
         id: codecheck
         if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
+        # Diff ENGINE paths between the commit the live snapshot was built from
+        # (meta.run.git_sha) and HEAD. Commit dates can't be trusted for this:
+        # work committed earlier and pushed/merged later carries old dates, and
+        # the old `git log --since` rule let it skip the gate (review round 1).
+        # Snapshots from before git_sha existed fall back to that 10 h rule.
         run: |
-          CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \
-            orbitcore/ backend/ scripts/ab_screen.py scripts/build_snapshot.py \
-            requirements.txt 2>/dev/null | grep -v '^$' | head -1 || true)
+          PATHS="orbitcore/ backend/ scripts/ab_screen.py scripts/build_snapshot.py requirements.txt"
+          SHA=$(python3 -c "import json; print(((json.load(open('prev-snapshot.json')).get('meta') or {}).get('run') or {}).get('git_sha', ''))" 2>/dev/null || true)
+          if [ -n "$SHA" ] && git fetch -q --depth=1 origin "$SHA" 2>/dev/null; then
+            echo "Live snapshot was built from $SHA."
+            # Fail CLOSED: if the diff itself errors, gate rather than skip.
+            if DIFF=$(git diff --name-only "$SHA" HEAD -- $PATHS); then
+              CHANGED=$(printf '%s\n' "$DIFF" | head -1)
+            else
+              CHANGED="(git diff failed; gating to be safe)"
+            fi
+          else
+            echo "Live snapshot carries no usable git_sha — using the 10 h commit-date rule."
+            CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \
+              $PATHS 2>/dev/null | grep -v '^$' | head -1 || true)
+          fi
           if [ -n "$CHANGED" ]; then
             echo "engine_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Recent engine-code change detected — the A/B gate will run even on a scheduled rebuild."
+            echo "Engine code changed ($CHANGED…) — the A/B gate will run even on a scheduled rebuild."
           else
             echo "engine_changed=false" >> "$GITHUB_OUTPUT"
             echo "No recent engine-code change."
@@ -347,11 +385,12 @@ jobs:
           echo "::group::Tier 1 — classic vs fused+sieve+refine (5000 sats, 24 h)"
           python scripts/ab_screen.py --source active --mode sfs \
             --baseline classic --refine --max-sats 5000 --hours 24 --step 30 \
-            --min-objects 8000
+            --min-objects 8000 --min-events 50
           echo "::endgroup::"
           echo "::group::Tier 2 — fused+refine vs fused+sieve+refine (full catalog, 6 h)"
           python scripts/ab_screen.py --source active --mode sfs \
-            --baseline fused --refine --hours 6 --step 30 --min-objects 8000
+            --baseline fused --refine --hours 6 --step 30 --min-objects 8000 \
+            --min-events 1000
           echo "::endgroup::"
 
       # Fetch (cache hit from the step above) + run the real SFS screen + write
@@ -374,8 +413,32 @@ jobs:
           python scripts/build_snapshot.py --group active --hours 24 \
             --min-objects 8000 --prev prev-snapshot.json \
             --catalog-source ${{ steps.catalog.outputs.source }} \
-            --archive-out archive-snapshot.json.gz
+            --archive-out archive-snapshot.json.gz --min-conjunctions 1000
 
+      # Inject the Ion token from the repo secret into the gitignored config.js.
+      # Passed via env (not string-interpolated into the script) so a token with
+      # shell metacharacters can't break out. GitHub masks the value in logs.
+      - name: Inject Cesium Ion token
+        env:
+          ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
+        run: |
+          if [ -z "$ION_TOKEN" ]; then
+            echo "::error::CESIUM_ION_TOKEN secret is empty — set it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          printf 'const CESIUM_ION_TOKEN = "%s";\n' "$ION_TOKEN" > frontend/js/config.js
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend
+
+      # (Runs AFTER the site artifact is built, so a failure in token injection /
+      # configure / upload can't leave an archive record of a snapshot that was
+      # never published — review round 1.)
       # Archive the fresh snapshot to the `data` branch as
       # snapshots/<ISO-ts>.json.gz (append-only). Since 10.10 this is the SLIM
       # record build_snapshot wrote (snapshot.archive_record: meta + every
@@ -406,6 +469,8 @@ jobs:
         id: archive
         if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Windows-safe ISO timestamp from the snapshot's own generated_at
@@ -449,11 +514,26 @@ jobs:
             exit 1
           fi
 
+          # Never push a record that doesn't match what was just published.
+          python3 - <<'PY'
+          import gzip, json
+          rec = json.loads(gzip.decompress(open("archive-snapshot.json.gz", "rb").read()))
+          meta = json.load(open("frontend/snapshot.json"))["meta"]
+          assert rec["meta"]["generated_at"] == meta["generated_at"], "stale archive record"
+          assert len(rec["conjunctions"]) == meta["n_conjunctions"], "conjunction count mismatch"
+          print(f"archive record OK: {len(rec['conjunctions'])} conjunctions")
+          PY
+
           mkdir -p "$WT/snapshots"
           cp archive-snapshot.json.gz "$WT/snapshots/${TS}.json.gz"
           git -C "$WT" add "snapshots/${TS}.json.gz"
           git -C "$WT" commit -q -m "Archive snapshot ${TS}"
-          git -C "$WT" push origin data
+          # The token lives only in this step (checkout doesn't persist it), as
+          # the same basic-auth extraheader checkout itself would have set.
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$AUTH"
+          git -C "$WT" -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" \
+            push origin data
           git worktree remove --force "$WT"
           echo "Archived snapshots/${TS}.json.gz ($(wc -c < archive-snapshot.json.gz) bytes gz, slim record)."
 
@@ -464,27 +544,6 @@ jobs:
         if: steps.archive.outcome == 'failure'
         run: |
           echo "::warning::Snapshot archive to the data branch FAILED this run — the live site still refreshed (the archive is a secondary record). See the 'Archive snapshot to the data branch' step log; the next scheduled run will retry."
-
-      # Inject the Ion token from the repo secret into the gitignored config.js.
-      # Passed via env (not string-interpolated into the script) so a token with
-      # shell metacharacters can't break out. GitHub masks the value in logs.
-      - name: Inject Cesium Ion token
-        env:
-          ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
-        run: |
-          if [ -z "$ION_TOKEN" ]; then
-            echo "::error::CESIUM_ION_TOKEN secret is empty — set it in repo Settings → Secrets → Actions."
-            exit 1
-          fi
-          printf 'const CESIUM_ION_TOKEN = "%s";\n' "$ION_TOKEN" > frontend/js/config.js
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v6
-
-      - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: frontend
 
   deploy:
     needs: build

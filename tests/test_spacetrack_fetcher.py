@@ -257,6 +257,19 @@ class TestFetch:
         df2 = f.fetch_history([25544], d0, d1)   # immutable → cache hit
         assert len(calls) == 1 and len(df2) == 1
 
+    def test_open_window_is_never_cached(self, monkeypatch, tmp_path):
+        # A window reaching today can still gain elsets — a "forever" cache
+        # would hide every one published after the first fetch.
+        f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path)
+        calls = []
+        monkeypatch.setattr(f, "_query", lambda p: calls.append(p) or json.dumps(
+            [_st_record(25544, "2026-10-28T12:00:00")]))
+        now = datetime.now(UTC)
+        f.fetch_history([25544], now.replace(day=1), now)
+        f.fetch_history([25544], now.replace(day=1), now)
+        assert len(calls) == 2
+        assert not list(tmp_path.glob("gphist_*.parquet"))
+
     def test_fetch_latest_uses_gp_class(self, monkeypatch, tmp_path):
         f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path)
         seen = {}
@@ -309,6 +322,19 @@ class TestCatalogFallback:
         df = refill_group_cache("active", [1, 2, 3], st=f, gp=gp)
         assert sorted(df["norad_cat_id"]) == [1, 2, 3]
         assert sorted(gp.load_cached("active")["norad_cat_id"]) == [1, 2, 3]
+
+    def test_refill_is_in_celestrak_order(self, monkeypatch, tmp_path):
+        # CelesTrak serves the active group in ascending NORAD id (0 inversions
+        # over 16,819 objects). The refill must match, or every head-slice of a
+        # fallback run (the CI gate's --max-sats 5000) screens different objects.
+        f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path / "st")
+        recs = [_st_record(n, e) for n, e in ((30, "2026-10-01T00:00:00"),
+                                                (10, "2026-10-28T00:00:00"),
+                                                (20, "2026-10-15T00:00:00"))]
+        monkeypatch.setattr(f, "_query", lambda p: json.dumps(recs))
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        refill_group_cache("active", [10, 20, 30], st=f, gp=gp)
+        assert gp.load_cached("active")["norad_cat_id"].tolist() == [10, 20, 30]
 
     def test_refilled_cache_counts_as_fresh(self, monkeypatch, tmp_path):
         # The whole point: build_snapshot's fetcher.fetch('active') must take
@@ -365,3 +391,28 @@ class TestLiveSpaceTrack:
         df = f.fetch_history([25544], datetime(2026, 6, 20, tzinfo=UTC),
                              datetime(2026, 6, 26, tzinfo=UTC))
         assert not df.empty and (df["norad_cat_id"] == 25544).all()
+
+
+class TestRefillCLI:
+    """`python -m backend.core.spacetrack_fetcher` — deploy.yml relies on the
+    exit codes: 0 refilled, 1 failed (fall back further), 2 usage."""
+
+    def _run(self, *args):
+        import subprocess
+        root = os.path.join(os.path.dirname(__file__), "..")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SPACETRACK_")}
+        return subprocess.run([sys.executable, "-m", "backend.core.spacetrack_fetcher", *args],
+                              cwd=root, env=env, capture_output=True, text=True, timeout=60)
+
+    def test_usage_error_exits_2(self):
+        assert self._run().returncode == 2
+
+    def test_missing_population_file_exits_1(self):
+        r = self._run("refill", "active", "/nonexistent/snapshot.json")
+        assert r.returncode == 1 and "refill failed" in r.stderr
+
+    def test_missing_credentials_exit_1_without_any_request(self, tmp_path):
+        p = tmp_path / "snap.json"
+        p.write_text(json.dumps({"satellites": [{"NORAD_CAT_ID": 25544}]}))
+        r = self._run("refill", "active", str(p))
+        assert r.returncode == 1 and "credentials not set" in r.stderr

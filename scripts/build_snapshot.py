@@ -25,6 +25,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
+
 # Resolve imports whether run as `python scripts/build_snapshot.py` or elsewhere:
 # project root for `backend.*`, backend/ for the orbitcore .so.
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +107,10 @@ def main() -> None:
     ap.add_argument("--archive-out", default="",
                     help="also write the slim data-branch archive record "
                          "(snapshot.archive_record) here, gzipped (10.10)")
+    ap.add_argument("--min-conjunctions", type=int, default=0,
+                    help="abort (exit 1) if the screen finds fewer conjunctions "
+                         "than this — a regression that zeroes the screen must "
+                         "not publish green (0 = off; CI passes a floor)")
     args = ap.parse_args()
 
     fetcher = GPFetcher()
@@ -158,6 +164,24 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     print(f"screen: {len(events)} conjunctions in {elapsed:.1f}s "
           f"({args.mode}, {args.hours:.0f} h window)")
+    # Event floor (review round 1): the object floors above can't see a screen
+    # that regressed to ~0 events, and the cron skips the A/B gate — so without
+    # this a broken engine/volume change publishes an empty list, green. The
+    # full catalog yields ~10–19k per 24 h; CI's floor sits far below that.
+    if args.min_conjunctions and len(events) < args.min_conjunctions:
+        print(f"ERROR: the screen found {len(events)} conjunctions, below the "
+              f"--min-conjunctions floor of {args.min_conjunctions} — refusing to "
+              f"publish (screen regression?).", file=sys.stderr)
+        sys.exit(1)
+    # Stale-elements warning: a supplier serving old elements with a 200 would
+    # otherwise publish as "updated just now". Normal median age is ~0.8 d.
+    # Measured from the EPOCHS at screen start — the epoch_age_days column is
+    # frozen when the cache was parsed, so a stale cache would hide here.
+    med_age = (float((start - pd.to_datetime(df["epoch"], utc=True))
+                     .dt.total_seconds().median()) / 86400.0) if len(df) else 0.0
+    if med_age > 3.0:
+        print(f"::warning::Median element age is {med_age:.1f} d (normally < 1 d) — "
+              f"the upstream catalog may be stale.", file=sys.stderr)
 
     generated_at = start.isoformat().replace("+00:00", "Z")
 
@@ -174,11 +198,18 @@ def main() -> None:
         try:
             with open(args.prev, encoding="utf-8") as f:
                 prev = json.load(f)
+            # Valid JSON that isn't a snapshot object (null, a list, a string)
+            # must degrade the same way as unparseable JSON — never fatal.
+            if not isinstance(prev, dict):
+                raise ValueError(f"not a snapshot object ({type(prev).__name__})")
+            if not isinstance(prev.get("conjunctions") or [], list) or \
+               not isinstance(prev.get("meta") or {}, dict):
+                raise ValueError("snapshot 'conjunctions'/'meta' have the wrong shape")
             n_prev = len(prev.get("conjunctions") or ())
             print(f"history: reading {n_prev} conjunctions from {args.prev} "
                   f"(generated {(prev.get('meta') or {}).get('generated_at')})")
-        except (OSError, ValueError) as exc:
-            print(f"WARNING: --prev {args.prev} unusable ({exc}) — "
+        except (OSError, ValueError, RecursionError) as exc:   # RecursionError: deep nesting
+            print(f"WARNING: --prev {args.prev} unusable ({exc!r:.200}) — "
                   f"building without prediction history.", file=sys.stderr)
             prev = None
 
@@ -186,14 +217,29 @@ def main() -> None:
     # without this the archive can't say how long a screen took or which
     # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
     run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source}
+    # git_sha lets the next cron diff ENGINE code against what the live snapshot
+    # was built with (deploy.yml's gate decision) instead of trusting commit dates.
     for key, env in (("github_run_id", "GITHUB_RUN_ID"),
-                     ("github_event", "GITHUB_EVENT_NAME")):
+                     ("github_event", "GITHUB_EVENT_NAME"),
+                     ("git_sha", "GITHUB_SHA")):
         if os.environ.get(env):
             run[key] = os.environ[env]
 
-    snap = build_snapshot(df, events, screen_params, generated_at,
-                          source=_SOURCE_LABELS[args.catalog_source].format(group=args.group),
-                          prev=prev, run=run)
+    source = _SOURCE_LABELS[args.catalog_source].format(group=args.group)
+    try:
+        snap = build_snapshot(df, events, screen_params, generated_at,
+                              source=source, prev=prev, run=run)
+    except Exception as exc:   # noqa: BLE001 — history must never cost the refresh
+        if prev is None:
+            raise
+        # Last resort for the "never fatal" contract: whatever shape the live
+        # file had, rebuild once without it. Otherwise every later cron reads
+        # the same poisoned prev and fails identically until fixed by hand.
+        print(f"WARNING: prediction history failed ({exc!r:.200}) — "
+              f"building without it.", file=sys.stderr)
+        prev = None
+        snap = build_snapshot(df, events, screen_params, generated_at,
+                              source=source, prev=None, run=run)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0

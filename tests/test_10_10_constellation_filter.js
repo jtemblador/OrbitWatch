@@ -45,7 +45,7 @@ function extractFn(name) {
 }
 
 eval(extractConst("_CONSTELLATION_RE") + extractFn("constellationOf") +
-     extractFn("isSameConstellation"));
+     extractFn("isSameConstellation") + extractFn("crossConstellationSet"));
 
 const pair = (a, b) => ({ a_name: a, b_name: b });
 
@@ -69,6 +69,25 @@ check("missing names never count as same",
       !isSameConstellation(pair(null, "STARLINK-1")));
 check("Guowang test sats (HULIANWANG) group together",
       isSameConstellation(pair("HULIANWANG JISHU SHIYAN 1A", "HULIANWANG JISHU SHIYAN 1B")));
+
+console.log("filter-before-cap ordering");
+{
+  // 600 Starlink x Starlink pairs (closest-first), then 3 cross-operator ones
+  // that rank BELOW the overall top 500. Capping first would show none of them.
+  const raw = [];
+  for (let i = 0; i < 600; i++) raw.push(pair(`STARLINK-${i}`, `STARLINK-${i + 1000}`));
+  raw.push(pair("STARLINK-1", "COSMOS 1408 DEB"), pair("ONEWEB-0012", "STARLINK-2"),
+           pair("ISS (ZARYA)", "FENGYUN 1C DEB"));
+  const view = crossConstellationSet(raw, 500);
+  check("cross total counts every cross pair in the FULL list", view.total === 3,
+        `total=${view.total}`);
+  check("all 3 cross pairs are shown although they rank below 500 overall",
+        view.shown.length === 3, `shown=${view.shown.length}`);
+  const many = [];
+  for (let i = 0; i < 700; i++) many.push(pair(`ONEWEB-${i}`, `STARLINK-${i}`));
+  check("the cap still applies after filtering",
+        crossConstellationSet(many, 500).shown.length === 500);
+}
 
 console.log(`\n${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);

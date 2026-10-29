@@ -283,6 +283,20 @@ class TestValidation:
         df = self.fetcher._parse_json([rec])
         assert len(df) == 0
 
+    def test_skip_non_finite_or_non_numeric_sgp4_fields(self):
+        """Round-2 adversarial: one malformed SGP4 field either killed the batch
+        (a Space-Track "BSTAR": "" survives coercion and the parquet write then
+        fails — losing the whole fallback) or was silently zeroed (null
+        INCLINATION published as an equatorial orbit). Skip the record instead."""
+        bad = [make_record(BSTAR=""), make_record(INCLINATION=None),
+               make_record(MEAN_MOTION_DOT=float("nan")),
+               make_record(RA_OF_ASC_NODE="12.5x"), make_record(NORAD_CAT_ID=None),
+               make_record(MEAN_ANOMALY=True)]
+        good = make_record(NORAD_CAT_ID=99999)
+        df = self.fetcher._parse_json(bad + [good])
+        assert df["norad_cat_id"].tolist() == [99999]
+        self.fetcher._cache_to_parquet(df, "t")          # and the frame persists
+
     def test_skip_non_sgp4_ephemeris(self):
         rec = make_record(EPHEMERIS_TYPE=2)
         df = self.fetcher._parse_json([rec])

@@ -61,6 +61,13 @@ MIN_FETCH_INTERVAL = timedelta(hours=2)
 # keeps 1 attempt so a loop over many objects can't stack backoffs.
 BULK_FETCH_ATTEMPTS = 3
 
+# OMM fields SGP4 actually consumes — each must be a finite number (see _parse_json).
+_SGP4_FIELDS = (
+    "MEAN_MOTION", "ECCENTRICITY", "INCLINATION", "RA_OF_ASC_NODE",
+    "ARG_OF_PERICENTER", "MEAN_ANOMALY", "BSTAR", "MEAN_MOTION_DOT",
+    "MEAN_MOTION_DDOT",
+)
+
 
 def _derive_object_type(name: str) -> str:
     """Infer object type from a CelesTrak GP object name.
@@ -213,9 +220,18 @@ class GPFetcher:
         return None
 
     def _load_cached_or_fail(self, group: str) -> pd.DataFrame:
-        """Try to load cache, raise if no cache exists."""
+        """Try to load cache, raise if no cache exists. Says how old the cache
+        is: a fetch failure silently serving weeks-old elements is otherwise
+        indistinguishable from a fresh fetch downstream."""
         try:
-            return self.load_cached(group)
+            df = self.load_cached(group)
+            if "fetch_time" in df.columns and len(df):
+                ts = pd.Timestamp(df["fetch_time"].iloc[0])
+                ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+                age_h = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600.0
+                print(f"  Serving cached {group} data fetched {age_h:.1f} h ago "
+                      f"(fresh fetch failed).")
+            return df
         except FileNotFoundError:
             raise RuntimeError(
                 f"Cannot fetch from CelesTrak and no cached data for '{group}'. "
@@ -305,7 +321,18 @@ class GPFetcher:
         skipped = 0
         for rec in records:
             try:
-                # Validate required SGP4 fields exist
+                # Every field SGP4 consumes must be a finite number (and the id
+                # an int). A malformed one otherwise either kills the whole batch
+                # downstream (a "" BSTAR breaks the parquet write — the entire
+                # Space-Track fallback) or is silently zeroed into a fake orbit.
+                for key in _SGP4_FIELDS:
+                    v = rec[key]
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                            or not math.isfinite(v):
+                        raise ValueError(f"{key} is not a finite number: {v!r}")
+                if isinstance(rec["NORAD_CAT_ID"], bool) or \
+                        not isinstance(rec["NORAD_CAT_ID"], int):
+                    raise ValueError(f"NORAD_CAT_ID is not an int: {rec['NORAD_CAT_ID']!r}")
                 mean_motion = rec["MEAN_MOTION"]
                 eccentricity = rec["ECCENTRICITY"]
 
@@ -340,9 +367,11 @@ class GPFetcher:
                 rows.append({
                     # Identity
                     "object_name": rec["OBJECT_NAME"].strip(),
-                    "object_id": rec["OBJECT_ID"],              # International designator
+                    # Display-only identity fields use .get(): schema drift in
+                    # a field SGP4 never reads must not drop the object.
+                    "object_id": rec.get("OBJECT_ID"),          # International designator
                     "norad_cat_id": rec["NORAD_CAT_ID"],
-                    "classification": rec["CLASSIFICATION_TYPE"],
+                    "classification": rec.get("CLASSIFICATION_TYPE"),
 
                     # Epoch
                     "epoch": epoch,
@@ -375,15 +404,16 @@ class GPFetcher:
                     "decay_date": rec.get("DECAY_DATE"),         # ISO date (None if still in orbit)
 
                     # Element set metadata
-                    "ephemeris_type": rec["EPHEMERIS_TYPE"],
-                    "element_set_no": rec["ELEMENT_SET_NO"],
-                    "rev_at_epoch": rec["REV_AT_EPOCH"],
+                    "ephemeris_type": rec.get("EPHEMERIS_TYPE", 0),
+                    "element_set_no": rec.get("ELEMENT_SET_NO"),
+                    "rev_at_epoch": rec.get("REV_AT_EPOCH"),
 
                     # Fetch metadata
                     "fetch_time": now,
                 })
-            except (KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
                 # Skip malformed records — don't let one bad record kill the batch
+                # (AttributeError: a null OBJECT_NAME has no .strip())
                 name = rec.get("OBJECT_NAME", "UNKNOWN")
                 cat_id = rec.get("NORAD_CAT_ID", "?")
                 print(f"  Skipping malformed record: {name} ({cat_id}): {e}")

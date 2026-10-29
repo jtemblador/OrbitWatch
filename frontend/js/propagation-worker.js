@@ -27,7 +27,9 @@
 
 /* global satellite, importScripts */
 
-// Same pinned build the page loads — keep the two in lockstep.
+// Same pinned build the page loads — keep the two in lockstep. (importScripts
+// takes no SRI hash, unlike the page's <script integrity>; a tampered copy here
+// would run in worker scope only — no DOM, cookies or page state.)
 importScripts("https://cdn.jsdelivr.net/npm/satellite.js@6.0.1/dist/satellite.min.js");
 
 let satrecs = [];
