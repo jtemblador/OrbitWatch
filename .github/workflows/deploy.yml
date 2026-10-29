@@ -75,7 +75,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Job-level override: this job (and only this job) needs `contents: write` for
     # the archive push. Job permissions REPLACE the top-level set, so pages/
     # id-token are re-listed (configure-pages / upload-pages-artifact need them).
@@ -86,7 +86,7 @@ jobs:
     steps:
       # fetch-depth 50: enough history for the "recent engine change" check below
       # (the git log --since needs commits, not just the shallow tip).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 50
 
@@ -136,7 +136,7 @@ jobs:
 
       - name: Set up Python 3.12
         if: steps.decide.outputs.rebuild == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -372,7 +372,7 @@ jobs:
           WT="$RUNNER_TEMP/data-wt"
           if [ "$rc" -eq 0 ]; then
             # Extend the existing archive. Base the worktree on FETCH_HEAD, not
-            # origin/data: checkout@v4's narrow refspec doesn't create a
+            # origin/data: checkout's narrow refspec doesn't create a
             # refs/remotes/origin/data tracking ref, but a fetch of an explicit
             # ref always sets FETCH_HEAD (verified locally).
             git fetch --depth=1 origin data
@@ -420,20 +420,20 @@ jobs:
           printf 'const CESIUM_ION_TOKEN = "%s";\n' "$ION_TOKEN" > frontend/js/config.js
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: frontend
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
