@@ -1232,3 +1232,54 @@ anywhere a value arrives from JSON.
 means asserting the thing it *changes*: a near-flat trail must use LESS than the
 full plot band, and a genuine large swing must use ALL of it. Always delete the
 guard and confirm a check goes red before believing it is covered.
+
+## 10.10 — ops audit + hardening (Oct 29, 2026)
+
+**Space-Track and CelesTrak disagree on names and types for the SAME elements.**
+Over the 16,819-object active catalog, 2,697 names differ (CelesTrak curates them:
+"CSS (TIANHE)" vs Space-Track "TIANHE", amateur designators like "(AO-7)") and 622
+CelesTrak-derived PAYLOADs are typed UNKNOWN on Space-Track. The station regex,
+search and type filters key on these, so the Space-Track fallback keeps the live
+snapshot's labels (`refill_group_cache(labels=...)`) and takes only the elements.
+NORAD ids and the 9.10 history link are unaffected.
+
+**Space-Track redistribution of basic GP data is allowed — with citation.** The API
+guidelines grant USSPACECOM's blanket approval "conditioned on appropriate
+citation"; `meta.source` carries it when Space-Track fed the run. The bulk
+`class/gp` query is limited to once per hour — fallback-only use is far under it.
+
+**CelesTrak's TLS is blocked from this Mac** (same as 10.3) — refresh local caches
+from Space-Track (`python -m backend.core.spacetrack_fetcher refill <group> <snapshot.json>`,
+needs `.env` exported). A stale local `stations` cache fails
+`test_epoch_age_is_reasonable`; that is the cache, not the code.
+
+**A green cron run is not a refreshed site.** The fetch step is
+`continue-on-error`; before 10.10, 16 of 229 scheduled runs (7%) re-served the old
+snapshot and only a `::warning::` annotation said so. Count refreshes from the
+archive or `meta.run`, not from run conclusions.
+
+**GitHub cron is late, and getting later.** Start delay vs the :17 slots: median
+2.0 h (Jul), 0.8 h (Aug), 4.0 h (Sep), 4.6 h (Oct); worst 7.9 h. The "trail
+SOCRATES by ~1 h" alignment no longer holds. Two slots of 339 were dropped.
+
+**The 60-day schedule auto-disable did not fire** at 71 days without a push to
+main — the bot's `data`-branch archive commits count as repo activity.
+
+**GitHub deletes run logs after 90 days** (July's were gone by Oct 29), which is why
+screen time / catalog source now live in `meta.run` inside each archived snapshot.
+
+**`actions/checkout` ≥ v6 keeps credentials in a separate file** but adds an
+`includeIf` for `.git/worktrees/*`, so the archive push from its linked worktree
+still authenticates.
+
+**CARTO's dark basemap now needs an API key** (seen Oct 29): keyless requests get an
+"API KEY REQUIRED" tile, regardless of referrer. Replaced in 10.10 by NASA GIBS
+`VIIRS_Black_Marble` (EPSG:3857, keyless, CORS `*`, max level 8 → `maximumLevel: 8`).
+Raw it is near-black at globe zoom — `brightness: 1.8, gamma: 1.15` on the layer
+(3.0 washes the oceans out). Its coastline/label overlays are dark-on-transparent
+or empty in 3857, so none are used.
+
+**Starlink is lowering its ~550 km shells** (SpaceX's 2026 plan, ~550 → ~480 km),
+and it dominates the event count: Starlink–Starlink pairs went from 61% to 79% of
+all conjunctions Jul → Oct; in the 450–475 km band conjunctions scale with
+population^2.03. See `docs/findings/starlink-shell-lowering.md`.
