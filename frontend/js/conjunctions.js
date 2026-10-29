@@ -40,7 +40,7 @@ function groupCss(noradId) {
 }
 /** A satellite name span tinted by its display group (for the conjunction list). */
 function nameSpan(noradId, name) {
-  return `<span class="cj-name" style="color:${groupCss(noradId)}">${name}</span>`;
+  return `<span class="cj-name" style="color:${groupCss(noradId)}">${escapeHtml(name)}</span>`;
 }
 
 /** Miss-distance → threat color: red at ≤0.1 km, orange ~0.5 km, yellow ≥0.9 km.
@@ -164,7 +164,8 @@ function updatePovIndicator() {
     const up = selName ? "Conjunction View" : top;
     html =
       `<span class="pov-level">TCA View</span>` +
-      `<span class="pov-ctx">${getSatName(focusedPair[0])} × ${getSatName(focusedPair[1])}</span>` +
+      `<span class="pov-ctx">${escapeHtml(getSatName(focusedPair[0]))} × ` +
+      `${escapeHtml(getSatName(focusedPair[1]))}</span>` +
       `<span class="pov-esc">Esc → ${up}</span>`;
   } else if (selName) {
     // A satellite is selected — name it. If its conjunction partners are also
@@ -174,7 +175,7 @@ function updatePovIndicator() {
       && isolationSet !== null && isolationSet.size > 1);
     html =
       `<span class="pov-level">${hasPartners ? "Conjunction View" : "Satellite"}</span>` +
-      `<span class="pov-ctx">${selName}</span>` +
+      `<span class="pov-ctx">${escapeHtml(selName)}</span>` +
       `<span class="pov-esc">Esc → ${top}</span>`;
   } else if (conjMode) {
     html = `<span class="pov-level">All Conjunctions</span>`;
@@ -227,7 +228,8 @@ conjPanel.innerHTML =
   `<label id="conjunction-filter" title="Pairs inside one constellation (80% are ` +
   `Starlink × Starlink) are handled by that operator's own fleet coordination. ` +
   `Cross-operator pairs are the ones that need two parties talking.">` +
-  `<input type="checkbox" id="conj-hide-same"> Hide same-constellation pairs</label>` +
+  `<input type="checkbox" id="conj-hide-same" autocomplete="off" disabled>` +
+  ` Hide same-constellation pairs</label>` +
   `<div id="conjunction-body"></div>`;
 document.body.appendChild(conjPanel);
 
@@ -601,8 +603,11 @@ function focusConjunction(e, doJump = true) {
 
   if (selectedConjNorad !== null) {
     _refreshingDetail = true;
-    showConjunctionsFor(selectedConjNorad); // refresh the detail-panel highlight
-    _refreshingDetail = false;
+    try {
+      showConjunctionsFor(selectedConjNorad); // refresh the detail-panel highlight
+    } finally {
+      _refreshingDetail = false; // a throw must not leave later selections un-isolated
+    }
   }
   renderConjunctionList();
 
@@ -610,7 +615,11 @@ function focusConjunction(e, doJump = true) {
     simClock.setTime(Date.parse(e.tca) - CONJ_LEAD_MIN * 60000);
     simClock.setSpeed(1);
     if (simClock.isPaused()) simClock.togglePause();
-    if (typeof refreshSatellites === "function") refreshSatellites();
+    // force: isolateSats() above usually has a batch in flight computed at the
+    // PRE-jump time; an unforced request would be dropped while the worker is
+    // busy, leaving the pair at stale positions until the next scheduled tick.
+    // Forced, it queues (pendingForcedRefresh) and lands right after.
+    if (typeof refreshSatellites === "function") refreshSatellites(true);
     viewer.flyTo(conjOrb, {
       duration: 1.6,
       offset: new Cesium.HeadingPitchRange(0, -Cesium.Math.toRadians(45), 4.0e6),
@@ -653,7 +662,10 @@ function clearConjunctionVisuals() {
   // Re-hide any satellite we force-revealed just for this focus (per-sat reveal).
   if (typeof clearRevealedSats === "function") clearRevealedSats();
   // Coming out of a focus while the Top-20 arc view is active → restore the arcs.
-  if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "top20") {
+  // Only when they're actually gone (a focus cleared them): every empty-globe
+  // click lands here too, and a rebuild is ~1,000 SGP4 calls + a new primitive.
+  if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "top20"
+      && conjOnlyPrimitive === null) {
     renderConjOnlyArcs("top20");
   }
   tcaZoomed = false;   // no focus → not the TCA level anymore
@@ -753,14 +765,23 @@ function renderConjunctionList() {
 function showConjunctionsFor(noradId) {
   selectedConjNorad = noradId;
   const events = conjByNorad.get(noradId) || [];
-  const name = getSatName(noradId);
+  const name = escapeHtml(getSatName(noradId)); // only ever used in innerHTML below
   const windowH = snapshotMeta ? Math.round(snapshotMeta.screen.window_hours) : 72;
 
   if (!events.length) {
+    // The panel only indexes the DISPLAYED set (closest CONJ_DISPLAY_CAP, maybe
+    // cross-constellation only) — so "none here" is not "none at all" unless the
+    // displayed set is the whole screen.
+    const complete = conjEvents.length >= conjTotalCount && !conjHideSameConstellation;
     detailPanel.innerHTML =
       `<div id="conjunction-detail-header">${name}</div>` +
-      `<div class="conjunction-empty">No conjunctions in the ` +
-      `${windowH} h screening window.</div>`;
+      `<div class="conjunction-empty">` +
+      (complete
+        ? `No conjunctions in the ${windowH} h screening window.`
+        : `None among the ${conjEvents.length} ` +
+          `${conjHideSameConstellation ? "cross-constellation " : ""}conjunctions shown ` +
+          `(closest of ${conjTotalCount.toLocaleString()}).`) +
+      `</div>`;
     detailPanel.style.display = "block";
     return;
   }
@@ -899,8 +920,12 @@ document.getElementById("conj-hide-same").addEventListener("change", (ev) =>
 // --- Load: events come pre-computed in the snapshot (screened offline) ---
 
 snapshotReady.then(() => {
-  // SFS-screened, suppressed, de-duped, closest-first
+  // SFS-screened, suppressed, de-duped, closest-first. The filter box stays
+  // disabled until here — ticked before load it would swap in an empty set.
   useConjunctionSet(snapshotConjunctions, snapshotMeta.n_conjunctions);
+  const hideSame = document.getElementById("conj-hide-same");
+  hideSame.checked = false;
+  hideSame.disabled = false;
   renderConjunctionList();
   renderFreshness();
   setInterval(renderFreshness, 60000); // the age ticks while the tab stays open
@@ -915,7 +940,12 @@ snapshotReady.then(() => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const t = e.target;
-  if (t && (t.isContentEditable || t.tagName === "INPUT")) return;
+  // Only TEXT entry owns Escape — a focused checkbox (the filter, a group
+  // toggle) must not swallow the zoom-stack Escape.
+  if (t && (t.isContentEditable ||
+            (t.tagName === "INPUT" && !["checkbox", "radio", "button"].includes(t.type)))) {
+    return;
+  }
   const hasSelection =
     typeof selectedNoradId !== "undefined" && selectedNoradId !== null;
   if (tcaZoomed) {

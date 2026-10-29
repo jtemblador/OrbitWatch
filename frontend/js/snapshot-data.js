@@ -213,6 +213,15 @@ const snapshotReady = (async () => {
 
 /** Satellite name for UI labels/panels (independent of whether a Cesium label
  *  exists — labels are created lazily at scale). */
+/** Escape a string for an innerHTML template. Names and types come from the
+ *  upstream catalogs (CelesTrak / Space-Track), so they are data, never markup —
+ *  every template that interpolates one must pass it through here. (textContent
+ *  sinks must NOT — they'd show a literal "&amp;".) */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
 function getSatName(noradId) {
   const meta = satelliteMetadata.get(noradId);
   return meta ? meta.name : `NORAD ${noradId}`;

@@ -65,6 +65,11 @@ const simClock = (() => {
     baseSimTime = ms;
     baseWallTime = Date.now();
     updateUI();
+    // A time JUMP needs a fresh position batch even while paused (the refresh
+    // loop skips paused ticks), or a paused HH:MM:SS edit / LIVE would move the
+    // clock but leave every dot and readout at the old instant. Forced requests
+    // queue behind an in-flight batch rather than being dropped.
+    if (typeof refreshSatellites === "function") refreshSatellites(true);
   }
 
   // --- Time Bar UI ---
