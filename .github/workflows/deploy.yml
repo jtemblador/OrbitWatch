@@ -359,7 +359,12 @@ jobs:
           SHA=$(python3 -c "import json; print(((json.load(open('prev-snapshot.json')).get('meta') or {}).get('run') or {}).get('git_sha', ''))" 2>/dev/null || true)
           if [ -n "$SHA" ] && git fetch -q --depth=1 origin "$SHA" 2>/dev/null; then
             echo "Live snapshot was built from $SHA."
-            CHANGED=$(git diff --name-only "$SHA" HEAD -- $PATHS | head -1)
+            # Fail CLOSED: if the diff itself errors, gate rather than skip.
+            if DIFF=$(git diff --name-only "$SHA" HEAD -- $PATHS); then
+              CHANGED=$(printf '%s\n' "$DIFF" | head -1)
+            else
+              CHANGED="(git diff failed; gating to be safe)"
+            fi
           else
             echo "Live snapshot carries no usable git_sha — using the 10 h commit-date rule."
             CHANGED=$(git log --since="10 hours ago" --name-only --pretty=format: -- \

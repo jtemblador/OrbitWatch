@@ -291,8 +291,11 @@ def refill_group_cache(group: str, norad_ids, st: SpaceTrackFetcher | None = Non
     df = cat[cat["norad_cat_id"].isin(ids)] if not cat.empty else cat
     if not df.empty:
         # class/gp is already newest-per-object; dedupe defensively anyway.
+        # Then CelesTrak's order (ascending NORAD id): every head-slice of a
+        # fallback run — e.g. the CI gate's --max-sats 5000 — must pick the same
+        # objects a normal run would, not the stalest-epoch ones.
         df = (df.sort_values("epoch").drop_duplicates("norad_cat_id", keep="last")
-                .reset_index(drop=True))
+                .sort_values("norad_cat_id").reset_index(drop=True))
     if len(df) < min_coverage * len(ids):
         raise SpaceTrackError(
             f"Space-Track returned {len(df)} of {len(ids)} requested objects "

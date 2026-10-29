@@ -323,6 +323,19 @@ class TestCatalogFallback:
         assert sorted(df["norad_cat_id"]) == [1, 2, 3]
         assert sorted(gp.load_cached("active")["norad_cat_id"]) == [1, 2, 3]
 
+    def test_refill_is_in_celestrak_order(self, monkeypatch, tmp_path):
+        # CelesTrak serves the active group in ascending NORAD id (0 inversions
+        # over 16,819 objects). The refill must match, or every head-slice of a
+        # fallback run (the CI gate's --max-sats 5000) screens different objects.
+        f = SpaceTrackFetcher(user="u", password="p", cache_dir=tmp_path / "st")
+        recs = [_st_record(n, e) for n, e in ((30, "2026-10-01T00:00:00"),
+                                                (10, "2026-10-28T00:00:00"),
+                                                (20, "2026-10-15T00:00:00"))]
+        monkeypatch.setattr(f, "_query", lambda p: json.dumps(recs))
+        gp = GPFetcher(cache_dir=tmp_path / "tle")
+        refill_group_cache("active", [10, 20, 30], st=f, gp=gp)
+        assert gp.load_cached("active")["norad_cat_id"].tolist() == [10, 20, 30]
+
     def test_refilled_cache_counts_as_fresh(self, monkeypatch, tmp_path):
         # The whole point: build_snapshot's fetcher.fetch('active') must take
         # this cache instead of re-trying the CelesTrak that just failed.
