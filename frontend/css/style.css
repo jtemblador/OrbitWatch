@@ -637,3 +637,25 @@ html, body, #cesiumContainer {
   border-left: 1px solid #333;
   padding-left: 10px;
 }
+
+/* --- 9.10 prediction-evolution sparkline (conjunction detail rows) --- */
+.cd-hist {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px dashed #222;
+}
+
+.cd-hist svg {
+  /* height:auto + no preserveAspectRatio override => uniform scale, so the
+     labels never stretch when the panel is wider than the 200-unit viewBox. */
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.cd-hist-cap {
+  color: #666;
+  font-size: 10px;
+  margin-top: 1px;
+}

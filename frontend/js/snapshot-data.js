@@ -142,6 +142,13 @@ function _adaptConjunction(c) {
     t_km: c.rtn_km[1],
     n_km: c.rtn_km[2],
     screening_regime: c.regime,
+    // 9.10: what THIS encounter was predicted to be on earlier runs, as
+    // [[epochSeconds, missKm], ...] oldest-first. Absent on ~two thirds of
+    // events (a pair must survive with a stable TCA across runs), and absent
+    // from EVERY event in a pre-9.10 snapshot — which a frontend-only redeploy
+    // still serves, since that path reuses the live snapshot rather than
+    // re-screening. Downstream must treat null as the ordinary case.
+    history: c.hist || null,
   };
 }
 

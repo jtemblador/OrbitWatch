@@ -84,6 +84,10 @@ def main() -> None:
                          "snapshot (0 = off; CI passes a floor for --group active)")
     ap.add_argument("--out", default=os.path.join(_ROOT, "frontend", "snapshot.json"),
                     help="output path for snapshot.json")
+    ap.add_argument("--prev", default="",
+                    help="previous snapshot.json — carries each conjunction's "
+                         "prediction history forward (9.10). Missing or "
+                         "unreadable is non-fatal: the run just emits no history.")
     args = ap.parse_args()
 
     fetcher = GPFetcher()
@@ -139,8 +143,47 @@ def main() -> None:
           f"({args.mode}, {args.hours:.0f} h window)")
 
     generated_at = start.isoformat().replace("+00:00", "Z")
+
+    # 9.10: carry each conjunction's prediction history forward from the run
+    # before this one. This is the whole mechanism — one small file, no archive
+    # scan — so it stays O(current events) and the cron stays ~10 min.
+    #
+    # Deliberately non-fatal in every failure mode (absent on a first deploy,
+    # 404 while Pages redeploys, truncated download, malformed JSON): history is
+    # a nice-to-have layered on top of the snapshot, and losing it must never
+    # cost us the data refresh. A broken chain refills over the next ~3 runs.
+    prev = None
+    if args.prev:
+        try:
+            with open(args.prev, encoding="utf-8") as f:
+                prev = json.load(f)
+            n_prev = len(prev.get("conjunctions") or ())
+            print(f"history: reading {n_prev} conjunctions from {args.prev} "
+                  f"(generated {(prev.get('meta') or {}).get('generated_at')})")
+        except (OSError, ValueError) as exc:
+            print(f"WARNING: --prev {args.prev} unusable ({exc}) — "
+                  f"building without prediction history.", file=sys.stderr)
+            prev = None
+
     snap = build_snapshot(df, events, screen_params, generated_at,
-                          source=f"CelesTrak {args.group}")
+                          source=f"CelesTrak {args.group}", prev=prev)
+    n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
+    if prev:
+        pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0
+        print(f"history: {n_hist} of {len(snap['conjunctions'])} conjunctions "
+              f"carried a trail forward ({pct:.1f}%)")
+        # A rate of EXACTLY zero against a substantial previous run is not a data
+        # blip — a slid window still leaves ~16% of pairs recurring (measured over
+        # 41 days; the worst observed slot, across a 16 h cron gap, was 7.2%). Zero
+        # means the (pair, TCA ± 900 s) link itself broke, e.g. schema drift in
+        # a/b/tca/miss_km. Left unannounced that silently and permanently removes
+        # the feature from the site, since nobody reads a green cron's logs.
+        # Warn, never fail: history is cosmetic and must not block a data refresh.
+        if n_hist == 0 and n_prev >= 1000 and snap["conjunctions"]:
+            print(f"::warning::Prediction history collapsed to 0 trails despite a "
+                  f"previous snapshot with {n_prev} conjunctions — the "
+                  f"(pair, TCA ± 900 s) link is broken (schema drift?). The site "
+                  f"still publishes; see task 9.10.", file=sys.stderr)
 
     # allow_nan=False: fail loudly if any NaN/inf slipped through rather than
     # emit a bare `NaN` token that the browser's JSON.parse would reject.

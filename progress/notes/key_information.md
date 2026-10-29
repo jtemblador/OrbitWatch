@@ -1177,3 +1177,58 @@ The `false` parameter means the callback is NOT constant (positions change every
 - Script load order: app → clock → satellites → info-panel → controls
 - Frontend-only changes, no backend modifications
 - Week 5 complete — all tasks done
+
+---
+
+## 9.10 — prediction-evolution trail (Aug 18, 2026)
+
+**Linking a conjunction across runs needs (pair, TCA ± 900 s) — the pair ALONE is
+wrong.** `_dedupe_to_unique_pairs` keeps exactly one event per unordered pair per
+24 h window (the closest), and co-orbiting satellites — Starlink shells above all
+— conjunct repeatedly. So as the window slides, "the closest encounter for this
+pair" becomes a *different encounter*. Measured on consecutive archived runs:
+matching by pair alone gives a **median |ΔTCA| of 22,597 s (~6.3 h)**, i.e. mostly
+unrelated approaches. With the ±900 s gate the realized link rate is **~16% of all
+events, 31–33% of the displayed closest-500** (the closest events are the sticky
+ones), and the deepest trail observed across 41 days is **4 points**.
+⚠ Do not widen the de-dupe to raise that rate — the engine is CI-gated
+byte-identical (10.6).
+
+**Read the previous snapshot, never the archive.** The `data` branch is 147 MB and
+grows ~3.6 MB/day; cloning it on the cron path would dominate the ~10-min rebuild.
+Carrying `hist` forward one run from the live `snapshot.json` is O(current events)
+and constant in archive size. A broken chain self-heals over ~3 runs.
+
+**`datetime.timestamp()` on a NAIVE datetime silently uses LOCAL time.** Always
+`.replace(tzinfo=timezone.utc)` first when a stamp may be naive — the drift is
+hours, and invisible in a UTC-configured CI runner (test-locked in
+`TestCarryForwardHistory.test_naive_timestamps_are_read_as_utc`).
+
+**Timestamps that reach the browser should be epoch seconds, not ISO strings.**
+Compact, and it sidesteps the 9.3 Safari trap entirely (WebKit's `Date` rejects a
+non-3-digit fractional-second field that V8 accepts → silent NaN, invisible in
+local dev).
+
+**`preserveAspectRatio="none"` on an inline SVG stretches its text.** A 200-unit
+viewBox rendered into a 260 px panel scales glyphs ~1.3× horizontally. Use the
+default (uniform) aspect ratio with `width:100%; height:auto` instead.
+
+**Any new frontend field must tolerate being absent.** A frontend-only push takes
+`deploy.yml`'s REUSE path, which redeploys in ~1 min while serving the snapshot
+already live — so new code routinely runs against an older schema. Verify every
+frontend change against a pre-change snapshot, not only a freshly built one.
+
+**JS `isFinite` COERCES — use `Number.isFinite` for validation.** `isFinite(null)`,
+`isFinite("")`, and `isFinite([])` are all **true** (each coerces to 0), so a
+"validate this is a number" filter built on the global lets `null` through and
+plots it as 0. Found in 9.10's trail filter by the Node harness: a
+`[null, missKm]` point passed validation and rendered at epoch 0, ~496,000 h
+before TCA. `Number.isFinite` does no coercion and is the right primitive
+anywhere a value arrives from JSON.
+
+**A green mutation is not a locked guard.** 9.10's first sparkline harness went
+20/20 while the flat-trail guard was deleted — the checks asserted properties
+(equal values → equal heights) that held with or without it. Locking a guard
+means asserting the thing it *changes*: a near-flat trail must use LESS than the
+full plot band, and a genuine large swing must use ALL of it. Always delete the
+guard and confirm a check goes red before believing it is covered.

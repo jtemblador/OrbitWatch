@@ -11,6 +11,7 @@ import json
 import math
 import os
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from core.snapshot import (  # noqa: E402
     SCHEMA_VERSION,
     _conjunction,
+    carry_forward_history,
     _epoch_iso,
     _num,
     _satellite,
@@ -51,6 +53,28 @@ def _event(**over):
     }
     base.update(over)
     return base
+
+
+def _cj(**over):
+    """A COMPACT snapshot conjunction record — i.e. `_conjunction()` output.
+
+    `carry_forward_history` deliberately works on this schema rather than on
+    run_screen events: it makes the trail a pure snapshot→snapshot transform,
+    so it is testable with dict literals (no pandas, no screen) and reusable by
+    a future archive backfill without rework.
+    """
+    base = {
+        "a": 100, "b": 200, "a_name": "SAT-A", "b_name": "SAT-B",
+        "a_type": "PAYLOAD", "b_type": "PAYLOAD",
+        "tca": "2026-06-01T18:00:00+00:00", "miss_km": 1.5,
+        "rel_speed_km_s": 10.0, "rtn_km": [0.1, 0.2, 0.3], "regime": "LEO 1",
+    }
+    base.update(over)
+    return base
+
+
+_PREV_GEN = "2026-06-01T00:00:00Z"
+_PREV_EPOCH = int(datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp())
 
 
 def _reject_const(x):
@@ -153,12 +177,144 @@ class TestBuildSnapshot:
         payload = json.dumps(build_snapshot(df, [_event()], {}, "t"), allow_nan=False)
         json.loads(payload, parse_constant=_reject_const)
 
+    def test_prev_snapshot_attaches_history(self):
+        df = pd.DataFrame([_row(norad_cat_id=25544), _row(norad_cat_id=12345)])
+        prev = {"meta": {"generated_at": _PREV_GEN},
+                "conjunctions": [_cj(a=25544, b=12345,
+                                     tca="2026-06-01T18:00:00+00:00", miss_km=40.06)]}
+        snap = build_snapshot(df, [_event()], {}, "t", prev=prev)
+        assert snap["conjunctions"][0]["hist"] == [[_PREV_EPOCH, 40.06]]
+
+    def test_without_prev_no_hist_key_is_emitted(self):
+        # Absent, not null and not [] — so the ~69% of events with no trail cost
+        # zero bytes, and the pre-9.10 output is unchanged.
+        snap = build_snapshot(pd.DataFrame([_row()]), [_event()], {}, "t")
+        assert all("hist" not in c for c in snap["conjunctions"])
+
+    def test_prev_without_meta_degrades_quietly(self):
+        snap = build_snapshot(pd.DataFrame([_row()]), [_event()], {}, "t", prev={})
+        assert all("hist" not in c for c in snap["conjunctions"])
+
     def test_conjunction_ids_are_subset_of_satellites(self):
         df = pd.DataFrame([_row(norad_cat_id=1), _row(norad_cat_id=2)])
         snap = build_snapshot(df, [_event(sat1_norad_id=1, sat2_norad_id=2)], {}, "t")
         ids = {s["NORAD_CAT_ID"] for s in snap["satellites"]}
         for c in snap["conjunctions"]:
             assert c["a"] in ids and c["b"] in ids
+
+
+class TestCarryForwardHistory:
+    """9.10 — the self-propagating `hist` chain.
+
+    Each rebuild reads only the PREVIOUS snapshot, so the cost is O(current
+    events) and the 147 MB `data`-branch archive is never touched. The link key
+    is (unordered pair, TCA +/- 900 s): the pair ALONE is wrong, because
+    `_dedupe_to_unique_pairs` keeps one event per pair per window and
+    co-orbiting satellites conjunct repeatedly, so the same pair names a
+    different encounter as the window slides.
+    """
+
+    def test_match_attaches_prior_point(self):
+        out = carry_forward_history([_cj(miss_km=0.37)], [_cj(miss_km=40.06)], _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 40.06]]
+
+    def test_point_is_stamped_with_the_run_time_not_the_tca(self):
+        # The sparkline's x-axis is "when was this predicted" — lead time is
+        # derived downstream as (tca - run time). Stamping the TCA instead would
+        # collapse every point onto ~the same x.
+        out = carry_forward_history([_cj()], [_cj(miss_km=2.0)], _PREV_GEN)
+        assert out[0]["hist"][0][0] == _PREV_EPOCH
+
+    def test_is_pure_and_does_not_mutate_its_input(self):
+        cur = [_cj()]
+        carry_forward_history(cur, [_cj(miss_km=9.9)], _PREV_GEN)
+        assert "hist" not in cur[0]
+
+    def test_pair_order_is_irrelevant(self):
+        out = carry_forward_history([_cj(a=100, b=200)],
+                                    [_cj(a=200, b=100, miss_km=7.0)], _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 7.0]]
+
+    def test_different_pair_is_not_matched(self):
+        out = carry_forward_history([_cj(a=100, b=200)], [_cj(a=100, b=999)], _PREV_GEN)
+        assert "hist" not in out[0]
+
+    def test_tca_drift_at_the_window_edge_matches(self):
+        out = carry_forward_history([_cj(tca="2026-06-01T18:15:00+00:00")],
+                                    [_cj(miss_km=3.0)], _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 3.0]]
+
+    def test_tca_drift_past_the_window_does_not_match(self):
+        out = carry_forward_history([_cj(tca="2026-06-01T18:15:01+00:00")],
+                                    [_cj()], _PREV_GEN)
+        assert "hist" not in out[0]
+
+    def test_chain_extends_across_runs(self):
+        prev = [_cj(miss_km=1.18, hist=[[1, 40.06]])]
+        out = carry_forward_history([_cj(miss_km=0.37)], prev, _PREV_GEN)
+        assert out[0]["hist"] == [[1, 40.06], [_PREV_EPOCH, 1.18]]
+
+    def test_depth_capped_dropping_the_oldest(self):
+        prev = [_cj(miss_km=4.0, hist=[[1, 1.0], [2, 2.0], [3, 3.0]])]
+        out = carry_forward_history([_cj()], prev, _PREV_GEN)
+        # 3 prior points + the live value = the 4-point max depth measured
+        # across the 41-day archive.
+        assert out[0]["hist"] == [[2, 2.0], [3, 3.0], [_PREV_EPOCH, 4.0]]
+
+    def test_no_previous_snapshot_is_a_noop(self):
+        for prev in (None, []):
+            out = carry_forward_history([_cj()], prev, _PREV_GEN)
+            assert "hist" not in out[0]
+
+    def test_malformed_prev_records_are_skipped_not_fatal(self):
+        # `prev` is downloaded from the live site — a corrupt record must cost us
+        # that one trail, never the build.
+        prev = [{"a": 100},                                  # missing everything else
+                _cj(a=100, b=201, tca="not-a-date"),         # unparseable TCA
+                _cj(a=100, b=200, miss_km=2.0)]              # the real match
+        out = carry_forward_history([_cj()], prev, _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 2.0]]
+
+    def test_malformed_trail_points_are_dropped_not_propagated(self):
+        # The trail is copied forward every run, so a bad point would ride the
+        # chain for HISTORY_MAX_POINTS runs and reach the browser each time.
+        prev = [_cj(miss_km=9.0, hist=[[1, 1.0], "junk", [2], [3, "x"],
+                                       [4, float("nan")], [5, 5.0]])]
+        out = carry_forward_history([_cj()], prev, _PREV_GEN, max_points=99)
+        assert out[0]["hist"] == [[1, 1.0], [5, 5.0], [_PREV_EPOCH, 9.0]]
+
+    def test_non_list_trail_is_ignored(self):
+        out = carry_forward_history([_cj()], [_cj(miss_km=9.0, hist="nope")], _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 9.0]]
+
+    def test_round_trips_real_conjunction_output_not_just_the_fixture(self):
+        """Lock the trail against the REAL `_conjunction` shape.
+
+        Every other test here feeds `_cj()`, a hand-written copy of that shape —
+        so if `_conjunction` ever renamed `a`/`b`/`tca`/`miss_km`, the fixture
+        would quietly keep the old names, these tests would stay green, and
+        production would silently stop producing history. This one builds the
+        previous run through the real function instead.
+        """
+        prev = [_conjunction(_event(miss_distance_km=40.06))]
+        cur = [_conjunction(_event(miss_distance_km=0.37))]
+        out = carry_forward_history(cur, prev, _PREV_GEN)
+        assert out[0]["hist"] == [[_PREV_EPOCH, 40.06]]
+
+    def test_unparseable_generated_at_disables_history(self):
+        out = carry_forward_history([_cj()], [_cj()], "garbage")
+        assert "hist" not in out[0]
+
+    def test_naive_timestamps_are_read_as_utc(self):
+        # A naive stamp through datetime.timestamp() would silently land in LOCAL
+        # time — hours of drift into the trail, invisible in a UTC-configured CI.
+        out = carry_forward_history([_cj()], [_cj(miss_km=5.0)],
+                                    "2026-06-01T00:00:00")
+        assert out[0]["hist"] == [[_PREV_EPOCH, 5.0]]
+
+    def test_hist_survives_strict_json(self):
+        out = carry_forward_history([_cj(miss_km=0.37)], [_cj(miss_km=40.06)], _PREV_GEN)
+        json.loads(json.dumps(out, allow_nan=False), parse_constant=_reject_const)
 
 
 class TestOMMCrossValidation:

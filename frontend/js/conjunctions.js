@@ -50,6 +50,74 @@ function missColor(km) {
   return `hsl(${(t * 55).toFixed(0)}, 100%, 58%)`;
 }
 
+/** Prediction-evolution sparkline (9.10) — how THIS encounter's predicted miss
+ *  moved as the elements refreshed under it.
+ *
+ *  The site re-screens every ~8 h, so an encounter inside the 24 h window is
+ *  predicted several times before it happens. `e.history` holds the earlier
+ *  predictions; the live value is the last point. Returns "" when there is no
+ *  history — the ordinary case for ~2/3 of events, and for every event in a
+ *  pre-9.10 snapshot (a frontend-only redeploy reuses the live one).
+ *
+ *  Log y-axis: real trails span ~100x (40.06 -> 0.37 km on one Starlink pair),
+ *  which a linear axis flattens into a single spike at the top.
+ *  x-axis is lead time before TCA, so points read left (early) to right (late). */
+function historySparkline(e) {
+  // snapshotMeta is guarded rather than assumed: this runs inside the .cd-row
+  // template, so a throw here would take down the whole detail panel, not just
+  // the chart. (showConjunctionsFor guards it for window_hours for the same reason.)
+  if (!Array.isArray(e.history) || !e.history.length || !snapshotMeta) return "";
+  const tcaMs = new Date(e.tca).getTime();
+  const genMs = new Date(snapshotMeta.generated_at).getTime();
+  if (!Number.isFinite(tcaMs) || !Number.isFinite(genMs)) return "";
+
+  const pts = e.history
+    // Number.isFinite, NOT the global isFinite: the global coerces, so
+    // isFinite(null) === true and a [null, miss] point would render at a
+    // nonsense lead time instead of being dropped.
+    .filter(h => Array.isArray(h) && Number.isFinite(h[0]) && Number.isFinite(h[1]) && h[1] > 0)
+    .map(h => ({ lead: (tcaMs - h[0] * 1000) / 3.6e6, km: h[1] }));
+  if (!pts.length) return "";
+  pts.push({ lead: (tcaMs - genMs) / 3.6e6, km: e.miss_distance_km });
+
+  const W = 200, L = 16, R = 190, TOP = 13, BOT = 33;
+  const kms = pts.map(p => p.km);
+  let lo = Math.max(Math.min(...kms), 0.001), hi = Math.max(...kms);
+  // A near-flat trail (0.18 -> 0.18 -> 0.07) must not be auto-scaled into a
+  // dramatic swing — pad to a minimum decade span so "barely moved" looks it.
+  if (hi / lo < 3) { const mid = Math.sqrt(hi * lo); lo = mid / 2; hi = mid * 2; }
+  const span = Math.log10(hi) - Math.log10(lo);
+  const y = km =>
+    TOP + (Math.log10(hi) - Math.log10(Math.min(Math.max(km, lo), hi))) / span * (BOT - TOP);
+  const x = i => pts.length === 1 ? L : L + i * (R - L) / (pts.length - 1);
+
+  const line = pts.map((p, i) => `${x(i).toFixed(1)},${y(p.km).toFixed(1)}`).join(" ");
+  const dots = pts.map((p, i) => {
+    const last = i === pts.length - 1;
+    return `<circle cx="${x(i).toFixed(1)}" cy="${y(p.km).toFixed(1)}" r="${last ? 3.4 : 2.4}"` +
+      ` fill="${last ? missColor(p.km) : "#0d1117"}" stroke="${last ? missColor(p.km) : "#4fc3f7"}"` +
+      ` stroke-width="1.4"/>`;
+  }).join("");
+  const labels = pts.map((p, i) => {
+    const last = i === pts.length - 1;
+    const anchor = i === 0 ? "start" : last ? "end" : "middle";
+    return `<text x="${x(i).toFixed(1)}" y="${(y(p.km) - 5.5).toFixed(1)}" text-anchor="${anchor}"` +
+      ` fill="${last ? missColor(p.km) : "#888"}" font-size="7.5">${p.km.toFixed(2)}</text>`;
+  }).join("");
+  const leadLbl = (p, i) =>
+    `<text x="${x(i).toFixed(1)}" y="43" text-anchor="${i === 0 ? "start" : "end"}"` +
+    ` fill="#666" font-size="7">${p.lead >= 0 ? "\u2212" : "+"}${Math.abs(p.lead).toFixed(0)} h</text>`;
+
+  return `<div class="cd-hist" title="Predicted miss distance on each run, as the orbital elements refreshed">` +
+    `<svg viewBox="0 0 ${W} 46" role="img"` +
+    ` aria-label="Predicted miss distance across ${pts.length} runs">` +
+    `<polyline points="${line}" fill="none" stroke="#4fc3f7" stroke-width="1.4"/>` +
+    dots + labels + leadLbl(pts[0], 0) + leadLbl(pts[pts.length - 1], pts.length - 1) +
+    `</svg>` +
+    `<div class="cd-hist-cap">${pts.length} predictions \u00b7 elements refreshed between</div>` +
+    `</div>`;
+}
+
 // State
 let conjEvents = [];                       // meaningful events, closest-first
 let conjTotalCount = 0;                    // unique at-risk pairs (from meta)
@@ -708,6 +776,7 @@ function showConjunctionsFor(noradId) {
           <span class="conjunction-tca">${formatTca(e.tca)}</span>
         </div>
         <div class="cd-rtn">R ${e.r_km.toFixed(2)}  T ${e.t_km.toFixed(2)}  N ${e.n_km.toFixed(2)} km</div>
+        ${historySparkline(e)}
       </div>`).join("");
   detailPanel.style.display = "block";
   detailPanel.querySelectorAll(".cd-row").forEach(row => {

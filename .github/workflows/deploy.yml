@@ -293,9 +293,34 @@ jobs:
       # (a valid-but-partial upstream response is non-empty, so this floor — not
       # the empty-check — is what catches it). This is the last guard on the cron
       # path, which skips the A/B gate above. The real active catalog is ~16k.
+      # 9.10 prediction-evolution trail: the previous snapshot is the ONLY input
+      # the trail needs. Each rebuild carries `hist` forward exactly one run (see
+      # backend/core/snapshot.py :: carry_forward_history), so the cost is
+      # O(current events) and constant in the archive's size — reading the
+      # growing `data` branch instead would put a ~150 MB clone on the cron path.
+      #
+      # Failure is non-fatal by design. History is layered on top of the
+      # snapshot, never a precondition for it: a 404 on the very first deploy, a
+      # Pages redeploy racing this fetch, or a truncated body must not cost us
+      # the data refresh. build_snapshot treats a missing or malformed --prev as
+      # "no history" and warns; a broken chain refills over the next ~3 runs.
+      #
+      # Deliberately NOT frontend/snapshot.json: that path is the OUTPUT the
+      # build writes and Pages publishes. Downloading over it here would republish
+      # the stale snapshot if the build then failed.
+      - name: Fetch the live snapshot for prediction history (9.10)
+        if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
+        run: |
+          if ! curl -fsSL --max-time 120 -o prev-snapshot.json "$LIVE_SNAPSHOT_URL"; then
+            rm -f prev-snapshot.json
+            echo "::warning::Could not fetch the live snapshot — this rebuild emits no prediction history. It refills over the next few runs."
+          fi
+
       - name: Build snapshot.json (fetch active + screen offline)
         if: steps.decide.outputs.rebuild == 'true' && steps.fetch.outcome == 'success'
-        run: python scripts/build_snapshot.py --group active --hours 24 --min-objects 8000
+        run: |
+          python scripts/build_snapshot.py --group active --hours 24 \
+            --min-objects 8000 --prev prev-snapshot.json
 
       # Archive the fresh snapshot to the `data` branch as
       # snapshots/<ISO-ts>.json.gz (append-only). The `data` branch is an ORPHAN
