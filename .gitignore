@@ -78,6 +78,7 @@ frontend/js/config.js
 # Generated snapshot — built by scripts/build_snapshot.py / the deploy workflow,
 # never committed to main (CI bakes it into the Pages artifact; local is transient)
 frontend/snapshot.json
+frontend/maneuver_state.json
 
 # Docker
 docker-compose.override.yml

@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from . import maneuvers as _mnv
+
 SCHEMA_VERSION = 1
 
 # 9.10 prediction-evolution trail. Prior points only — with the live value the
@@ -378,6 +380,59 @@ def _element_ages(conjunctions, catalog_df: pd.DataFrame, generated_at) -> list:
     return conjunctions
 
 
+# 11.2a: an object absent from this run's catalog keeps its maneuver state (a
+# transient gap must not cost its warm-up) — unless its last element set is
+# this old, so decayed / dropped objects don't accumulate in the state forever.
+MANEUVER_STATE_RETAIN_D = 30.0
+
+
+def apply_maneuvers(conjunctions, catalog_df: pd.DataFrame, generated_at,
+                    prev_state) -> tuple[list, dict | None, dict]:
+    """Advance the per-object maneuver detector by this run's catalog and label
+    the conjunctions (11.2a; see backend/core/maneuvers.py).
+
+    Annotation only — `mnv_h` / `mnv_who` are added to COPIES of the records;
+    the screened events (what the CI A/B gate compares) are untouched.
+
+    Returns (conjunctions, maneuver_state, info). Never raises: a missing or
+    malformed `prev_state` is a cold start (the detector re-arms after 3
+    element-set steps per object), and any failure in here costs the label,
+    never the snapshot — `info["error"]` says why and the state is None.
+    """
+    info: dict = {"tag_max_h": _mnv.TAG_MAX_H}
+    try:
+        states = _mnv.decode_state(prev_state)
+        info["carried"] = len(states)
+        info["cold_start"] = not states
+        states, confirmed = _mnv.update_states(states, _mnv.catalog_rows(catalog_df))
+        gen = _mnv.epoch_us(generated_at)
+        if gen is not None:
+            present = set()
+            if len(catalog_df) and "norad_cat_id" in catalog_df.columns:
+                present = {int(x) for x in catalog_df["norad_cat_id"].tolist()
+                           if not _is_missing(x)}
+            keep_us = MANEUVER_STATE_RETAIN_D * 86400e6
+            states = {k: v for k, v in states.items()
+                      if k in present or gen - v.ep_us <= keep_us}
+            # A last-maneuver epoch older than the tag window can never tag
+            # again (a newer maneuver would overwrite it), so dropping it is
+            # lossless for the output — and it is most of the state's bytes
+            # (94% of Starlinks maneuver at least monthly).
+            tag_us = _mnv.TAG_MAX_H * 3.6e9
+            for st in states.values():
+                if st.last_mnv_us is not None and gen - st.last_mnv_us > tag_us:
+                    st.last_mnv_us = None
+        out = _mnv.annotate_conjunctions(conjunctions, states, generated_at)
+        info.update(objects=len(states),
+                    armed=sum(st.nq >= _mnv.PARAMS["WARMUP"] for st in states.values()),
+                    confirmed=len(confirmed),
+                    tagged_events=sum(1 for c in out if "mnv_h" in c))
+        return out, _mnv.encode_state(states), info
+    except Exception as exc:   # noqa: BLE001 — a label must never cost the refresh
+        info["error"] = f"{exc!r:.200}"
+        return conjunctions, None, info
+
+
 def build_snapshot(
     catalog_df: pd.DataFrame,
     events: list[dict],
@@ -386,6 +441,7 @@ def build_snapshot(
     source: str = "CelesTrak",
     prev: dict | None = None,
     run: dict | None = None,
+    prev_maneuver_state=None,
 ) -> dict:
     """Assemble the static-site snapshot dict from a catalog frame + screen events.
 
@@ -398,6 +454,10 @@ def build_snapshot(
         prev:          the previous snapshot dict, to carry conjunction history
                        forward (9.10). Omit — or pass one that is missing or
                        malformed — and no `hist` is emitted at all.
+        prev_maneuver_state: the previous run's `maneuver_state` (11.2a) — the
+                       sidecar file build_snapshot.py writes; falls back to a
+                       `maneuver_state` key in `prev`. Missing / malformed →
+                       the maneuver detector cold-starts.
         run:           per-run telemetry (screen time, catalog source, CI run id)
                        → `meta.run`. CI logs expire after 90 days; the archive
                        doesn't. Omitted → no `run` key.
@@ -410,6 +470,10 @@ def build_snapshot(
             (prev.get("meta") or {}).get("generated_at"))
         conj = carry_forward_runs(conj, prev.get("conjunctions"))
     conj = _element_ages(conj, catalog_df, generated_at)
+    if prev_maneuver_state is None and isinstance(prev, dict):
+        prev_maneuver_state = prev.get("maneuver_state")
+    conj, mnv_state, mnv_info = apply_maneuvers(conj, catalog_df, generated_at,
+                                                prev_maneuver_state)
     # NaN would serialize to a bare `NaN` token that JS JSON.parse rejects — guard it.
     # Measured at GENERATION time from the epochs: the epoch_age_days column is
     # frozen when the cache was parsed, so an older cache would understate it.
@@ -434,9 +498,17 @@ def build_snapshot(
         "screen": screen_params,
         "max_epoch_age_days": max_age,
     }
+    meta["maneuvers"] = mnv_info
     if run:
         meta["run"] = run
-    return {"meta": meta, "satellites": sats, "conjunctions": conj}
+    snap = {"meta": meta, "satellites": sats, "conjunctions": conj}
+    if mnv_state is not None:
+        # Read only by the NEXT run. build_snapshot.py moves it out of the
+        # published snapshot.json into a sidecar file (~0.7 MB gz the browser
+        # would otherwise download on every visit for nothing); kept out of
+        # the archive record too — see archive_record.
+        snap["maneuver_state"] = mnv_state
+    return snap
 
 
 def archive_record(snap: dict) -> dict:
@@ -447,6 +519,11 @@ def archive_record(snap: dict) -> dict:
     per-satellite OMM with columnar `elements` (ARCHIVE_ELEMENT_KEYS), and drops
     the conjunction rows' names/types, which `elements` already carries by NORAD
     id. Pure; never mutates the published snapshot.
+
+    The 11.2a `maneuver_state` is deliberately NOT archived: it is a pure
+    function of the archived `elements` sequence (`maneuvers.replay`
+    reproduces it), so it would only add bytes to every record. The
+    per-event `mnv_h` / `mnv_who` labels ARE kept, with the conjunctions.
     """
     sats = snap.get("satellites") or []
     meta = dict(snap.get("meta") or {})

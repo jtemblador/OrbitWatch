@@ -702,6 +702,34 @@ class TestBuildSnapshotMain:
             snap = run("--prev", str(prev))
             assert all("hist" not in c for c in snap["conjunctions"])
 
+    def test_maneuver_state_is_a_sidecar_carried_run_to_run(self, run_main):
+        # 11.2a: the detector state goes to maneuver_state.json next to --out,
+        # NOT into the published snapshot.json (the browser never needs it), and
+        # the next run reads it back via --prev-maneuver-state.
+        run, tmp = run_main
+        snap = run()
+        side = tmp / "maneuver_state.json"
+        assert "maneuver_state" not in snap and side.exists()
+        state = json.loads(side.read_text())
+        assert state["v"] == 1 and len(state["id"]) == snap["meta"]["n_satellites"]
+        m = snap["meta"]["maneuvers"]
+        assert m["cold_start"] is True and m["objects"] == snap["meta"]["n_satellites"]
+        carried = tmp / "prev_state.json"
+        side.rename(carried)
+        snap2 = run("--prev-maneuver-state", str(carried))
+        assert snap2["meta"]["maneuvers"]["cold_start"] is False
+        assert snap2["meta"]["maneuvers"]["carried"] == len(state["id"])
+
+    def test_bad_maneuver_state_file_is_not_fatal(self, run_main, capsys):
+        run, tmp = run_main
+        for junk in ("{", "null", "[1]", '{"v": 1, "id": [1]}', "[" * 100000 + "]" * 100000):
+            p = tmp / "bad_state.json"
+            p.write_text(junk)
+            snap = run("--prev-maneuver-state", str(p))
+            assert snap["meta"]["maneuvers"]["cold_start"] is True
+        snap = run("--prev-maneuver-state", str(tmp / "missing.json"))
+        assert "cold-starts" in capsys.readouterr().err
+
 
 class TestAbScreenFloor:
     def test_agreeing_on_zero_events_fails_with_a_floor(self, monkeypatch):
