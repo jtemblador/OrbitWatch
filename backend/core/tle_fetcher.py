@@ -89,8 +89,11 @@ def _derive_object_type(name: str) -> str:
 
 
 class GPFetcher:
-    def __init__(self, cache_dir: Path = DATA_DIR):
-        self.cache_dir = cache_dir
+    def __init__(self, cache_dir: Path | None = None):
+        # Resolve the default at CALL time, not def time: the test suite points
+        # the module-level DATA_DIR at a frozen fixture catalog (tests/conftest.py,
+        # 11.3a) so it runs offline and never touches the real cache.
+        self.cache_dir = cache_dir if cache_dir is not None else DATA_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def fetch(self, group: str = "stations", force: bool = False) -> pd.DataFrame:

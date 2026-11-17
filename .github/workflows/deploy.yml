@@ -80,6 +80,10 @@ concurrency:
 # The snapshot that's currently live — reused unless we're rebuilding.
 env:
   LIVE_SNAPSHOT_URL: https://jtemblador.github.io/OrbitWatch/snapshot.json
+  # 11.2a maneuver detector state — a sidecar the site never downloads; only the
+  # next rebuild reads it. Every publish path must re-publish it (or the chain
+  # re-seeds from the archive, or cold-starts — nothing else breaks).
+  LIVE_MANEUVER_STATE_URL: https://jtemblador.github.io/OrbitWatch/maneuver_state.json
 
 jobs:
   build:
@@ -95,6 +99,11 @@ jobs:
       contents: write
       pages: write
       id-token: write
+    # Which Pages artifact to deploy: attempt 1's `github-pages`, or the retry's
+    # name if attempt 1 failed (see "Upload site artifact" below). The deploy job
+    # only runs when build succeeded, i.e. when one of the two uploads did.
+    outputs:
+      pages_artifact: ${{ steps.upload.outcome == 'success' && 'github-pages' || 'github-pages-retry' }}
     steps:
       # fetch-depth 50: enough history for the "recent engine change" check below
       # (the git log --since needs commits, not just the shallow tip).
@@ -140,6 +149,10 @@ jobs:
                  "$LIVE_SNAPSHOT_URL?cb=$GITHUB_RUN_ID" \
                && python3 -c "import json,sys; m=json.load(open('frontend/snapshot.json'))['meta']; sys.exit(0 if m['n_satellites'] >= 8000 else 1)"; then
               echo "Reusing live snapshot ($(wc -c < frontend/snapshot.json) bytes) — no re-screen."
+              # Keep the maneuver-state sidecar published too (non-fatal).
+              curl -fsSL --max-time 120 --retry 2 -o frontend/maneuver_state.json \
+                   "$LIVE_MANEUVER_STATE_URL?cb=$GITHUB_RUN_ID" \
+                || { rm -f frontend/maneuver_state.json; echo "::warning::No live maneuver_state.json to re-publish — the next rebuild re-seeds maneuver detection from the archive."; }
             else
               echo "::warning::No live snapshot to reuse — forcing a rebuild."
               rm -f frontend/snapshot.json
@@ -210,6 +223,40 @@ jobs:
             rm -f prev-snapshot.json
             echo "::warning::Could not fetch the live snapshot — this rebuild emits no prediction history and has no population for a Space-Track fallback."
           fi
+          # 11.2a: the maneuver detector's per-object state (same non-fatal
+          # contract — a miss triggers the archive seed below).
+          if ! curl -fsSL --max-time 120 --retry 2 -o prev-maneuver-state.json "$LIVE_MANEUVER_STATE_URL?cb=$GITHUB_RUN_ID"; then
+            rm -f prev-maneuver-state.json
+            echo "::warning::Could not fetch the live maneuver_state.json — seeding it from the archive (next step)."
+          fi
+
+      # 11.2a: no live maneuver state (the first deploy, or a broken chain) →
+      # seed it by replaying the newest archived records instead of a cold
+      # start. Measured: a cold start tags nothing for ~2 days and then
+      # over-tags (up to ~2x) for days while the per-object noise scales settle.
+      # The same `git fetch --depth=1 origin data` the archive step already does
+      # every run; skipped entirely while the chain is intact. Non-fatal: a
+      # failed seed is just the cold start.
+      - name: Seed the maneuver state from the archive (only if missing)
+        if: steps.decide.outputs.rebuild == 'true'
+        continue-on-error: true
+        env:
+          # ~60 days at 3 runs/day. Measured against the full-history replay
+          # (latest run): 60 d of history → identical labels; 30 d → 99% / +1%;
+          # 14 d → 95% / +8%; 7 d → 90% / +35%; a cold start lags for ~5 days.
+          SEED_RECORDS: "180"
+        run: |
+          set -euo pipefail
+          if [ -s prev-maneuver-state.json ]; then
+            echo "Live maneuver state present — no seed needed."
+            exit 0
+          fi
+          git fetch --depth=1 origin data
+          D="$RUNNER_TEMP/mnv-seed"
+          mkdir -p "$D"
+          git ls-tree --name-only FETCH_HEAD snapshots/ | sort | tail -n "$SEED_RECORDS" \
+            | while read -r f; do git show "FETCH_HEAD:$f" > "$D/$(basename "$f")"; done
+          python -m backend.core.maneuvers replay "$D" --quiet --state-out prev-maneuver-state.json
 
       # Populate the active-catalog cache ONCE so the A/B gate and the snapshot
       # build below screen the identical elements (build_snapshot reuses this
@@ -287,6 +334,8 @@ jobs:
             echo "::error::Catalog fetch failed AND the live snapshot could not be downloaded — there is nothing to publish."
             exit 1
           fi
+          curl -fsSL --max-time 120 --retry 2 -o frontend/maneuver_state.json "$LIVE_MANEUVER_STATE_URL?cb=$GITHUB_RUN_ID" \
+            || { rm -f frontend/maneuver_state.json; echo "::warning::No live maneuver_state.json to re-publish."; }
           python - <<'PY'
           import json, sys
           from datetime import datetime, timezone
@@ -407,13 +456,20 @@ jobs:
       # (a valid-but-partial upstream response is non-empty, so this floor — not
       # the empty-check — is what catches it). This is the last guard on the cron
       # path, which skips the A/B gate above. The real active catalog is ~16k.
+      # --socrates (11.2b): score this screen against CelesTrak's latest SOCRATES
+      # run → meta.socrates, so agreement is a monitored trend in the archive,
+      # not a one-off report. Bounded: one CSV GET (30 s timeout + one 30 s curl
+      # fallback, no retry ladder) + a sub-second match. Never fatal — a failed
+      # download/parse/match records {"status": "unavailable"} and publishes.
       - name: Build snapshot.json (fetch active + screen offline)
         if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
         run: |
           python scripts/build_snapshot.py --group active --hours 24 \
             --min-objects 8000 --prev prev-snapshot.json \
+            --prev-maneuver-state prev-maneuver-state.json \
             --catalog-source ${{ steps.catalog.outputs.source }} \
-            --archive-out archive-snapshot.json.gz --min-conjunctions 1000
+            --archive-out archive-snapshot.json.gz --min-conjunctions 1000 \
+            --socrates
 
       # Inject the Ion token from the repo secret into the gitignored config.js.
       # Passed via env (not string-interpolated into the script) so a token with
@@ -431,10 +487,38 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v6
 
+      # One guarded retry (11.3b). On 2026-11-11 this step died with "Failed to
+      # CreateArtifact ... Unexpected token '<'" — GitHub's artifact service
+      # answered HTML for ~10 min (the action's own 5 internal retries all hit
+      # it) and the run missed a refresh. So: attempt 1 is continue-on-error,
+      # and only if it failed do we wait and try once more. The retry uploads
+      # under a DIFFERENT artifact name: if attempt 1 got as far as creating its
+      # `github-pages` artifact before failing, re-using the name could collide,
+      # and a distinct name sidesteps that without relying on overwrite
+      # semantics. The `deploy` job publishes whichever one succeeded (the
+      # `pages_artifact` job output). If the retry fails too, it fails the job
+      # (no continue-on-error) → the archive step and the deploy job are
+      # skipped, exactly as a single failed upload did before.
       - name: Upload site artifact
+        id: upload
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v5
         with:
           path: frontend
+
+      - name: Wait before retrying the site artifact upload
+        if: steps.upload.outcome == 'failure'
+        run: |
+          echo "::warning::Site artifact upload failed (attempt 1) — retrying once in 120 s under the name github-pages-retry."
+          sleep 120
+
+      - name: Upload site artifact (retry)
+        id: upload_retry
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend
+          name: github-pages-retry
 
       # (Runs AFTER the site artifact is built, so a failure in token injection /
       # configure / upload can't leave an archive record of a snapshot that was
@@ -555,3 +639,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: ${{ needs.build.outputs.pages_artifact }}

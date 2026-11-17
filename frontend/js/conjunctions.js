@@ -12,7 +12,7 @@
  *     ("updated X ago" from meta.generated_at) linking the validation report
  *
  * Depends on: viewer (app.js), simClock (clock.js), snapshotReady +
- *   snapshotConjunctions + compute helpers (snapshot-data.js), satellites +
+ *   conjunctionView + compute helpers (snapshot-data.js), satellites +
  *   ensureLabel (satellites.js). Loaded last (after info-panel.js).
  */
 
@@ -48,6 +48,87 @@ function nameSpan(noradId, name) {
 function missColor(km) {
   const t = Math.min(Math.max((km - 0.1) / 0.8, 0), 1); // 0.1→0, 0.9→1
   return `hsl(${(t * 55).toFixed(0)}, 100%, 58%)`;
+}
+
+// --- 11.0 trust annotations (all optional — a pre-11.0 snapshot has none, and
+// every helper below then renders exactly what it did before) ---
+
+const HORIZON_TIP =
+  "Closest approach lies past the end of the screening window: this pair comes " +
+  "closer again shortly after it, so the miss shown is only an upper bound.";
+const STALE_TIP =
+  `Low confidence: at least one object's orbital elements were more than ` +
+  `${STALE_ELEMENT_AGE_D} days old when this was screened, and SGP4 prediction ` +
+  `error grows with element age.`;
+
+// 11.2a. The tag is evidence the prediction may be stale; its ABSENCE is not
+// evidence of stability — the detector sees one element set per run (3x/day),
+// so burns below ~100–300 m of altitude change (most collision-avoidance
+// maneuvers) and phasing burns are invisible, and it catches only a minority
+// of the large run-to-run jumps (prototype: ~13% of > 5 km).
+const MANEUVER_TIP =
+  "Recent maneuver: this object's orbit changed beyond what drag explains, so " +
+  "the prediction may be stale until fresh elements settle. No tag does NOT " +
+  "mean no maneuver: with one element set per run (3x/day) changes under " +
+  "~100–300 m of altitude, most small avoidance burns, and phasing burns are " +
+  "invisible.";
+
+/** Which participant(s) maneuvered, by name ("ISS (ZARYA)", "both"). Raw
+ *  upstream text — the caller escapes it. */
+function maneuverWho(e) {
+  if (e.mnv_who === "ab") return "both";
+  const a = e.mnv_who === "a";
+  return (a ? e.sat1_name : e.sat2_name) || `NORAD ${a ? e.sat1_norad_id : e.sat2_norad_id}`;
+}
+
+/** "maneuvered N h ago" tag (11.2a), or "" when the event carries none. */
+function maneuverTag(e) {
+  if (!Number.isFinite(e.mnv_h) || !e.mnv_who) return "";
+  const h = e.mnv_h < 1 ? "<1" : String(Math.round(e.mnv_h));
+  return `<span class="cd-tag mnv-tag" title="${MANEUVER_TIP}">` +
+    `${escapeHtml(maneuverWho(e))} maneuvered ${h} h ago</span>`;
+}
+
+/** Miss distance as an HTML span: threat-colored, and "≥ X km" with a tooltip
+ *  when the closest approach lies past the window end (11.0b). */
+function missHtml(e, digits) {
+  // An upper bound needs enough digits to stay meaningful ("≥ 0.0 km" isn't).
+  const d = e.beyond_horizon ? Math.max(digits, 2) : digits;
+  const km = `${e.miss_distance_km.toFixed(d)} km`;
+  const color = `color:${missColor(e.miss_distance_km)}`;
+  if (!e.beyond_horizon) return `<span class="conjunction-miss" style="${color}">${km}</span>`;
+  return `<span class="conjunction-miss beyond-horizon" style="${color}"` +
+    ` title="${HORIZON_TIP}">≥ ${km}</span>`;
+}
+
+/** Element age, compact: "14 h" under a day, else "1.3 d"; "?" when unknown. */
+function ageText(d) {
+  if (!Number.isFinite(d)) return "?";
+  return d < 1 ? `${Math.round(d * 24)} h` : `${d.toFixed(1)} d`;
+}
+
+/** Detail-panel line: both element ages + the stale / persistent tags. Empty
+ *  for a pre-11.0 event (no ages, no flags) — the row then reads as before. */
+function trustLine(e) {
+  const hasAge = e.sat1_age_d !== null || e.sat2_age_d !== null;
+  const mnv = maneuverTag(e);
+  if (!hasAge && !e.persistent && !mnv) return "";
+  let html = `<div class="cd-trust">`;
+  if (hasAge) {
+    html += `<span title="Age of each object's orbital elements when screened">` +
+      `elements ${ageText(e.sat1_age_d)} · ${ageText(e.sat2_age_d)} old</span>`;
+  }
+  if (isStaleEvent(e)) {
+    html += `<span class="cd-tag stale-tag" title="${STALE_TIP}">low confidence (stale elements)</span>`;
+  }
+  html += mnv;
+  if (e.persistent) {
+    html += `<span class="cd-tag persist-tag" title="Seen in every screen for ` +
+      `${e.runs ?? "9+"} consecutive runs at under 10 m/s: a formation or ` +
+      `co-located pair, not a crossing">persistent formation` +
+      `${e.runs ? ` · ${e.runs} runs` : ""}</span>`;
+  }
+  return html + `</div>`;
 }
 
 /** Prediction-evolution sparkline (9.10) — how THIS encounter's predicted miss
@@ -225,11 +306,17 @@ const conjPanel = document.createElement("div");
 conjPanel.id = "conjunction-list";
 conjPanel.innerHTML =
   `<div id="conjunction-header">Conjunctions</div>` +
-  `<label id="conjunction-filter" title="Pairs inside one constellation (80% are ` +
-  `Starlink × Starlink) are handled by that operator's own fleet coordination. ` +
-  `Cross-operator pairs are the ones that need two parties talking.">` +
+  `<label id="conjunction-filter" class="conjunction-filter" title="Pairs inside one ` +
+  `constellation (80% are Starlink × Starlink) are handled by that operator's own ` +
+  `fleet coordination. Cross-operator pairs are the ones that need two parties talking.">` +
   `<input type="checkbox" id="conj-hide-same" autocomplete="off" disabled>` +
   ` Hide same-constellation pairs</label>` +
+  `<label id="conjunction-filter-persistent" class="conjunction-filter" title="Pairs ` +
+  `seen in every run for ~3 days (9+ consecutive screens) at under 10 m/s relative ` +
+  `speed: formations and co-located slots (e.g. TerraSAR-X / TanDEM-X), not crossings. ` +
+  `They are still screened and listed in the data, only hidden here.">` +
+  `<input type="checkbox" id="conj-hide-persistent" autocomplete="off" checked disabled>` +
+  ` Hide persistent formations<span id="conj-persistent-count"></span></label>` +
   `<div id="conjunction-body"></div>`;
 document.body.appendChild(conjPanel);
 
@@ -531,7 +618,7 @@ function drawConjunctionGeometry(e) {
       material: Cesium.Color.YELLOW.withAlpha(0.22),
     },
     label: {
-      text: `${e.miss_distance_km.toFixed(2)} km`,
+      text: `${e.beyond_horizon ? "≥ " : ""}${e.miss_distance_km.toFixed(2)} km`,
       font: "12px monospace",
       fillColor: Cesium.Color.WHITE,
       showBackground: true,
@@ -726,8 +813,10 @@ function renderConjunctionList() {
   const pairsLabel = conjEvents.length < conjTotalCount
     ? `closest ${conjEvents.length} of ${conjTotalCount.toLocaleString()} ${noun}`
     : `${conjTotalCount.toLocaleString()} ${noun}`;
+  const hiddenLabel = conjHiddenCount
+    ? ` · ${conjHiddenCount.toLocaleString()} hidden by filters` : "";
   document.getElementById("conjunction-header").textContent =
-    `Conjunctions · ${pairsLabel} · ${satCount} sats`;
+    `Conjunctions · ${pairsLabel}${hiddenLabel} · ${satCount} sats`;
 
   const body = document.getElementById("conjunction-body");
   if (!conjEvents.length) {
@@ -735,15 +824,19 @@ function renderConjunctionList() {
     return;
   }
   const shown = Math.min(conjListShown, conjEvents.length);
-  let html = conjEvents.slice(0, shown).map((e, i) => `
-    <div class="conjunction-row${eventKey(e) === focusedKey ? " focused" : ""}"
+  let html = conjEvents.slice(0, shown).map((e, i) => {
+    const stale = isStaleEvent(e);
+    return `
+    <div class="conjunction-row${eventKey(e) === focusedKey ? " focused" : ""}${stale ? " stale" : ""}"
          data-idx="${i}">
       <div class="conjunction-pair">${nameSpan(e.sat1_norad_id, e.sat1_name)} × ${nameSpan(e.sat2_norad_id, e.sat2_name)}</div>
       <div class="conjunction-meta">
-        <span class="conjunction-miss" style="color:${missColor(e.miss_distance_km)}">${e.miss_distance_km.toFixed(1)} km</span>
+        ${missHtml(e, 1)}
+        ${stale ? `<span class="cd-tag stale-tag" title="${STALE_TIP}">stale</span>` : ""}
         <span class="conjunction-tca">${formatTca(e.tca)}</span>
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   if (shown < conjEvents.length) {
     html += `<button id="conj-show-more">Show more (${conjEvents.length - shown} left)</button>`;
   }
@@ -772,7 +865,8 @@ function showConjunctionsFor(noradId) {
     // The panel only indexes the DISPLAYED set (closest CONJ_DISPLAY_CAP, maybe
     // cross-constellation only) — so "none here" is not "none at all" unless the
     // displayed set is the whole screen.
-    const complete = conjEvents.length >= conjTotalCount && !conjHideSameConstellation;
+    // (or a filter — same-constellation / persistent — removed its events).
+    const complete = conjEvents.length >= conjTotalCount && conjHiddenCount === 0;
     detailPanel.innerHTML =
       `<div id="conjunction-detail-header">${name}</div>` +
       `<div class="conjunction-empty">` +
@@ -780,7 +874,9 @@ function showConjunctionsFor(noradId) {
         ? `No conjunctions in the ${windowH} h screening window.`
         : `None among the ${conjEvents.length} ` +
           `${conjHideSameConstellation ? "cross-constellation " : ""}conjunctions shown ` +
-          `(closest of ${conjTotalCount.toLocaleString()}).`) +
+          `(closest of ${conjTotalCount.toLocaleString()}` +
+          (conjHiddenCount ? `; ${conjHiddenCount.toLocaleString()} hidden by filters` : "") +
+          `).`) +
       `</div>`;
     detailPanel.style.display = "block";
     return;
@@ -795,14 +891,15 @@ function showConjunctionsFor(noradId) {
     `<button id="jump-to-tca" title="Jump the clock to the closest approach">⤓ Click to Jump to TCA</button>` +
     `</div>` +
     events.map((e, i) => `
-      <div class="cd-row${eventKey(e) === focusedKey ? " focused" : ""}" data-idx="${i}">
+      <div class="cd-row${eventKey(e) === focusedKey ? " focused" : ""}${isStaleEvent(e) ? " stale" : ""}" data-idx="${i}">
         <div class="cd-partner">${nameSpan(e.sat1_norad_id, e.sat1_name)} × ${nameSpan(e.sat2_norad_id, e.sat2_name)}</div>
         <div class="cd-stats">
-          <span class="conjunction-miss" style="color:${missColor(e.miss_distance_km)}">${e.miss_distance_km.toFixed(2)} km</span>
+          ${missHtml(e, 2)}
           <span>${e.relative_speed_km_s.toFixed(1)} km/s</span>
           <span class="conjunction-tca">${formatTca(e.tca)}</span>
         </div>
         <div class="cd-rtn">R ${e.r_km.toFixed(2)}  T ${e.t_km.toFixed(2)}  N ${e.n_km.toFixed(2)} km</div>
+        ${trustLine(e)}
         ${historySparkline(e)}
       </div>`).join("");
   detailPanel.style.display = "block";
@@ -860,10 +957,37 @@ function formatAge(generatedAtIso) {
   return `${(mins / 1440).toFixed(1)} d`;
 }
 
+/** 11.2b: this run's SOCRATES overlap as "SOCRATES overlap 60% · 74%", or "" when
+ *  the snapshot has no usable block (pre-11.2b, status != ok, empty sides).
+ *  Numbers only — the result goes into innerHTML, so nothing from the snapshot
+ *  is interpolated except values that passed Number.isFinite. */
+function socratesAgreementText(meta) {
+  const s = meta && meta.socrates;
+  if (!s || s.status !== "ok") return "";
+  const pct = (side) => {
+    const r = side && side.rate;
+    return (typeof r === "number" && Number.isFinite(r) && side.n > 0)
+      ? `${Math.round(r * 100)}%` : null;
+  };
+  const theirs = pct(s.socrates_to_ours);
+  const ours = pct(s.ours_to_socrates);
+  if (!theirs || !ours) return "";
+  return `SOCRATES overlap ${theirs} · ${ours}`;
+}
+
+const SOCRATES_OVERLAP_TITLE =
+  "This run vs CelesTrak's latest SOCRATES run, on the pairs both screens cover. " +
+  "First: share of SOCRATES's closest (0.4 km or nearer) pairs we also flagged. " +
+  "Second: share of our events under 5 km that SOCRATES also lists. Same SGP4 method, " +
+  "different element sets (SOCRATES runs earlier), so the gap is mostly epoch " +
+  "drift — it is a consistency trend, not accuracy against truth.";
+
 function renderFreshness() {
   if (!snapshotMeta) return;
+  const soc = socratesAgreementText(snapshotMeta);
   freshnessLine.innerHTML =
     `data updated ${formatAge(snapshotMeta.generated_at)} ago · ` +
+    (soc ? `<span title="${SOCRATES_OVERLAP_TITLE}">${soc}</span> · ` : "") +
     `<a href="${VALIDATION_REPORT_URL}" target="_blank" rel="noopener"` +
     ` title="Screening validated against CelesTrak SOCRATES">validation ↗</a>`;
 }
@@ -873,8 +997,9 @@ function renderFreshness() {
 /** Make `events` (adapted, closest-first, capped) THE conjunction set every view
  *  reads: the list, the per-satellite index, and the participant set behind the
  *  "All" dots + worker mask. */
-function useConjunctionSet(events, total) {
+function useConjunctionSet(events, total, hidden = 0) {
   conjTotalCount = total;
+  conjHiddenCount = hidden;
   conjEvents = events;
   conjListShown = CONJ_LIST_MAX;
   conjByNorad.clear();
@@ -888,21 +1013,42 @@ function useConjunctionSet(events, total) {
   }
 }
 
-// 10.10 "Hide same-constellation pairs" (see snapshot-data.js). Swaps the whole
+// List filters (see snapshot-data.js filterConjunctions). Each swaps the whole
 // set, not just the list rows, so arcs, participant dots and the worker mask
 // all agree with what the list says.
+//   10.10 "Hide same-constellation pairs" — default off.
+//   11.0c "Hide persistent formations"    — default ON: a formation that sits
+//         0.1 km apart for weeks is not news, and would otherwise top the list.
 let conjHideSameConstellation = false;
+let conjHidePersistent = true;
+let conjHiddenCount = 0;   // events in the full snapshot the active filters remove
+
+/** The adapted, capped set for the current filter state. */
+function currentConjunctionView() {
+  return conjunctionView({ hideSame: conjHideSameConstellation,
+                           hidePersistent: conjHidePersistent });
+}
 
 function setHideSameConstellation(on) {
   if (on === conjHideSameConstellation) return;
   conjHideSameConstellation = on;
+  applyConjunctionFilters();
+}
+
+function setHidePersistent(on) {
+  if (on === conjHidePersistent) return;
+  conjHidePersistent = on;
+  applyConjunctionFilters();
+}
+
+function applyConjunctionFilters() {
   // A selection/focus belongs to the old set (its partners may be gone) →
   // back to All first, which also drops isolation and redraws the list.
   const hasSelection =
     typeof selectedNoradId !== "undefined" && selectedNoradId !== null;
   if (hasSelection || focusedKey !== null) exitToAll();
-  if (on) useConjunctionSet(snapshotCrossConjunctions, snapshotCrossTotal);
-  else useConjunctionSet(snapshotConjunctions, snapshotMeta.n_conjunctions);
+  const view = currentConjunctionView();
+  useConjunctionSet(view.events, view.total, view.hidden);
   renderConjunctionList();
   if (typeof resetParticipantMask === "function") resetParticipantMask();
   if (typeof conjOnlyActive !== "undefined" && conjOnlyActive === "top20") {
@@ -916,16 +1062,31 @@ function setHideSameConstellation(on) {
 
 document.getElementById("conj-hide-same").addEventListener("change", (ev) =>
   setHideSameConstellation(ev.target.checked));
+document.getElementById("conj-hide-persistent").addEventListener("change", (ev) =>
+  setHidePersistent(ev.target.checked));
 
 // --- Load: events come pre-computed in the snapshot (screened offline) ---
 
 snapshotReady.then(() => {
-  // SFS-screened, suppressed, de-duped, closest-first. The filter box stays
-  // disabled until here — ticked before load it would swap in an empty set.
-  useConjunctionSet(snapshotConjunctions, snapshotMeta.n_conjunctions);
+  // SFS-screened, suppressed, de-duped, closest-first. The filter boxes stay
+  // disabled until here — ticked before load they would swap in an empty set.
+  const view = currentConjunctionView();
+  useConjunctionSet(view.events, view.total, view.hidden);
   const hideSame = document.getElementById("conj-hide-same");
-  hideSame.checked = false;
+  hideSame.checked = conjHideSameConstellation;
   hideSame.disabled = false;
+  const hidePersist = document.getElementById("conj-hide-persistent");
+  hidePersist.checked = conjHidePersistent;
+  hidePersist.disabled = false;
+  // How many the toggle governs, in the FULL snapshot (0 in a pre-11.0 one).
+  document.getElementById("conj-persistent-count").textContent =
+    ` (${snapshotPersistentTotal.toLocaleString()})`;
+  // A pre-11.0 snapshot has no `persistent` flags: a checked toggle that can do
+  // nothing would mislead, so hide it until the data carries the field.
+  if (snapshotPersistentTotal === 0) {
+    const label = hidePersist.closest("label");
+    if (label) label.hidden = true;
+  }
   renderConjunctionList();
   renderFreshness();
   setInterval(renderFreshness, 60000); // the age ticks while the tab stays open

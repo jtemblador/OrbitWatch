@@ -34,10 +34,12 @@ for _p in (_ROOT, os.path.join(_ROOT, "backend")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from backend.core.conjunctions import run_screen                 # noqa: E402
+from backend.core.conjunctions import annotate_horizon, run_screen  # noqa: E402
 from backend.core.propagator import build_satrecs_and_meta       # noqa: E402
 from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
 from backend.core.snapshot import archive_record, build_snapshot # noqa: E402
+from backend.core.socrates_fetcher import SOCRATESFetcher         # noqa: E402
+from backend.core.socrates_monitor import MONITOR_VERSION, agreement_block  # noqa: E402
 from backend.core.tle_fetcher import GPFetcher                   # noqa: E402
 
 _GZ_BUDGET_BYTES = 5_000_000  # ~5 MB gzipped target (see roadmap 9.2)
@@ -75,6 +77,56 @@ def _screen(satrecs, meta, start, args, timings):
                     "threshold_km": args.threshold, "step_sec": args.step_sec}
 
 
+def _socrates_block(args, events, screen_df, start) -> dict | None:
+    """11.2b: SOCRATES agreement for this rebuild → meta.socrates, or None if off.
+
+    Never fatal, like --prev and the horizon pass: SOCRATES is a free public
+    service on someone else's schedule, and monitoring it must never cost us
+    the data refresh. Any failure (download, parse, match, or a value that would
+    break the allow_nan=False dump) is recorded as a status-only stub so the
+    archived trend shows a gap with a reason rather than silently skipping.
+    """
+    if not (args.socrates or args.socrates_csv):
+        return None
+    t0 = time.perf_counter()
+    try:
+        fetcher = SOCRATESFetcher()
+        if args.socrates_csv:
+            with open(args.socrates_csv, encoding="utf-8") as f:
+                soc = fetcher._parse_csv(f.read())
+            origin = "file"
+        else:
+            soc = fetcher.fetch()
+            origin = "celestrak"
+        epochs = dict(zip(screen_df["norad_cat_id"].astype(int),
+                          pd.to_datetime(screen_df["epoch"], utc=True)))
+        block = agreement_block(soc, events, epochs.keys(), epochs, start, args.hours)
+        block["origin"] = origin
+        if len(soc) and "fetch_time" in soc.columns:
+            block["socrates_fetched_at"] = (
+                pd.Timestamp(soc["fetch_time"].iloc[0]).isoformat())
+        block["seconds"] = round(time.perf_counter() - t0, 2)
+        json.dumps(block, allow_nan=False)   # a bad value fails HERE, not the dump
+    except Exception as exc:   # noqa: BLE001 — monitoring must never cost the refresh
+        print(f"::warning::SOCRATES agreement unavailable ({exc!r:.200}) — "
+              f"publishing without it.", file=sys.stderr)
+        return {"version": MONITOR_VERSION, "status": "unavailable",
+                "reason": type(exc).__name__,
+                "seconds": round(time.perf_counter() - t0, 2)}
+    if block.get("status") == "ok":
+        so, os_ = block["socrates_to_ours"], block["ours_to_socrates"]
+        print(f"socrates: {so['n_matched']}/{so['n']} of SOCRATES's <= "
+              f"{block['in_volume_km']} km pairs reproduced; "
+              f"{os_['n_matched']}/{os_['n']} of our < {block['threshold_km']:.0f} km "
+              f"events listed by SOCRATES ({block['overlap']['hours']} h overlap, "
+              f"{block['seconds']}s)")
+    else:
+        print(f"::warning::SOCRATES run does not overlap our window "
+              f"(TCAs {block.get('socrates_first_tca')} … "
+              f"{block.get('socrates_last_tca')}) — stale run?", file=sys.stderr)
+    return block
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build the static-site snapshot.json.")
     ap.add_argument("--group", default="active",
@@ -98,6 +150,15 @@ def main() -> None:
                     help="previous snapshot.json — carries each conjunction's "
                          "prediction history forward (9.10). Missing or "
                          "unreadable is non-fatal: the run just emits no history.")
+    ap.add_argument("--prev-maneuver-state", default="",
+                    help="the previous run's maneuver_state.json sidecar (11.2a) — "
+                         "the maneuver detector's per-object state. Missing or "
+                         "unreadable is non-fatal: the detector cold-starts "
+                         "(no labels for ~2 days, noisier for ~5; deploy.yml seeds from the archive instead).")
+    ap.add_argument("--maneuver-state-out", default="",
+                    help="where to write this run's maneuver_state sidecar "
+                         "(default: maneuver_state.json next to --out). Kept OUT "
+                         "of snapshot.json: only the next run reads it.")
     ap.add_argument("--catalog-source", choices=sorted(_SOURCE_LABELS),
                     default="celestrak",
                     help="who supplied the cached elements — sets meta.source "
@@ -107,6 +168,13 @@ def main() -> None:
     ap.add_argument("--archive-out", default="",
                     help="also write the slim data-branch archive record "
                          "(snapshot.archive_record) here, gzipped (10.10)")
+    ap.add_argument("--socrates", action="store_true",
+                    help="score this screen against CelesTrak's latest SOCRATES "
+                         "run → meta.socrates (11.2b). One CSV download + an "
+                         "O(rows) match; any failure costs only the block.")
+    ap.add_argument("--socrates-csv", default="",
+                    help="score against this local SOCRATES CSV instead of "
+                         "downloading (offline/testing; implies --socrates)")
     ap.add_argument("--min-conjunctions", type=int, default=0,
                     help="abort (exit 1) if the screen finds fewer conjunctions "
                          "than this — a regression that zeroes the screen must "
@@ -173,6 +241,24 @@ def main() -> None:
               f"--min-conjunctions floor of {args.min_conjunctions} — refusing to "
               f"publish (screen regression?).", file=sys.stderr)
         sys.exit(1)
+    # 11.0b: label events whose miss is beaten just past the window end. An
+    # annotation on a COPY of the event list — the screen above (what the A/B
+    # gate compares) is final. Non-fatal: a failure here costs the label, never
+    # the refresh.
+    t_h = time.perf_counter()
+    try:
+        hz_volumes = ([regime_for(m["periapsis_km"], m["eccentricity"], m["period_min"])
+                       for m in meta] if args.mode == "sfs" else None)
+        events = annotate_horizon(events, satrecs, meta, start, args.hours,
+                                  step_sec=args.step_sec, volumes=hz_volumes, **_ACCEL)
+    except Exception as exc:   # noqa: BLE001 — a label must never cost the refresh
+        print(f"::warning::Horizon annotation failed ({exc!r:.200}) — "
+              f"publishing without beyond_horizon flags.", file=sys.stderr)
+    horizon_s = time.perf_counter() - t_h
+    n_beyond = sum(1 for e in events if e.get("beyond_horizon"))
+    print(f"horizon: {n_beyond} of {len(events)} conjunctions have a closer pass "
+          f"just past the window end ({horizon_s:.1f}s)")
+
     # Stale-elements warning: a supplier serving old elements with a 200 would
     # otherwise publish as "updated just now". Normal median age is ~0.8 d.
     # Measured from the EPOCHS at screen start — the epoch_age_days column is
@@ -184,6 +270,9 @@ def main() -> None:
               f"the upstream catalog may be stale.", file=sys.stderr)
 
     generated_at = start.isoformat().replace("+00:00", "Z")
+
+    # 11.2b: SOCRATES agreement (opt-in; non-fatal — see _socrates_block).
+    socrates = _socrates_block(args, events, screen_df, start)
 
     # 9.10: carry each conjunction's prediction history forward from the run
     # before this one. This is the whole mechanism — one small file, no archive
@@ -213,10 +302,22 @@ def main() -> None:
                   f"building without prediction history.", file=sys.stderr)
             prev = None
 
+    # 11.2a: the maneuver detector's state, carried forward like --prev (and
+    # just as non-fatal). Not inside snapshot.json — see --maneuver-state-out.
+    prev_mnv = None
+    if args.prev_maneuver_state:
+        try:
+            with open(args.prev_maneuver_state, encoding="utf-8") as f:
+                prev_mnv = json.load(f)
+        except (OSError, ValueError, RecursionError) as exc:
+            print(f"WARNING: --prev-maneuver-state {args.prev_maneuver_state} unusable "
+                  f"({exc!r:.200}) — the maneuver detector cold-starts.", file=sys.stderr)
+
     # 10.10 run telemetry → meta.run. GitHub deletes run logs after 90 days, so
     # without this the archive can't say how long a screen took or which
     # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
-    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source}
+    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source,
+           "horizon_seconds": round(horizon_s, 1)}
     # git_sha lets the next cron diff ENGINE code against what the live snapshot
     # was built with (deploy.yml's gate decision) instead of trusting commit dates.
     for key, env in (("github_run_id", "GITHUB_RUN_ID"),
@@ -228,7 +329,8 @@ def main() -> None:
     source = _SOURCE_LABELS[args.catalog_source].format(group=args.group)
     try:
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=prev, run=run)
+                              source=source, prev=prev, run=run, socrates=socrates,
+                              prev_maneuver_state=prev_mnv)
     except Exception as exc:   # noqa: BLE001 — history must never cost the refresh
         if prev is None:
             raise
@@ -239,7 +341,27 @@ def main() -> None:
               f"building without it.", file=sys.stderr)
         prev = None
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=None, run=run)
+                              source=source, prev=None, run=run, socrates=socrates,
+                              prev_maneuver_state=prev_mnv)
+    # 11.2a maneuver labels. Warn-only in every failure mode — a label never
+    # costs the refresh.
+    mnv_state = snap.pop("maneuver_state", None)
+    mi = snap["meta"].get("maneuvers") or {}
+    if "error" in mi:
+        print(f"::warning::Maneuver detection failed ({mi['error']}) — publishing "
+              f"without maneuver labels; the detector cold-starts next run.",
+              file=sys.stderr)
+    else:
+        print(f"maneuvers: {mi.get('objects')} objects tracked "
+              f"({mi.get('armed')} armed, {mi.get('carried')} carried from --prev), "
+              f"{mi.get('confirmed')} confirmed this run, "
+              f"{mi.get('tagged_events')} conjunctions tagged (≤ {mi.get('tag_max_h'):.0f} h)")
+        if mi.get("cold_start") and isinstance(prev_mnv, dict) and prev_mnv.get("id"):
+            # A state WAS there but none of it decoded: schema drift, not a first
+            # deploy. Silent, this would keep the tag dark for ~a day each time.
+            print("::warning::--prev-maneuver-state did not decode — the maneuver "
+                  "detector cold-started (no labels for ~2 days, noisier for ~5).",
+                  file=sys.stderr)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0
@@ -273,6 +395,20 @@ def main() -> None:
     if gz > _GZ_BUDGET_BYTES:
         print(f"  ⚠ over the ~{_GZ_BUDGET_BYTES / 1e6:.0f} MB gzipped budget "
               f"— trim the catalog or drop fields")
+
+    if mnv_state is not None:
+        mnv_out = args.maneuver_state_out or os.path.join(
+            os.path.dirname(args.out) or ".", "maneuver_state.json")
+        try:
+            body = json.dumps(mnv_state, separators=(",", ":"), allow_nan=False)
+            with open(mnv_out, "w", encoding="utf-8") as f:
+                f.write(body)
+            print(f"wrote maneuver state {mnv_out}: {len(body) / 1e6:.2f} MB raw / "
+                  f"{len(gzip.compress(body.encode())) / 1e6:.2f} MB gzipped "
+                  f"(not downloaded by the site)")
+        except (OSError, ValueError) as exc:
+            print(f"::warning::Could not write the maneuver state ({exc!r:.200}) — "
+                  f"the detector cold-starts next run.", file=sys.stderr)
 
     if args.archive_out:
         rec = json.dumps(archive_record(snap), separators=(",", ":"), allow_nan=False)

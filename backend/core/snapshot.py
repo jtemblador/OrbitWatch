@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from . import maneuvers as _mnv
+
 SCHEMA_VERSION = 1
 
 # 9.10 prediction-evolution trail. Prior points only — with the live value the
@@ -39,6 +41,15 @@ HISTORY_MAX_POINTS = 3
 # so as the window slides the same pair names a different encounter — matching on
 # the pair alone would splice unrelated approaches into one trail.
 TCA_MATCH_WINDOW_S = 900.0
+
+# 11.0c persistent / formation flag. A pair present in this many CONSECUTIVE
+# runs (~3 days at the 3x/day cron) at a relative speed below this is a
+# co-moving formation or co-located slot (TerraSAR-X/TanDEM-X; GEO co-location
+# clusters like Optus D3/MEV-1), not a crossing. It stays in the snapshot —
+# labeled, not dropped: the 7.2 co-located suppression rule is deliberately
+# NOT loosened (cross-launch suppression still needs < 50 m AND < 5 m/s).
+PERSISTENT_MIN_RUNS = 9
+PERSISTENT_MAX_REL_SPEED_KM_S = 0.01
 
 # 10.10 slim archive record (see `archive_record`). The data branch keeps every
 # run's screen output — the one thing that can't be reproduced later — but not
@@ -117,8 +128,12 @@ def _satellite(row) -> dict:
 
 
 def _conjunction(e: dict) -> dict:
-    """One run_screen event → a compact conjunction record (rounded)."""
-    return {
+    """One run_screen event → a compact conjunction record (rounded).
+
+    `beyond_horizon` (11.0b, from conjunctions.annotate_horizon) is emitted
+    only when true — absent otherwise, like `hist`, so it costs nothing on the
+    events it doesn't apply to and an older frontend never sees a new key."""
+    rec = {
         "a": int(e["sat1_norad_id"]), "b": int(e["sat2_norad_id"]),
         "a_name": e["sat1_name"], "b_name": e["sat2_name"],
         "a_type": e["sat1_object_type"], "b_type": e["sat2_object_type"],
@@ -129,6 +144,9 @@ def _conjunction(e: dict) -> dict:
                    round(_num(e["n_km"]), 3)],
         "regime": e.get("screening_regime"),
     }
+    if e.get("beyond_horizon") is True:
+        rec["beyond_horizon"] = True
+    return rec
 
 
 def _pair_key(a, b) -> tuple:
@@ -248,6 +266,173 @@ def carry_forward_history(conjunctions, prev_conjunctions, prev_generated_at,
     return out
 
 
+def _prev_runs(prev_rec) -> int:
+    """How many consecutive runs a previous record's pair had been present.
+
+    `runs` when it carries a valid one; otherwise (a pre-11.0 snapshot, or a
+    first-appearance record, which omits the key) 1 + the length of its `hist`
+    trail. Every trail point is a run the pair was linked in, so this is a
+    sound LOWER bound — it lets the counter bootstrap off a pre-11.0 chain
+    instead of restarting from 1 on the deploy that introduces it."""
+    runs = prev_rec.get("runs")
+    if isinstance(runs, int) and not isinstance(runs, bool) and runs >= 1:
+        return runs
+    return 1 + len(_clean_trail(prev_rec.get("hist")))
+
+
+def carry_forward_runs(conjunctions, prev_conjunctions,
+                       min_runs: int = PERSISTENT_MIN_RUNS,
+                       max_rel_speed_km_s: float = PERSISTENT_MAX_REL_SPEED_KM_S
+                       ) -> list:
+    """Count consecutive appearances per PAIR and flag persistent formations (11.0c).
+
+    `runs` = previous run's count + 1 when the same unordered pair is in the
+    previous snapshot, else the pair is new (key absent ≡ 1). `slow_runs` =
+    the same streak counted only over runs where the pair was ALSO slower than
+    max_rel_speed_km_s (reset by any fast run). `persistent` = slow_runs ≥
+    min_runs. Review fix: gating only the CURRENT run let a pair that crossed
+    fast for 8 runs and then had one slow encounter be flagged a formation.
+    A pre-11.0 / pre-fix previous record has no `slow_runs`; it bootstraps from
+    its `runs`/`hist` count only if that record was itself slow.
+
+    Linked on the pair ALONE — deliberately not `hist`'s (pair, TCA ± 900 s).
+    A co-moving pair has no well-defined TCA: its range is nearly flat, so the
+    window's minimum hops between orbits run to run (TerraSAR-X/TanDEM-X: TCA
+    moved by hours between consecutive snapshots). Measured over the last 30
+    archived runs, of 351 events at v_rel < 0.01 km/s, 217 recur by pair but
+    only 81 would link by (pair, TCA) — the TCA key would never reach 9. The
+    speed gate is what keeps this from flagging the recurring Starlink
+    crossings a pair-only link also counts.
+
+    Pure; returns new records. Malformed previous records are skipped.
+    """
+    if not prev_conjunctions:
+        return [dict(c) for c in conjunctions]
+    prev_runs: dict = {}
+    prev_slow: dict = {}
+    for p in prev_conjunctions:
+        try:
+            key = _pair_key(p["a"], p["b"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        prev_runs[key] = max(prev_runs.get(key, 0), _prev_runs(p))
+        prev_slow[key] = max(prev_slow.get(key, 0),
+                             _prev_slow_runs(p, max_rel_speed_km_s))
+    out = []
+    for c in conjunctions:
+        rec = dict(c)
+        key = _pair_key(rec["a"], rec["b"])
+        before = prev_runs.get(key)
+        if before:
+            rec["runs"] = before + 1
+            if _is_slow(rec, max_rel_speed_km_s):
+                slow = prev_slow.get(key, 0) + 1
+                # Always written on a linked slow run (even 1): its ABSENCE is
+                # how _prev_slow_runs recognizes a pre-fix record to bootstrap.
+                rec["slow_runs"] = slow
+                if slow >= min_runs:
+                    rec["persistent"] = True
+        out.append(rec)
+    return out
+
+
+def _is_slow(rec, max_rel_speed_km_s: float) -> bool:
+    v = rec.get("rel_speed_km_s")
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v < max_rel_speed_km_s)
+
+
+def _prev_slow_runs(prev_rec, max_rel_speed_km_s: float) -> int:
+    """The previous record's slow streak (see carry_forward_runs): its valid
+    `slow_runs`; else, if that record was itself slow, its run count (bootstrap
+    from a pre-fix snapshot); else 0."""
+    if not _is_slow(prev_rec, max_rel_speed_km_s):
+        return 0
+    slow = prev_rec.get("slow_runs")
+    if isinstance(slow, int) and not isinstance(slow, bool) and slow >= 1:
+        return slow
+    return _prev_runs(prev_rec)   # pre-fix record (or first appearance → 1)
+
+
+def _element_ages(conjunctions, catalog_df: pd.DataFrame, generated_at) -> list:
+    """Attach `age_a_d` / `age_b_d` — each object's element age in days at
+    `generated_at` (11.0a), rounded to 0.01 d (~15 min).
+
+    Measured from EPOCH at generation time, not the frozen epoch_age_days
+    column (same reason as meta.max_epoch_age_days). Omitted per side when the
+    object or the timestamp is unknown — never a fabricated 0."""
+    gen = _epoch_seconds(generated_at)
+    if gen is None or not len(catalog_df) or "epoch" not in catalog_df.columns:
+        return conjunctions
+    epochs = pd.to_datetime(catalog_df["epoch"], utc=True)
+    age_by_id = {}
+    for nid, t in zip(catalog_df["norad_cat_id"], epochs):
+        if pd.isna(t) or _is_missing(nid):
+            continue
+        age = (gen - t.timestamp()) / 86400.0
+        if math.isfinite(age):
+            age_by_id[int(nid)] = round(age, 2)
+    for c in conjunctions:
+        for side in ("a", "b"):
+            age = age_by_id.get(c[side])
+            if age is not None:
+                c[f"age_{side}_d"] = age
+    return conjunctions
+
+
+# 11.2a: an object absent from this run's catalog keeps its maneuver state (a
+# transient gap must not cost its warm-up) — unless its last element set is
+# this old, so decayed / dropped objects don't accumulate in the state forever.
+MANEUVER_STATE_RETAIN_D = 30.0
+
+
+def apply_maneuvers(conjunctions, catalog_df: pd.DataFrame, generated_at,
+                    prev_state) -> tuple[list, dict | None, dict]:
+    """Advance the per-object maneuver detector by this run's catalog and label
+    the conjunctions (11.2a; see backend/core/maneuvers.py).
+
+    Annotation only — `mnv_h` / `mnv_who` are added to COPIES of the records;
+    the screened events (what the CI A/B gate compares) are untouched.
+
+    Returns (conjunctions, maneuver_state, info). Never raises: a missing or
+    malformed `prev_state` is a cold start (the detector re-arms after 3
+    element-set steps per object), and any failure in here costs the label,
+    never the snapshot — `info["error"]` says why and the state is None.
+    """
+    info: dict = {"tag_max_h": _mnv.TAG_MAX_H}
+    try:
+        states = _mnv.decode_state(prev_state)
+        info["carried"] = len(states)
+        info["cold_start"] = not states
+        states, confirmed = _mnv.update_states(states, _mnv.catalog_rows(catalog_df))
+        gen = _mnv.epoch_us(generated_at)
+        if gen is not None:
+            present = set()
+            if len(catalog_df) and "norad_cat_id" in catalog_df.columns:
+                present = {int(x) for x in catalog_df["norad_cat_id"].tolist()
+                           if not _is_missing(x)}
+            keep_us = MANEUVER_STATE_RETAIN_D * 86400e6
+            states = {k: v for k, v in states.items()
+                      if k in present or gen - v.ep_us <= keep_us}
+            # A last-maneuver epoch older than the tag window can never tag
+            # again (a newer maneuver would overwrite it), so dropping it is
+            # lossless for the output — and it is most of the state's bytes
+            # (94% of Starlinks maneuver at least monthly).
+            tag_us = _mnv.TAG_MAX_H * 3.6e9
+            for st in states.values():
+                if st.last_mnv_us is not None and gen - st.last_mnv_us > tag_us:
+                    st.last_mnv_us = None
+        out = _mnv.annotate_conjunctions(conjunctions, states, generated_at)
+        info.update(objects=len(states),
+                    armed=sum(st.nq >= _mnv.PARAMS["WARMUP"] for st in states.values()),
+                    confirmed=len(confirmed),
+                    tagged_events=sum(1 for c in out if "mnv_h" in c))
+        return out, _mnv.encode_state(states), info
+    except Exception as exc:   # noqa: BLE001 — a label must never cost the refresh
+        info["error"] = f"{exc!r:.200}"
+        return conjunctions, None, info
+
+
 def build_snapshot(
     catalog_df: pd.DataFrame,
     events: list[dict],
@@ -256,6 +441,8 @@ def build_snapshot(
     source: str = "CelesTrak",
     prev: dict | None = None,
     run: dict | None = None,
+    socrates: dict | None = None,
+    prev_maneuver_state=None,
 ) -> dict:
     """Assemble the static-site snapshot dict from a catalog frame + screen events.
 
@@ -268,9 +455,17 @@ def build_snapshot(
         prev:          the previous snapshot dict, to carry conjunction history
                        forward (9.10). Omit — or pass one that is missing or
                        malformed — and no `hist` is emitted at all.
+        prev_maneuver_state: the previous run's `maneuver_state` (11.2a) — the
+                       sidecar file build_snapshot.py writes; falls back to a
+                       `maneuver_state` key in `prev`. Missing / malformed →
+                       the maneuver detector cold-starts.
         run:           per-run telemetry (screen time, catalog source, CI run id)
                        → `meta.run`. CI logs expire after 90 days; the archive
                        doesn't. Omitted → no `run` key.
+        socrates:      the 11.2b SOCRATES agreement block
+                       (socrates_monitor.agreement_block, or a status-only
+                       "unavailable" stub) → `meta.socrates`. Omitted → no
+                       key, so pre-11.2b readers see the schema they know.
     """
     sats = [_satellite(rec) for rec in catalog_df.to_dict("records")]
     conj = [_conjunction(e) for e in events]
@@ -278,6 +473,12 @@ def build_snapshot(
         conj = carry_forward_history(
             conj, prev.get("conjunctions"),
             (prev.get("meta") or {}).get("generated_at"))
+        conj = carry_forward_runs(conj, prev.get("conjunctions"))
+    conj = _element_ages(conj, catalog_df, generated_at)
+    if prev_maneuver_state is None and isinstance(prev, dict):
+        prev_maneuver_state = prev.get("maneuver_state")
+    conj, mnv_state, mnv_info = apply_maneuvers(conj, catalog_df, generated_at,
+                                                prev_maneuver_state)
     # NaN would serialize to a bare `NaN` token that JS JSON.parse rejects — guard it.
     # Measured at GENERATION time from the epochs: the epoch_age_days column is
     # frozen when the cache was parsed, so an older cache would understate it.
@@ -302,9 +503,19 @@ def build_snapshot(
         "screen": screen_params,
         "max_epoch_age_days": max_age,
     }
+    meta["maneuvers"] = mnv_info
     if run:
         meta["run"] = run
-    return {"meta": meta, "satellites": sats, "conjunctions": conj}
+    if socrates:
+        meta["socrates"] = socrates
+    snap = {"meta": meta, "satellites": sats, "conjunctions": conj}
+    if mnv_state is not None:
+        # Read only by the NEXT run. build_snapshot.py moves it out of the
+        # published snapshot.json into a sidecar file (~0.7 MB gz the browser
+        # would otherwise download on every visit for nothing); kept out of
+        # the archive record too — see archive_record.
+        snap["maneuver_state"] = mnv_state
+    return snap
 
 
 def archive_record(snap: dict) -> dict:
@@ -315,6 +526,11 @@ def archive_record(snap: dict) -> dict:
     per-satellite OMM with columnar `elements` (ARCHIVE_ELEMENT_KEYS), and drops
     the conjunction rows' names/types, which `elements` already carries by NORAD
     id. Pure; never mutates the published snapshot.
+
+    The 11.2a `maneuver_state` is deliberately NOT archived: it is a pure
+    function of the archived `elements` sequence (`maneuvers.replay`
+    reproduces it), so it would only add bytes to every record. The
+    per-event `mnv_h` / `mnv_who` labels ARE kept, with the conjunctions.
     """
     sats = snap.get("satellites") or []
     meta = dict(snap.get("meta") or {})

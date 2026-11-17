@@ -11,7 +11,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -20,10 +20,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from core.snapshot import (  # noqa: E402
     ARCHIVE_ELEMENT_KEYS,
     ARCHIVE_FORMAT,
+    PERSISTENT_MIN_RUNS,
     SCHEMA_VERSION,
     _conjunction,
     archive_record,
     carry_forward_history,
+    carry_forward_runs,
     _epoch_iso,
     _num,
     _satellite,
@@ -145,6 +147,48 @@ class TestConjunction:
         assert c["rtn_km"] == [-0.123, 0.568, 0.9]
         assert c["regime"] == "LEO 1"
         assert c["tca"] == "2026-06-01T18:00:00+00:00"   # passed through untouched
+
+    def test_beyond_horizon_only_when_true(self):
+        # 11.0b: absent unless set — an old frontend never sees a new key on the
+        # ~3/4 of events it doesn't apply to, and they cost zero bytes.
+        assert _conjunction(_event(beyond_horizon=True))["beyond_horizon"] is True
+        for v in (None, False, 1, "yes"):
+            assert "beyond_horizon" not in _conjunction(_event(beyond_horizon=v))
+        assert "beyond_horizon" not in _conjunction(_event())
+
+
+class TestElementAge:
+    """11.0a — per-event element age (days from each object's EPOCH to
+    generated_at), the input to the "low confidence (stale elements)" tag."""
+
+    def _snap(self, gen="2026-06-02T00:00:00Z", events=None):
+        df = pd.DataFrame([
+            _row(norad_cat_id=25544, epoch=pd.Timestamp("2026-06-01T12:00:00", tz="UTC"),
+                 epoch_age_days=0.01),                     # frozen column: ignored
+            _row(norad_cat_id=12345, epoch=pd.Timestamp("2026-05-28T00:00:00", tz="UTC"))])
+        return build_snapshot(df, events or [_event()], {}, gen)
+
+    def test_ages_are_measured_from_each_epoch_at_generation(self):
+        c = self._snap()["conjunctions"][0]
+        assert c["age_a_d"] == 0.5 and c["age_b_d"] == 5.0
+
+    def test_rounded_to_hundredths(self):
+        c = self._snap(gen="2026-06-02T00:07:12Z")["conjunctions"][0]   # +0.005 d
+        assert c["age_a_d"] == 0.51 and c["age_b_d"] == 5.0
+
+    def test_unknown_object_omits_only_that_side(self):
+        c = self._snap(events=[_event(sat2_norad_id=999)])["conjunctions"][0]
+        assert c["age_a_d"] == 0.5 and "age_b_d" not in c
+
+    def test_unparseable_generated_at_emits_no_ages(self):
+        c = self._snap(gen="t")["conjunctions"][0]
+        assert "age_a_d" not in c and "age_b_d" not in c
+
+    def test_ages_survive_strict_json_and_the_archive(self):
+        snap = self._snap()
+        json.loads(json.dumps(snap, allow_nan=False), parse_constant=_reject_const)
+        arch = archive_record(snap)["conjunctions"][0]
+        assert arch["age_a_d"] == 0.5 and arch["age_b_d"] == 5.0
 
 
 class TestHistoryRobustness:
@@ -410,6 +454,103 @@ class TestCarryForwardHistory:
         json.loads(json.dumps(out, allow_nan=False), parse_constant=_reject_const)
 
 
+class TestCarryForwardRuns:
+    """11.0c — consecutive-appearance counter + the persistent-formation flag.
+
+    Linked on the PAIR alone (not hist's pair+TCA): a co-moving pair's TCA hops
+    between orbits run to run, so the TCA key would never accumulate."""
+
+    _SLOW = dict(rel_speed_km_s=0.0, miss_km=0.119)   # TerraSAR-X / TanDEM-X
+
+    def test_new_pair_has_no_runs_key(self):
+        out = carry_forward_runs([_cj()], [_cj(a=1, b=2)])
+        assert "runs" not in out[0] and "persistent" not in out[0]
+
+    def test_links_on_pair_even_when_the_tca_moved_by_hours(self):
+        out = carry_forward_runs([_cj(tca="2026-06-02T05:13:24+00:00")],
+                                 [_cj(b=100, a=200, tca="2026-06-01T15:01:40+00:00")])
+        assert out[0]["runs"] == 2
+
+    def test_chain_counts_up_and_flags_at_the_threshold(self):
+        n = PERSISTENT_MIN_RUNS
+        below = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 2, **self._SLOW)])[0]
+        at = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 1, **self._SLOW)])[0]
+        assert below["runs"] == n - 1 and "persistent" not in below
+        assert at["runs"] == n and at["persistent"] is True
+
+    def test_fast_history_then_one_slow_run_is_not_a_formation(self):
+        # Review fix: a pair that crossed fast for 20 runs and is slow once is
+        # NOT a formation — the slow streak starts over at this run.
+        rec = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=20, rel_speed_km_s=12.0)])[0]
+        assert rec["runs"] == 21 and "persistent" not in rec and rec["slow_runs"] == 1
+        # …and the streak then builds run by run from the slow record forward.
+        nxt = carry_forward_runs([_cj(**self._SLOW)], [rec])[0]
+        assert nxt["slow_runs"] == 2 and "persistent" not in nxt
+
+    def test_slow_streak_resets_on_a_fast_run(self):
+        prev = [_cj(runs=30, slow_runs=30, **self._SLOW)]
+        fast = carry_forward_runs([_cj(rel_speed_km_s=12.0)], prev)[0]
+        assert "slow_runs" not in fast and "persistent" not in fast
+        again = carry_forward_runs([_cj(**self._SLOW)], [fast])[0]
+        assert "persistent" not in again
+
+    def test_speed_gate_is_strict_and_uses_this_runs_speed(self):
+        prev = [_cj(runs=20, **self._SLOW)]
+        fast = carry_forward_runs([_cj(rel_speed_km_s=0.01)], prev)[0]
+        slow = carry_forward_runs([_cj(rel_speed_km_s=0.009)], prev)[0]
+        crossing = carry_forward_runs([_cj(rel_speed_km_s=12.0)], prev)[0]
+        assert "persistent" not in fast and slow["persistent"] is True
+        # A recurring Starlink CROSSING keeps counting runs but is never a formation.
+        assert crossing["runs"] == 21 and "persistent" not in crossing
+
+    def test_bootstraps_from_a_pre_11_0_hist_trail(self):
+        # A pre-11.0 prev has no `runs`; each hist point is a run the pair was
+        # linked in, so 1 + len(hist) is a sound lower bound.
+        prev = [_cj(hist=[[1, 1.0], [2, 2.0], [3, 3.0]])]
+        assert carry_forward_runs([_cj()], prev)[0]["runs"] == 5
+
+    def test_malformed_runs_fall_back_not_crash(self):
+        for bad in (True, -3, 0, "8", 2.5, None):
+            out = carry_forward_runs([_cj()], [_cj(runs=bad)])
+            assert out[0]["runs"] == 2, bad
+
+    def test_malformed_prev_records_are_skipped(self):
+        prev = [{"a": 100}, _cj(a=float("inf")), "junk", _cj(runs=4)]
+        assert carry_forward_runs([_cj()], prev)[0]["runs"] == 5
+
+    def test_is_pure(self):
+        cur = [_cj(**self._SLOW)]
+        carry_forward_runs(cur, [_cj(runs=50)])
+        assert "runs" not in cur[0]
+
+    def test_motivating_case_through_build_snapshot(self):
+        """TerraSAR-X / TanDEM-X: miss 0.119 km, v_rel 0.0, TCA wandering by
+        hours. Nine consecutive runs through the REAL builder (and the real
+        `_conjunction` shape) → persistent on the 9th, not before; one missed
+        run resets the chain."""
+        df = pd.DataFrame([_row(norad_cat_id=31698), _row(norad_cat_id=36605)])
+        ev = _event(sat1_norad_id=31698, sat2_norad_id=36605,
+                    miss_distance_km=0.119, relative_speed_km_s=0.0)
+        prev, flags = None, []
+        for k in range(PERSISTENT_MIN_RUNS):
+            tca = f"2026-06-0{1 + k % 3}T{(k * 5) % 24:02d}:00:00+00:00"
+            snap = build_snapshot(df, [dict(ev, tca=tca)], {},
+                                  f"2026-06-01T{k:02d}:00:00Z", prev=prev)
+            flags.append(snap["conjunctions"][0].get("persistent", False))
+            prev = snap
+        assert flags == [False] * (PERSISTENT_MIN_RUNS - 1) + [True]
+        gap = build_snapshot(df, [], {}, "2026-06-02T00:00:00Z", prev=prev)
+        back = build_snapshot(df, [ev], {}, "2026-06-02T08:00:00Z", prev=gap)
+        assert "runs" not in back["conjunctions"][0]
+
+    def test_flags_survive_the_archive(self):
+        rec = archive_record({"meta": {}, "satellites": [],
+                              "conjunctions": [_cj(runs=12, persistent=True,
+                                                   beyond_horizon=True)]})
+        c = rec["conjunctions"][0]
+        assert c["runs"] == 12 and c["persistent"] is True and c["beyond_horizon"] is True
+
+
 class TestOMMCrossValidation:
     """The headline lock: our shipped OMM must reconstruct the same orbit
     satellite.js json2satrec will — checked via the reference python-sgp4 OMM
@@ -480,6 +621,7 @@ class TestBuildSnapshotMain:
                                               "--out", str(out), *extra])
             bs.main()
             return json.loads(out.read_text())
+        run.module = bs
         return run, tmp_path
 
     def test_spacetrack_source_is_cited_and_archive_is_slim_json(self, run_main):
@@ -497,6 +639,41 @@ class TestBuildSnapshotMain:
         assert len(rec["conjunctions"]) == snap["meta"]["n_conjunctions"]
         assert len(rec["elements"]["NORAD_CAT_ID"]) == snap["meta"]["n_satellites"]
 
+    # The evenly phased 40-sat shell never comes within 500 km; a 1000 km
+    # Euclidean cut gives ~150 events (~25 flagged) — enough to exercise wiring.
+    _DENSE = ("--mode", "euclidean", "--threshold", "1000", "--hours", "3")
+
+    def test_trust_fields_are_wired_through_main(self, run_main, monkeypatch):
+        # 11.0a/b through the real main(): every event carries both element ages,
+        # the horizon pass is timed in meta.run, and the label is ANNOTATION
+        # only — the events main() publishes equal the bare screen's.
+        run, tmp = run_main
+        bs = run.module
+        seen = {}
+        real = bs.annotate_horizon
+
+        def spy(events, *a, **k):
+            seen["in"] = [dict(e) for e in events]
+            return real(events, *a, **k)
+        monkeypatch.setattr(bs, "annotate_horizon", spy)
+        snap = run(*self._DENSE)
+        assert snap["conjunctions"], "fixture should produce conjunctions"
+        assert all("age_a_d" in c and "age_b_d" in c for c in snap["conjunctions"])
+        assert "horizon_seconds" in snap["meta"]["run"]
+        assert any(c.get("beyond_horizon") for c in snap["conjunctions"])
+        assert len(seen["in"]) == len(snap["conjunctions"])
+
+    def test_horizon_failure_is_not_fatal(self, run_main, monkeypatch, capsys):
+        run, tmp = run_main
+        bs = run.module
+
+        def boom(*a, **k):
+            raise RuntimeError("synthetic")
+        monkeypatch.setattr(bs, "annotate_horizon", boom)
+        snap = run(*self._DENSE)
+        assert snap["conjunctions"] and "Horizon annotation failed" in capsys.readouterr().err
+        assert all("beyond_horizon" not in c for c in snap["conjunctions"])
+
     def test_stale_warning_measures_age_from_the_epochs(self, run_main, capsys, monkeypatch):
         # The epoch_age_days COLUMN is frozen at cache-parse time; the stale
         # warning must measure the epochs themselves (round-2 adversarial).
@@ -511,6 +688,61 @@ class TestBuildSnapshotMain:
         assert exc.value.code == 1
         assert not (tmp / "snapshot.json").exists()
 
+    # --- 11.2b: SOCRATES agreement through the real main() --------------------
+
+    def test_socrates_off_by_default(self, run_main):
+        run, tmp = run_main
+        assert "socrates" not in run()["meta"]
+
+    def test_socrates_csv_is_scored_into_meta(self, run_main):
+        # Round-trip: one of our real screen events, written as a SOCRATES CSV
+        # row (0.1 km, so it's a fair reference), must come back reproduced.
+        run, tmp = run_main
+        snap0 = run(*self._DENSE)
+        mid = datetime.fromisoformat(snap0["meta"]["generated_at"].replace("Z", "+00:00")) \
+            + timedelta(hours=1.5)       # away from the edge trim at either end
+        first = min(snap0["conjunctions"], key=lambda c: abs(
+            (datetime.fromisoformat(c["tca"]) - mid).total_seconds()))
+        tca = datetime.fromisoformat(first["tca"]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        late = (datetime.fromisoformat(first["tca"]) + timedelta(days=6)) \
+            .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        csv = tmp / "soc.csv"
+        csv.write_text(
+            "NORAD_CAT_ID_1,OBJECT_NAME_1,DSE_1,NORAD_CAT_ID_2,OBJECT_NAME_2,DSE_2,"
+            "TCA,TCA_RANGE,TCA_RELATIVE_SPEED,MAX_PROB,DILUTION\n"
+            f"{first['a']},A [+],0.5,{first['b']},B [+],0.5,{tca},0.100,7.0,0,0\n"
+            f"{first['a']},A [+],0.5,{first['b']},B [+],0.5,{late},0.100,7.0,0,0\n")
+        # An early bracket row so the SOCRATES run covers our window start.
+        early = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%d %H:%M:%S.000")
+        csv.write_text(csv.read_text() + f"1,X [-],1,2,Y [-],1,{early},3.0,7.0,0,0\n")
+        snap = run(*self._DENSE, "--socrates-csv", str(csv))
+        s = snap["meta"]["socrates"]
+        assert s["status"] == "ok" and s["origin"] == "file"
+        assert (s["socrates_to_ours"]["n"], s["socrates_to_ours"]["n_matched"]) == (1, 1)
+        assert s["socrates_to_ours"]["median_abs_dtca_s"] < 0.01
+
+    def test_socrates_failure_costs_only_the_block(self, run_main, capsys):
+        run, tmp = run_main
+        snap = run(*self._DENSE, "--socrates-csv", str(tmp / "missing.csv"))
+        assert snap["conjunctions"]                      # the refresh still publishes
+        assert snap["meta"]["socrates"]["status"] == "unavailable"
+        assert snap["meta"]["socrates"]["reason"] == "FileNotFoundError"
+        assert "SOCRATES agreement unavailable" in capsys.readouterr().err
+
+    def test_socrates_nan_cannot_break_the_snapshot_dump(self, run_main, monkeypatch):
+        # The snapshot is dumped allow_nan=False; a NaN smuggled into the block
+        # must be caught inside the non-fatal wrapper, not at the final dump.
+        run, tmp = run_main
+        bs = run.module
+        monkeypatch.setattr(bs, "agreement_block",
+                            lambda *a, **k: {"status": "ok", "x": float("nan")})
+        csv = tmp / "soc.csv"
+        csv.write_text(open(os.path.join(os.path.dirname(__file__), "fixtures",
+                                         "socrates_sample.csv")).read())
+        snap = run("--socrates-csv", str(csv))
+        assert snap["meta"]["socrates"]["status"] == "unavailable"
+
     def test_prev_that_is_valid_json_but_not_a_snapshot_is_not_fatal(self, run_main):
         run, tmp = run_main
         for junk in ("[]", "null", '"text"',
@@ -524,6 +756,34 @@ class TestBuildSnapshotMain:
             prev.write_text(junk)
             snap = run("--prev", str(prev))
             assert all("hist" not in c for c in snap["conjunctions"])
+
+    def test_maneuver_state_is_a_sidecar_carried_run_to_run(self, run_main):
+        # 11.2a: the detector state goes to maneuver_state.json next to --out,
+        # NOT into the published snapshot.json (the browser never needs it), and
+        # the next run reads it back via --prev-maneuver-state.
+        run, tmp = run_main
+        snap = run()
+        side = tmp / "maneuver_state.json"
+        assert "maneuver_state" not in snap and side.exists()
+        state = json.loads(side.read_text())
+        assert state["v"] == 1 and len(state["id"]) == snap["meta"]["n_satellites"]
+        m = snap["meta"]["maneuvers"]
+        assert m["cold_start"] is True and m["objects"] == snap["meta"]["n_satellites"]
+        carried = tmp / "prev_state.json"
+        side.rename(carried)
+        snap2 = run("--prev-maneuver-state", str(carried))
+        assert snap2["meta"]["maneuvers"]["cold_start"] is False
+        assert snap2["meta"]["maneuvers"]["carried"] == len(state["id"])
+
+    def test_bad_maneuver_state_file_is_not_fatal(self, run_main, capsys):
+        run, tmp = run_main
+        for junk in ("{", "null", "[1]", '{"v": 1, "id": [1]}', "[" * 100000 + "]" * 100000):
+            p = tmp / "bad_state.json"
+            p.write_text(junk)
+            snap = run("--prev-maneuver-state", str(p))
+            assert snap["meta"]["maneuvers"]["cold_start"] is True
+        snap = run("--prev-maneuver-state", str(tmp / "missing.json"))
+        assert "cold-starts" in capsys.readouterr().err
 
 
 class TestAbScreenFloor:

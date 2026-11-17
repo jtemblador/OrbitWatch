@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from fixture_catalog import catalog_now, catalog_now_iso
 
 
 # ===========================================================================
@@ -38,6 +39,13 @@ client = _client_ctx.__enter__()
 ISS_NORAD = 25544
 LEO_ALT_MIN, LEO_ALT_MAX = 300, 500  # km
 LEO_PERIOD_MIN, LEO_PERIOD_MAX = 88, 100  # minutes
+
+# Propagation tests pin `?time=` to the catalog's own fetch time instead of the
+# server's wall-clock default: the suite runs on a frozen fixture catalog that
+# ages (11.3a, conftest.py), and physics bounds (ISS altitude, count of objects
+# that still propagate) must not depend on the date the suite runs. The
+# wall-clock default itself is locked separately in TestDefaultTime.
+T_CATALOG = catalog_now_iso()
 
 
 def teardown_module():
@@ -205,16 +213,29 @@ class TestSatelliteList(unittest.TestCase):
         live) and allow marginally future-dated epochs (operators sometimes issue
         elements with an epoch slightly ahead of now).
         """
-        ages = [sat["epoch_age_days"] for sat in self.data["satellites"]]
+        from datetime import datetime, timezone
+        # The endpoint ages epochs against the wall clock; judge freshness as
+        # of the catalog's own fetch (11.3a — a frozen fixture keeps aging; a
+        # live cache's fetch is hours old, so there this is the same check).
+        now = datetime.now(timezone.utc)
+        elapsed_d = (now - catalog_now()).total_seconds() / 86400.0
+        ages = [sat["epoch_age_days"] - elapsed_d for sat in self.data["satellites"]]
         self.assertTrue(ages, "no satellites returned")
-        for sat in self.data["satellites"]:
+        for sat, age in zip(self.data["satellites"], ages):
             self.assertGreaterEqual(
-                sat["epoch_age_days"], -2,
-                f"{sat['name']} epoch is {sat['epoch_age_days']:.2f} days in the future",
+                age, -2,
+                f"{sat['name']} epoch is {age:.2f} days in the future at fetch time",
             )
+            # ...and the served age really is recomputed from the wall clock
+            # (not the stale value cached in the parquet): epoch + age == now,
+            # to the 0.01 d rounding plus test runtime.
+            served_now = (datetime.fromisoformat(sat["epoch"]).timestamp()
+                          + sat["epoch_age_days"] * 86400.0)
+            self.assertAlmostEqual(served_now, now.timestamp(),
+                                   delta=0.005 * 86400 + 300)
         self.assertLess(
             min(ages), 30,
-            f"freshest epoch is {min(ages):.1f} days old — cache may be stale",
+            f"freshest epoch was {min(ages):.1f} days old at fetch — cache was stale",
         )
 
     def test_object_type_not_empty(self):
@@ -226,11 +247,19 @@ class TestSatelliteList(unittest.TestCase):
         from the name. The stations catalog must surface meaningful (non-UNKNOWN)
         types — exactly the condition controls.js needs to render the type-filter
         checkboxes. Stations = ISS-family payloads + a 'FREGAT DEB'."""
+        from backend.core.tle_fetcher import _derive_object_type
         types = {s["object_type"] for s in self.data["satellites"]}
         self.assertTrue(types - {"UNKNOWN"},
                         f"all UNKNOWN — type filters won't render: {types}")
         self.assertIn("PAYLOAD", types)
-        self.assertIn("DEBRIS", types)
+        # Every served type is the one derived from that object's name — the
+        # whole chain, object by object. (Was `assertIn("DEBRIS", types)`, a
+        # census of the LIVE group, which carries a 'FREGAT DEB'; the frozen
+        # 11.3a fixture is cut from an active-payloads snapshot and holds no
+        # debris. The DEB / R-B derivation itself is locked in test_gp_fetcher,
+        # including through load_cached.)
+        for s in self.data["satellites"]:
+            self.assertEqual(s["object_type"], _derive_object_type(s["name"]), s["name"])
 
     def test_no_numpy_types_in_json(self):
         """Verify JSON serialization didn't leak numpy types (would crash FastAPI)."""
@@ -248,7 +277,7 @@ class TestBatchPositions(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.resp = client.get("/api/positions")
+        cls.resp = client.get(f"/api/positions?time={T_CATALOG}")
         cls.data = cls.resp.json()
 
     def test_returns_200(self):
@@ -323,27 +352,27 @@ class TestSinglePosition(unittest.TestCase):
     """GET /api/positions/{norad_id} — single satellite."""
 
     def test_iss_returns_200(self):
-        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}")
         self.assertEqual(resp.status_code, 200)
 
     def test_iss_has_required_fields(self):
-        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}")
         data = resp.json()
         for key in ("name", "norad_id", "lat", "lon", "alt_km", "speed_km_s"):
             self.assertIn(key, data)
 
     def test_iss_altitude_bounds(self):
-        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}")
         data = resp.json()
         self.assertGreater(data["alt_km"], LEO_ALT_MIN)
         self.assertLess(data["alt_km"], LEO_ALT_MAX)
 
     def test_iss_norad_id_matches(self):
-        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}")
         self.assertEqual(resp.json()["norad_id"], ISS_NORAD)
 
     def test_iss_speed_bounds(self):
-        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        resp = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}")
         data = resp.json()
         self.assertGreater(data["speed_km_s"], 7.0)
         self.assertLess(data["speed_km_s"], 8.0)
@@ -370,7 +399,7 @@ class TestGroundTrack(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.resp = client.get(f"/api/positions/{ISS_NORAD}/track")
+        cls.resp = client.get(f"/api/positions/{ISS_NORAD}/track?time={T_CATALOG}")
         cls.data = cls.resp.json()
 
     def test_returns_200(self):
@@ -420,6 +449,43 @@ class TestGroundTrack(unittest.TestCase):
     def test_malformed_time_returns_422(self):
         resp = client.get(f"/api/positions/{ISS_NORAD}/track?time=garbage")
         self.assertEqual(resp.status_code, 422)
+
+
+class TestDefaultTime(unittest.TestCase):
+    """Without `?time=`, the propagation endpoints use the wall clock (11.3a:
+    every other propagation test pins the catalog time, so this is the one
+    lock on the default)."""
+
+    def _assert_now(self, iso):
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        self.assertLess(abs((datetime.now(timezone.utc) - dt).total_seconds()), 300, iso)
+
+    def test_batch_defaults_to_now(self):
+        resp = client.get("/api/positions")
+        self.assertEqual(resp.status_code, 200)
+        self._assert_now(resp.json()["timestamp"])
+
+    def test_single_defaults_to_now(self):
+        # The single-position response carries no timestamp, so compare it with
+        # an explicit wall-clock query: the ISS moves ~0.06°/s, so within 1° in
+        # lat AND lon means the default resolved to within ~15 s of now.
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        resp = client.get(f"/api/positions/{ISS_NORAD}")
+        self.assertEqual(resp.status_code, 200)
+        ref = client.get(f"/api/positions/{ISS_NORAD}?time={now_iso}").json()
+        got = resp.json()
+        self.assertLess(abs(got["lat"] - ref["lat"]), 1.0)
+        dlon = abs(got["lon"] - ref["lon"]) % 360.0
+        self.assertLess(min(dlon, 360.0 - dlon), 1.0)
+
+    def test_track_defaults_to_now(self):
+        resp = client.get(f"/api/positions/{ISS_NORAD}/track")
+        self.assertEqual(resp.status_code, 200)
+        self._assert_now(resp.json()["track"][0]["timestamp"])
 
 
 # ===========================================================================
@@ -507,7 +573,7 @@ class TestRefresh(unittest.TestCase):
     def test_positions_work_after_refresh(self):
         """Propagator still functional after reload_data()."""
         client.post("/api/refresh")
-        resp = client.get("/api/positions")
+        resp = client.get(f"/api/positions?time={T_CATALOG}")
         self.assertEqual(resp.status_code, 200)
         self.assertGreater(resp.json()["count"], 0)
 
@@ -718,19 +784,19 @@ class TestResponseValidation(unittest.TestCase):
 
     def test_batch_positions_matches_model(self):
         from backend.models.schemas import BatchPositionResponse
-        data = client.get("/api/positions").json()
+        data = client.get(f"/api/positions?time={T_CATALOG}").json()
         parsed = BatchPositionResponse(**data)
         self.assertEqual(parsed.count, len(parsed.positions))
 
     def test_single_position_matches_model(self):
         from backend.models.schemas import PositionResult
-        data = client.get(f"/api/positions/{ISS_NORAD}").json()
+        data = client.get(f"/api/positions/{ISS_NORAD}?time={T_CATALOG}").json()
         parsed = PositionResult(**data)
         self.assertEqual(parsed.norad_id, ISS_NORAD)
 
     def test_track_matches_model(self):
         from backend.models.schemas import TrackResponse
-        data = client.get(f"/api/positions/{ISS_NORAD}/track").json()
+        data = client.get(f"/api/positions/{ISS_NORAD}/track?time={T_CATALOG}").json()
         parsed = TrackResponse(**data)
         self.assertEqual(len(parsed.track), parsed.steps)
 

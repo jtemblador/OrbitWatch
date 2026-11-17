@@ -45,7 +45,8 @@ function extractFn(name) {
 }
 
 eval(extractConst("_CONSTELLATION_RE") + extractFn("constellationOf") +
-     extractFn("isSameConstellation") + extractFn("crossConstellationSet"));
+     extractFn("isSameConstellation") + extractFn("isPersistentFormation") +
+     extractFn("filterConjunctions") + extractFn("crossConstellationSet"));
 
 const pair = (a, b) => ({ a_name: a, b_name: b });
 

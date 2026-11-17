@@ -23,6 +23,15 @@ covariance data only satellite operators have, and claiming it from public data
 would be dishonest. This is honest screening on public orbital elements, and it
 says so.
 
+Two more limits, stated plainly. It screens active satellites only: debris and
+spent rocket stages (about 12,600 of the roughly 33,000 tracked objects in
+orbit) are not in the catalog it screens, so an active-vs-debris close approach will not show up. And it has
+no maneuver awareness: it predicts from the latest published elements, so a
+satellite that has just maneuvered (Starlinks do this autonomously and often)
+is predicted on its old orbit until new elements arrive. MEO and HEO objects are
+shown on the globe but not screened, since the SFS handbook gives them no
+screening volume.
+
 ## How it works
 
 ```

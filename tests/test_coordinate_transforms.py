@@ -103,6 +103,26 @@ class TestTemeToEcef:
 class TestEcefToGeodetic:
     """Test ECEF→geodetic conversion via SPICE."""
 
+    def test_needs_no_spice_kernels(self):
+        """11.3a lock: recgeo takes the ellipsoid as arguments and never reads
+        the kernel pool, so geodetic conversion must work with ZERO kernels
+        loaded (the NAIF kernels are gitignored — requiring them broke every
+        geodetic call on a fresh clone). Fresh interpreter, so no kernel
+        another test furnsh()ed can leak in."""
+        import subprocess
+        code = (
+            "import spiceypy as sp\n"
+            "from backend.core.coordinate_transforms import ecef_to_geodetic\n"
+            "lat, lon, alt = ecef_to_geodetic([6778.137, 0.0, 0.0])\n"
+            "assert sp.ktotal('ALL') == 0, sp.ktotal('ALL')\n"
+            "assert abs(lat) < 1e-9 and abs(lon) < 1e-9 and abs(alt - 400.0) < 1e-9\n"
+            "print('ok')\n"
+        )
+        repo = Path(__file__).parent.parent
+        out = subprocess.run([sys.executable, "-c", code], cwd=repo,
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
+
     def test_on_equator_prime_meridian(self):
         """Point on equator at prime meridian → lat≈0, lon≈0."""
         lat, lon, alt = ecef_to_geodetic([6378.137, 0.0, 0.0])
@@ -216,6 +236,17 @@ class TestUtcToJd:
         assert abs((jd_n - jd_m) - 0.5) < 1e-10
 
 
+def _stations_catalog():
+    """The suite's stations catalog via the fetcher's cache dir (the frozen
+    fixture by default — conftest.py, 11.3a). Skips only if no cache exists,
+    which can happen solely under ORBITWATCH_TEST_LIVE_CACHE=1."""
+    from backend.core.tle_fetcher import GPFetcher
+    try:
+        return GPFetcher().load_cached("stations")
+    except FileNotFoundError:
+        pytest.skip("no cached stations TLE data")
+
+
 class TestEndToEnd:
     """End-to-end: real ISS TLE → SGP4 → coordinate transform."""
 
@@ -224,11 +255,7 @@ class TestEndToEnd:
         from sgp4.api import Satrec, WGS72
         import pandas as pd
 
-        parquet = Path(__file__).parent.parent / "backend" / "data" / "tle" / "stations.parquet"
-        if not parquet.exists():
-            pytest.skip("no cached stations TLE data")
-
-        df = pd.read_parquet(parquet)
+        df = _stations_catalog()
         iss = df[df["norad_cat_id"] == 25544]
         if iss.empty:
             pytest.skip("ISS not in the cached stations group")
@@ -272,11 +299,7 @@ class TestEndToEnd:
         from sgp4.api import Satrec, WGS72
         import pandas as pd
 
-        parquet = Path(__file__).parent.parent / "backend" / "data" / "tle" / "stations.parquet"
-        if not parquet.exists():
-            pytest.skip("no cached stations TLE data")
-
-        df = pd.read_parquet(parquet)
+        df = _stations_catalog()
         errors = 0
         for _, row in df.iterrows():
             try:

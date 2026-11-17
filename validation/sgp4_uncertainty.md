@@ -79,6 +79,27 @@ This is the honest headline: low current-feed reproduction is **a measurement of
 element staleness**, not a flaw in the screener — and it is fully recoverable with the
 right-epoch element.
 
+### 4b. Our own re-predictions, four months of them (Phase 11.1, Nov 2026)
+
+The cron re-screens the catalog every ~8 h, so the same encounter is predicted several
+times on successively newer elements. Matching each event to the previous run's event
+for the same pair (TCA within ±900 s, runs ≤ 12 h apart) over the archived snapshots of
+Jul 15 – Nov 17, 2026 (352 runs; `scripts/archive_analysis.py`):
+
+- **49% of re-predictions reuse identical elements** for both objects — no new elset had
+  been issued — and their Δmiss is ≈ 0 (p99 0.006 km). They measure nothing, so they are excluded.
+  *(An earlier statement of this measurement, in 9.10, pooled them and reported a
+  median of 0.3–0.5 km; that figure is superseded.)*
+- On the 340,481 re-predictions where new elements arrived: **|Δmiss| median 0.64 km,
+  p90 6.0 km; 41% moved more than 1 km, 12.5% more than 5 km.**
+- The change **grows with element age up to ~2 d** — median 0.22 km when the older element was
+  ≤ 6 h old, 1.27 km at 1–2 days — and only weakly with lead time (0.50 km at 4–8 h
+  ahead → 0.84 km at 20–24 h). Age is the knob, again.
+
+This is the same §3 kilometre-level uncertainty, seen from the inside: any single
+predicted miss distance from public elements is uncertain at about the kilometre level,
+which is why the output is a screening signal, not a risk number.
+
 ---
 
 ## 5. Therefore: screening, not collision avoidance

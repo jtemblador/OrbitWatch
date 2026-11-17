@@ -38,6 +38,18 @@ The number of possible pairs in a shell grows with the square of its population,
 
 That is a strong pattern, not a full explanation. In the last two weeks the band's population levelled off near 6,100 while its conjunctions kept climbing, and the neighbouring 475–500 km band saw conjunctions rise 11% while its Starlink count fell 17%. Satellites in transit crossing other shells, and three inclination groups now sharing one altitude, are plausible contributors that I have not tested.
 
+## Is it the screening box? No.
+
+The screening volume is picked by perigee: below 500 km a satellite gets the "LEO 1" ellipsoid (0.4 × 44 × 51 km), above it the smaller "LEO 2" one (0.4 × 25 × 25 km), and a pair uses the larger of the two. So a satellite lowered under 500 km is screened with roughly 3.6× the volume, which could inflate the count without any real crowding. We tested this by re-screening two archived catalogs' Starlinks for 24 hours with the production engine, once with their real volumes and once with every Starlink held in the LEO 2 box:
+
+| Volume policy | Jul 16 | Oct 29 | Growth |
+|---|---:|---:|---:|
+| Actual volumes | 4,670 | 12,219 | ×2.62 |
+| Starlink held in LEO 2 | 1,191 | 4,910 | ×4.12 |
+| Starlink forced into LEO 1 | 4,817 | 12,221 | ×2.54 |
+
+The actual-volume re-screens reproduce the archived Starlink–Starlink pair sets exactly (same pairs, both dates), so the setup matches production. With either box held fixed for every Starlink, the growth stays at or above the actual ×2.62: ×2.54 all in LEO 1, ×4.12 all in LEO 2. That makes sense: in these two catalogs 8,940 of 10,787 Starlinks were already below 500 km perigee in July and 10,839 of 11,159 by late October, so few satellites changed box, and a tighter box keeps only the closest approaches, which rise faster than linearly as a shell fills. An archive-wide estimate from each event's stored RTN offsets agrees: weekly medians grow ×2.11 with actual volumes and ×2.80 under a fixed LEO 2 box. **The rise is crowding, not a change of screening volume.** Reproduce with `scripts/box_confounder.py`.
+
 ## What it does and does not mean
 
 A flagged conjunction is a geometric close approach inside a screening volume, not a predicted collision. In a Starlink–Starlink pair, one operator flies both satellites, using an autonomous collision-avoidance system; SpaceX reports hundreds of thousands of avoidance maneuvers a year to the FCC. The doubling is mostly extra coordination work inside SpaceX's own fleet, accepted in exchange for faster cleanup of dead satellites. The count that measures exposure for other operators, Starlink–other, went slightly down.
@@ -46,15 +58,15 @@ A flagged conjunction is a geometric close approach inside a screening volume, n
 
 [OrbitWatch](https://jtemblador.github.io/OrbitWatch/) is a conjunction screener built on a from-scratch C++ SGP4 propagator. Three times a day a GitHub Actions job fetches CelesTrak's "active" catalog (about 16,800 objects), screens 24 hours ahead on a 30-second grid using the screening volumes from the 18th/19th SDS Spaceflight Safety Handbook (LEO and GEO; MEO and HEO objects are shown but not screened), publishes the result to the live site, and archives a gzipped copy to an orphan `data` branch. On epoch-matched elements the screener reproduces CelesTrak's SOCRATES to 0.000 km.
 
-This analysis reads all 318 archived snapshots (July 8 – October 29); screen settings were identical in the 296 it uses. Altitude is orbit-averaged (from mean motion, above Earth's equatorial radius), so it won't match SpaceX's round shell numbers; on this scale the lowered shells settle at 460–475 km. "Starlink" means the object name starts with STARLINK; a pair's altitude is the average of its two objects'.
+This analysis reads all 318 archived snapshots (July 8 – October 29); screen settings were identical in the 296 it uses. Altitude is orbit-averaged (from mean motion, above Earth's equatorial radius), so it won't match SpaceX's round shell numbers; on this scale the lowered shells settle at 460–475 km. "Starlink" means the object name starts with the word STARLINK (the same rule as the live site's constellation filter); a pair's altitude is the average of its two objects'.
 
-To reproduce: `git fetch origin data && python scripts/analyze_archive.py` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
+To reproduce: `git fetch origin data && python scripts/archive_analysis.py trends --ref origin/data --until 2026-10-29T01:00` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
 
 ## Caveats
 
 - **Screening, not risk.** No covariance means no probability of collision. These are geometric flags.
 - **Element accuracy.** Public SGP4 elements are good to roughly 1 km at epoch and degrade by a few km per day, so any single miss distance is uncertain at the kilometre level. The trends aggregate about 3.5 million flagged events over 296 runs (windows overlap, so many are one encounter seen repeatedly).
-- **Counts depend on the volume.** Other screening volumes give other absolute counts; compare trends, not totals, across tools.
+- **Counts depend on the volume.** Other screening volumes give other absolute counts; compare trends, not totals, across tools. The LEO 1 box sets the *level*: 64–72% of Starlink–Starlink events would not be flagged under the smaller LEO 2 box. It does not drive the *growth* (see above).
 - **Excluded runs.** The first 22 snapshots (July 8–14) screened only 5,000 objects and are left out.
 - **Gaps and noise.** 24 of 319 eight-hour cron slots (7.5%) have no snapshot, chiefly from CelesTrak fetch failures. Single runs are noisy (the last week ranged from 12,829 to 18,998 events), so the comparisons use weekly medians.
 - **Correlation, not mechanism.** The archive shows the same satellites moving and conjunctions rising with the square of the band's population. It cannot show intent, and the late-October rise says headcount is not the only driver.

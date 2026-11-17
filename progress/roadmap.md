@@ -234,7 +234,122 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
 
 **✅ Done — Phase 10 complete.** The full active catalog (~16 k) screens in the CI job within budget (~10 min cron / ~50 min gated, 5.4 GB), **events byte-identical** to the unfiltered cascade (proven in CI), and the live site shows the lifted cap with a smooth conjunction-first UI.
 
+---
+
+## Phase 11: Analyst-Grade Screening — Trust, Blind Spots, Archive Analytics (planned Nov 17)
+
+> **Why.** A 4-month archive review (374 snapshots, Jul 8 – Nov 17) plus an analyst-perspective pass
+> found the pipeline healthy (29/30 recent runs green; the one failure was a GitHub Pages-artifact
+> outage) but surfaced things an SSA analyst would challenge before trusting the event list:
+> - **The growth is all Starlink-vs-Starlink** — ~4.9k → ~12k/run (58% → 75% share); Starlink-vs-other
+>   flat at 2.4–2.9k; other-vs-other ~450. 95% of events sit in the 450–500 km bands.
+> - **Prediction stability, corrected:** 49% of consecutive re-predictions reuse identical elements
+>   (Δmiss ≈ 0), which deflates 9.10's "median 0.3–0.5 km". Fresh-element re-predictions: **median
+>   0.64 km, 41% > 1 km, 12.5% > 5 km**; grows with element age up to ~2 d (0.22 → 1.27 km from ≤6 h to 1–2 d),
+>   barely with lead time.
+> - **Event element age is fine (median 0.9 d, p95 1.3–1.7 d, 0.4% > 3 d)** — the 17–30 d
+>   `max_epoch_age_days` is one stale object and says nothing about event quality.
+> - **Horizon pile-up:** 34.5% of TCAs land in the last hour of the 24 h window (only 17 within the last
+>   minute) — slowly converging pairs whose true closest approach is *past* the horizon.
+> - **Formations reported as conjunctions:** TerraSAR-X/TanDEM-X is in 365/374 snapshots (miss 0.12 km,
+>   v_rel 0.0 km/s) — cross-launch suppression needs < 50 m, so it slips through.
+> - **Possible measurement confounder:** a Starlink lowered below 500 km perigee moves LEO 2 → LEO 1
+>   (0.4×25×25 → 0.4×44×51 km, ~3.6× the volume). Part of the ×2.3 rise may be the box, not crowding.
+> - **External sanity check (press-reported FCC filings, unverified against primaries):** Starlink's own
+>   avoidance maneuvers grew ~+40%/half-year — our ~2× in 4 months is steeper, so the confounder matters.
+>
+> **Blind spots (all honest, some undocumented):** no debris / rocket bodies; MEO/HEO shown not
+> screened; no covariance → no Pc; SGP4 elements, not SP ephemeris; **no maneuver awareness** (Starlink
+> maneuvers autonomously); 24 h horizon vs the 7-day operational / SOCRATES standard.
+>
+> Draft analysis (scripts + PNGs, not yet in the repo) lives in the session scratchpad — 11.1 ports it.
+
+### 11.0 Trust fixes — make each event honest (small, do first)
+- [x] **11.0a Per-event element age** *(done — `age_a_d`/`age_b_d`; > 3 d dimmed + tagged, 0.33% of events)* — add `age_a_d`/`age_b_d` (days at `generated_at`) to each
+  conjunction in `snapshot.py`; show it in the detail panel; grey out / tag events where either is
+  > 3 d ("low confidence"). *Done when:* field in snapshot + UI, test locks the computation.
+- [x] **11.0b Horizon flag** *(done, redesigned — the range-rate-sign test measured out as near-useless (51.9% vs 39.5%); shipped `annotate_horizon`: re-screen last-hour participants 130 min past the end, flag if the pair passes closer → 24.7% flagged, +~36 s/cron, annotation-only)* — mark events whose TCA is within ~1 h of the window end AND whose range
+  is still decreasing at the boundary as `"beyond_horizon": true` ("closest approach after window;
+  miss is an upper bound"). UI shows "≥" on the miss. *Done when:* the 34% pile-up is labeled, not
+  hidden; byte-identical screening otherwise (A/B gate unaffected).
+- [x] **11.0c Formation / persistent-pair flag** *(done — `runs` linked on pair (formation TCAs jump hours), bootstraps from `hist`; archive replay flags only TerraSAR-X/TanDEM-X; hidden by default, filtered before the cap)* — use the `--prev` chain (already carries pair
+  identity run-to-run) to count consecutive appearances; pairs present ≥ 9 runs (~3 d) with
+  |Δmiss| small and v_rel < ~10 m/s get `"persistent": true` and are hidden by default behind a toggle
+  (like same-constellation). Do NOT loosen the 7.2 suppression rule — label, don't drop.
+- [ ] **11.0d Confidence tiers instead of "close calls"** — replace the raw < 1 km count with tiers
+  that combine miss (< 1 km = SFS emergency, < 5 km = SOCRATES) **and** element age; label "screening
+  tier", never "risk".
+- [x] **11.0e Doc corrections** *(done Nov 17 — dated correction notes in CLAUDE.md, key_information, the 9.10 log; `sgp4_uncertainty.md` §4b; README states debris/maneuver/MEO-HEO limits)* — fix the 9.10 Δmiss figure (identical-element re-predictions) in
+  `key_information.md`, the 9.10 task log, and `sgp4_uncertainty.md`; state the debris exclusion and
+  "no maneuver awareness" explicitly in the README/write-up.
+
+### 11.1 Archive analytics — the graphs (portfolio piece)
+- [x] **11.1a `scripts/archive_analysis.py`** *(done — offline, byte-identical reruns, 24 mutation-checked tests, `docs/findings/archive_metrics.json`)* — port the scratchpad flattener (`git archive origin/data`
+  → events parquet) + metrics; deterministic, offline; replaces the current `plot_archive_trends.py`.
+- [x] **11.1b Three figures** *(done — `docs/img/archive-{dmiss-vs-age,events-by-class,element-age}.png`; verified: fresh-element |Δmiss| median 0.644 km, p90 6.0 km; growth = Starlink–Starlink 5,154→10,866/run (×2.11); lead-time dependence is weak, not flat)* → `docs/img/`: (1) **Δmiss vs element age** with lead time alongside
+  (the empirical error bar); (2) **stacked events over time by pair class** (Starlink-Starlink /
+  Starlink-other / other-other); (3) **event element age (median/p95) vs catalog max**. Drop the
+  < 1 km panel. Optional: relative-speed by pair class, altitude histogram.
+- [x] **11.1c Confounder test** *(done — re-screen Jul 16 / Oct 29 Starlinks: actual 4,670→12,219 (×2.62), held in LEO 2 1,191→4,910 (×4.12), forced LEO 1 4,817→12,221 (×2.54); actual re-screens reproduce archived pair sets exactly → **crowding, not the box**; written up in the findings doc)* — re-screen one current catalog with Starlink forced to the LEO 2 box
+  and compare counts → how much of the ×2.3 is box-size vs crowding. Update
+  `docs/findings/starlink-shell-lowering.md` with the answer before publishing it.
+- [x] **11.1e Consolidate the archive scripts** *(done Nov 17 — `archive_analysis.py trends` (dir or `--ref`, `--until UTC`); old script deleted; write-up numbers unchanged (CSV row-set identical, figures pixel-identical vs the old script); the old `--until 2026-10-29` pin was 2 runs too wide → `2026-10-29T01:00`; +13 tests)* — fold
+  `scripts/analyze_archive.py`'s altitude-band / band-crowding measures into `archive_analysis.py`
+  (shared loader + `constellation_of`), delete the old script, update its references (CLAUDE.md, the
+  Starlink write-up's reproduce line, task_11_1). Today both agree; two definitions of "Starlink" drift.
+- [ ] **11.1d 9.11 stats page** (absorbs 9.11) — publish the figures + one-sentence findings on the
+  site, regenerated by the cron from a small `stats.json` (no per-visit compute).
+
+### 11.2 Blind spots — capability work (ordered by value / effort)
+- [x] **11.2a Maneuver detection** *(DONE Nov 17 — `backend/core/maneuvers.py` incremental port, oracle-locked; real-archive replay 169,484 == causal oracle (diff 0; the as-is prototype differs by 1.7%, all out-of-order sets it sorts with hindsight); ISS 2/2, passive 0; per-event `mnv_h`/`mnv_who` + detail-panel tag; state in a `maneuver_state.json` sidecar (0.65 MB gz, never downloaded by the site; +0.8% snapshot gz for the labels); seeded from the last 180 archive records when missing — see `task_logs/task_11_2a_maneuver_detection.md`. Was: prototype GO, Nov 17 — `progress/week11_planning/maneuver/spec.md`: label-only; tagged events |Δmiss| 1.98 vs 0.62 km untagged; 0 FPs on 10 passive objects; catches only 13% of >5 km jumps → UI must not imply untagged = stable. Implementation pending, after 11.0)* — compare each object's elements to its previous run's (already in
+  `--prev`/archive): a semi-major-axis or mean-motion step beyond the drag-expected trend flags
+  "maneuvered in last N h"; events involving it get a "prediction may be stale" tag. Validate on known
+  Starlink orbit-raising batches. Cheap, high analyst value.
+- [x] **11.2b Continuous SOCRATES agreement in the cron** *(done Nov 17 — `meta.socrates` via `socrates_monitor.agreement_block` + `build_snapshot.py --socrates`, non-fatal; both-way rates on the fair slice (screened pop, window overlap, SOCRATES ≤ 0.4 km closest-per-pair vs ours < 5 km); freshness-line "SOCRATES overlap"; live numbers unverified until the first cron on main — `task_logs/task_11_2b_socrates_monitoring.md`)* — each rebuild matches our events against the
+  latest SOCRATES CSV (the 8.2 `match_events`, already built) and records reproduction rate + Δ stats in
+  `meta.run` → a trend line on the stats page. Turns one-time validation into monitoring.
+- [ ] **11.2c Longer horizon** — measure 72 h on the cron (24 h ≈ 12 min → est. ~35 min); if it fits,
+  ship 72 h (also shrinks the 11.0b pile-up). 7 days stays out of budget.
+- [ ] **11.2d Covariance-free bound** — Alfano maximum-Pc (what SOCRATES reports as MAX_PROB) from miss
+  + hard-body radius; label "maximum possible Pc (worst-case covariance)", never "Pc". Verify the formula
+  against the primary paper first.
+- [ ] **11.2e MEO/HEO screening** — no SFS handbook volume exists; screen them with a SOCRATES-style
+  5 km Euclidean mode, clearly labeled non-handbook.
+- [x] **11.2h Release build of the engine** *(review find, Nov 17)* — CI/deploy ran `cmake` with no
+  build type → **no `-O` flag at all**. `CMakeLists.txt` now defaults to Release (`-O3 -DNDEBUG`; no
+  `assert`s in the source). Full catalog 24 h: **688.7 → 242.1 s (2.8×)**, medium 601 → 178 s,
+  `annotate_horizon` 35 → 16 s, **events byte-identical (15,312 == 15,312)**, peak RSS unchanged
+  (7.08 GB). Pytest 36 → 16 s. Profile at -O3: sieve setup 56 s (single-threaded), medium scan 130 s
+  (1.48 B pair evaluations; propagation only 21 s), C++ refine 31–60 s, Python fine ~4.5 s.
+  **Per-sat propagation refcount: measured out** (every sat has an active pair at nearly every step →
+  47.4 M propagations either way, 176.8 vs 177.5 s) — dropped as a lever.
+  Next levers, not built: multi-thread the sieve interval build (~40 s on 4 cores, deterministic join);
+  **compact the pair list after the sieve** (53 M dropped pairs still hold ~49 B each → ~2.6 GB of the
+  7.08 GB peak) — a prerequisite for 11.2f.
+- [ ] **11.2f Debris + rocket bodies (largest lift)** — screen active payloads *against* debris/R-B
+  (primary-vs-secondary, ~2× pairs not ~4×) with streamed/blocked pair processing so it fits 16 GB.
+  Same byte-identical A/B gate discipline as Phase 10. Fetch via Space-Track bulk `gp` (10.10).
+- [ ] **11.2g `cdm_public` cross-method check** (absorbs 8.6) — do our SGP4 screens flag the events
+  that the SP pipeline issues public CDMs for?
+
+### 11.3 Ops & hygiene
+- [x] **11.3a Offline test fixtures** *(done — 28-object frozen stations fixture + conftest; geodetic path no longer loads unused SPICE kernels; fresh offline clone 147 broken → 673 passed / 5 skipped)* — 147 tests fail on a fresh clone with no network (no catalog
+  cache, no SPICE kernel; both gitignored). Commit a small frozen stations fixture + fetch the kernel
+  in a setup step, or skip cleanly with a reason.
+- [x] **11.3b Deploy-step retry** *(done — continue-on-error upload + 120 s wait + one retry under `github-pages-retry`; actionlint-clean, not yet exercised on GitHub)* — the Nov 11 failure was `upload-pages-artifact` getting HTML from
+  GitHub; one guarded retry (or a re-run-on-failure job) avoids a missed refresh.
+- [ ] **11.3c Archive retention decision** (from Backlog) — slim rate crosses GitHub's 1 GB guidance
+  ~May 2027; decide: prune pre-10.10 full snapshots (history rewrite) or move the archive to a release
+  asset / external bucket.
+- [x] **11.3d Flaky micro-benchmark** *(done — `test_batch_equals_python_loop`)* (from Backlog) — drop the timing assert, keep the equality check.
+
+**Next action steps (in order):** 11.0a → 11.0b → 11.0c (one snapshot-schema bump, one review round)
+→ 11.1a/b/c (figures + confounder answer) → 11.0e docs → 11.2a maneuver detection → 11.2b SOCRATES
+monitoring → 11.2c horizon → 11.3a/b → then the big one, 11.2f debris.
+
 ## Backlog (future, unscheduled)
+> Debris (→ 11.2f), archive retention (→ 11.3c), the flaky benchmark (→ 11.3d) and `cdm_public`
+> (→ 11.2g) are now scheduled in Phase 11; entries kept below for their measurements.
 - **Debris + rocket-body collision screening** — *measured 10.10:* the full Space-Track catalog (32,816 objects: 10,376 debris + 2,212 rocket bodies + payloads) does **not fit 16 GB** with the current engine — a 24 h screen thrashed for an hour (340 s CPU vs 2,345 s system) and never finished; ~5.4e8 candidate pairs × ~40 B of scan state ≈ 20 GB. Needs streamed/blocked pair processing (or screening only active payloads *against* debris, which is ~2× the pairs rather than ~4×) before it can run in CI.
 - **`data`-branch archive retention** — *partly done in 10.10:* new archive files are the slim record (~2.5 MB/day, was ~4.5). The 318 pre-10.10 full snapshots (480 MB) stay as-is unless the branch history is rewritten (force-push — deliberately not done; needs a decision). At the slim rate the repo passes GitHub's 1 GB guidance around May 2027.
 - **Flaky micro-benchmark: `TestPropagateBatch::test_batch_faster_than_python_loop`** — asserts `t_batch < t_loop * 1.10` on two ~2–4 ms measurements. Observed failing **once in ~8 full-suite runs** (2026-08-18, machine under load: batch 4.4 ms vs loop 1.8 ms — a scheduling artifact, not a real regression); 0/10 when run in isolation, so it needs the full suite's interleaving to trip. The test already uses best-of-N and a 10% tolerance and its own comment flags the timing-race risk, so the fix is to stop asserting at that timescale: either raise the workload until each measurement is ~100 ms+, or drop the timing assert and keep only the (unconditional, genuinely valuable) `batch_result == loop_result` correctness check plus the printed ratio. Pre-existing, unrelated to 9.10 — but it undermines the per-task "3× flake-clean" convention, since a clean 3× is partly luck.
