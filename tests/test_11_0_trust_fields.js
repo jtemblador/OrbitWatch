@@ -124,7 +124,7 @@ console.log("rendering");
         plain.includes(">0.12 km<") && !plain.includes("≥") && !plain.includes("title="));
   const ub = missHtml({ miss_distance_km: 4.25, beyond_horizon: true }, 1);
   check("beyond-horizon miss: '≥ X km' + upper-bound tooltip",
-        ub.includes("≥ 4.3 km") && ub.includes("upper bound") && ub.includes("beyond-horizon"));
+        ub.includes("≥ 4.25 km") && ub.includes("upper bound") && ub.includes("beyond-horizon"));
   check("age text: hours under a day, days above, ? when unknown",
         ageText(0.5) === "12 h" && ageText(1.25) === "1.3 d" && ageText(null) === "?");
   const pre = { sat1_age_d: null, sat2_age_d: null, persistent: false, runs: null };

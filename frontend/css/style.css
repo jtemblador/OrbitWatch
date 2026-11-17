@@ -330,8 +330,8 @@ html, body, #cesiumContainer {
 }
 
 /* 11.0 trust annotations */
-.conjunction-row.stale,
-.cd-row.stale {
+.conjunction-row.stale:not(.focused),
+.cd-row.stale:not(.focused) {
   opacity: 0.55;               /* stale elements: de-emphasized, not hidden */
 }
 .conjunction-meta > span {

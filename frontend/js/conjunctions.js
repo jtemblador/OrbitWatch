@@ -64,7 +64,9 @@ const STALE_TIP =
 /** Miss distance as an HTML span: threat-colored, and "≥ X km" with a tooltip
  *  when the closest approach lies past the window end (11.0b). */
 function missHtml(e, digits) {
-  const km = `${e.miss_distance_km.toFixed(digits)} km`;
+  // An upper bound needs enough digits to stay meaningful ("≥ 0.0 km" isn't).
+  const d = e.beyond_horizon ? Math.max(digits, 2) : digits;
+  const km = `${e.miss_distance_km.toFixed(d)} km`;
   const color = `color:${missColor(e.miss_distance_km)}`;
   if (!e.beyond_horizon) return `<span class="conjunction-miss" style="${color}">${km}</span>`;
   return `<span class="conjunction-miss beyond-horizon" style="${color}"` +
@@ -781,8 +783,10 @@ function renderConjunctionList() {
   const pairsLabel = conjEvents.length < conjTotalCount
     ? `closest ${conjEvents.length} of ${conjTotalCount.toLocaleString()} ${noun}`
     : `${conjTotalCount.toLocaleString()} ${noun}`;
+  const hiddenLabel = conjHiddenCount
+    ? ` · ${conjHiddenCount.toLocaleString()} hidden by filters` : "";
   document.getElementById("conjunction-header").textContent =
-    `Conjunctions · ${pairsLabel} · ${satCount} sats`;
+    `Conjunctions · ${pairsLabel}${hiddenLabel} · ${satCount} sats`;
 
   const body = document.getElementById("conjunction-body");
   if (!conjEvents.length) {
@@ -1020,6 +1024,12 @@ snapshotReady.then(() => {
   // How many the toggle governs, in the FULL snapshot (0 in a pre-11.0 one).
   document.getElementById("conj-persistent-count").textContent =
     ` (${snapshotPersistentTotal.toLocaleString()})`;
+  // A pre-11.0 snapshot has no `persistent` flags: a checked toggle that can do
+  // nothing would mislead, so hide it until the data carries the field.
+  if (snapshotPersistentTotal === 0) {
+    const label = hidePersist.closest("label");
+    if (label) label.hidden = true;
+  }
   renderConjunctionList();
   renderFreshness();
   setInterval(renderFreshness, 60000); // the age ticks while the tab stays open
