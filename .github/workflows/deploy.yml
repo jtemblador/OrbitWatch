@@ -95,6 +95,11 @@ jobs:
       contents: write
       pages: write
       id-token: write
+    # Which Pages artifact to deploy: attempt 1's `github-pages`, or the retry's
+    # name if attempt 1 failed (see "Upload site artifact" below). The deploy job
+    # only runs when build succeeded, i.e. when one of the two uploads did.
+    outputs:
+      pages_artifact: ${{ steps.upload.outcome == 'success' && 'github-pages' || 'github-pages-retry' }}
     steps:
       # fetch-depth 50: enough history for the "recent engine change" check below
       # (the git log --since needs commits, not just the shallow tip).
@@ -431,10 +436,38 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v6
 
+      # One guarded retry (11.3b). On 2026-11-11 this step died with "Failed to
+      # CreateArtifact ... Unexpected token '<'" — GitHub's artifact service
+      # answered HTML for ~10 min (the action's own 5 internal retries all hit
+      # it) and the run missed a refresh. So: attempt 1 is continue-on-error,
+      # and only if it failed do we wait and try once more. The retry uploads
+      # under a DIFFERENT artifact name: if attempt 1 got as far as creating its
+      # `github-pages` artifact before failing, re-using the name could collide,
+      # and a distinct name sidesteps that without relying on overwrite
+      # semantics. The `deploy` job publishes whichever one succeeded (the
+      # `pages_artifact` job output). If the retry fails too, it fails the job
+      # (no continue-on-error) → the archive step and the deploy job are
+      # skipped, exactly as a single failed upload did before.
       - name: Upload site artifact
+        id: upload
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v5
         with:
           path: frontend
+
+      - name: Wait before retrying the site artifact upload
+        if: steps.upload.outcome == 'failure'
+        run: |
+          echo "::warning::Site artifact upload failed (attempt 1) — retrying once in 120 s under the name github-pages-retry."
+          sleep 120
+
+      - name: Upload site artifact (retry)
+        id: upload_retry
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend
+          name: github-pages-retry
 
       # (Runs AFTER the site artifact is built, so a failure in token injection /
       # configure / upload can't leave an archive record of a snapshot that was
@@ -555,3 +588,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: ${{ needs.build.outputs.pages_artifact }}

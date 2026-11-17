@@ -12,7 +12,8 @@ This skips polar motion corrections (~10m) and equation of equinoxes (~30m), bot
 well within SGP4's inherent ~1 km accuracy at epoch.
 
 SPICE is used only for the final ECEF→geodetic conversion (recgeo), which needs
-the Earth's shape model (flattening, equatorial radius).
+the Earth's shape model (flattening, equatorial radius) — passed explicitly, so
+no kernel files are required.
 
 References:
     - Vallado, "Revisiting Spacetrack Report #3" (AIAA 2006-6753), Section 3
@@ -22,7 +23,6 @@ References:
 
 import math
 from datetime import datetime
-from pathlib import Path
 
 import spiceypy as sp
 
@@ -32,31 +32,12 @@ import spiceypy as sp
 EARTH_RADIUS_WGS84 = 6378.137      # km (equatorial radius)
 EARTH_FLATTENING = 1.0 / 298.257223563
 
-# SPICE kernel paths
-_KERNEL_DIR = Path(__file__).parent.parent / "data" / "spice_kernels"
-_KERNELS_LOADED = False
-
-
-def _ensure_kernels():
-    """Load SPICE kernels once. Idempotent — safe to call repeatedly."""
-    global _KERNELS_LOADED
-    if _KERNELS_LOADED:
-        return
-
-    kernels = [
-        _KERNEL_DIR / "naif0012.tls",      # leap seconds
-        _KERNEL_DIR / "pck00011.tpc",       # planetary constants
-        _KERNEL_DIR / "earth_latest_high_prec.bpc",  # Earth orientation
-    ]
-    for k in kernels:
-        if not k.exists():
-            raise FileNotFoundError(
-                f"SPICE kernel not found: {k}\n"
-                "Run the setup script to download kernels."
-            )
-        sp.furnsh(str(k))
-
-    _KERNELS_LOADED = True
+# No SPICE kernels are needed here (11.3a): recgeo is pure geometry on the
+# ellipsoid passed in as arguments (re, f) and never reads the kernel pool.
+# The three NAIF generic kernels this module used to furnsh() at first use were
+# loaded but never consulted, and their absence (they are gitignored) failed
+# every geodetic call on a fresh clone. tests/test_spice.py still exercises
+# kernel loading itself when they are provisioned (CI downloads them).
 
 
 def gmst_from_jd(jd: float) -> float:
@@ -161,7 +142,6 @@ def ecef_to_geodetic(pos_ecef: list[float]) -> tuple[float, float, float]:
     Returns:
         (lat_deg, lon_deg, alt_km) — latitude/longitude in degrees, altitude in km
     """
-    _ensure_kernels()
     lon_rad, lat_rad, alt_km = sp.recgeo(pos_ecef, EARTH_RADIUS_WGS84, EARTH_FLATTENING)
     return math.degrees(lat_rad), math.degrees(lon_rad), alt_km
 

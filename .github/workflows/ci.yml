@@ -83,12 +83,12 @@ jobs:
           make -j"$(nproc)"
           cp orbitcore*.so ../../backend/
 
-      # The geodetic-transform tests (SPICE recgeo) need the NAIF generic kernels,
-      # which live under the gitignored backend/data/ and aren't in the checkout.
-      # Fetch the same three the app loads (~5 MB) so the full suite runs. If NAIF
-      # is unreachable the step fails loudly here (a clear "provisioning" error,
-      # not a confusing test failure); test_spice.py additionally skips itself if a
-      # kernel is still missing, so a hiccup can't crash collection.
+      # Only tests/test_spice.py needs the NAIF generic kernels (it exercises
+      # kernel loading itself; it skips cleanly without them). The geodetic
+      # transform no longer loads any (11.3a — recgeo never read them). They live
+      # under the gitignored backend/data/, so fetch the three (~5 MB) to keep
+      # that module running in CI. If NAIF is unreachable the step fails loudly
+      # here (a clear "provisioning" error, not a confusing test failure).
       - name: Provision SPICE kernels (NAIF generic)
         run: |
           mkdir -p backend/data/spice_kernels
@@ -99,14 +99,10 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 2 -O "$base/pck/earth_latest_high_prec.bpc"
           ls -la
 
-      # The suite's default dataset is the cached `stations` group (ISS-based,
-      # ~30 objects). Like the SPICE kernels it lives under the gitignored
-      # backend/data/, so the API/propagator tests error with "No cached data for
-      # group 'stations'" until it's populated. Fetch it once (the same CelesTrak
-      # path the A/B gate uses for `active`); census asserts were made
-      # catalog-relative in 9.9, so a live count is fine.
-      - name: Provision the stations test catalog
-        run: python -c "from backend.core.tle_fetcher import GPFetcher; d=GPFetcher().fetch('stations'); print(f'cached {len(d)} stations objects')"
+      # No catalog provisioning for the suite (11.3a): tests/conftest.py points
+      # the fetcher at a frozen `stations` fixture (tests/fixtures/), so pytest
+      # is offline + deterministic and no longer fails when CelesTrak is down.
+      # Live data is still exercised below by the A/B gate's `active` fetch.
 
       # Fast fail: the suite (incl. the mutation-checked TestFlipContract locks)
       # runs in well under a minute. Catches most engine regressions before we pay
