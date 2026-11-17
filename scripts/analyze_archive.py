@@ -260,9 +260,14 @@ def main() -> None:
     ap.add_argument("--min-sats", type=int, default=15000,
                     help="skip snapshots with fewer objects (the capped Jul 8–14 runs)")
     ap.add_argument("--no-figures", action="store_true", help="CSV + summary only")
+    ap.add_argument("--until", metavar="YYYY-MM-DD",
+                    help="only snapshots generated on or before this UTC date "
+                         "(the Starlink write-up is pinned to --until 2026-10-29)")
     args = ap.parse_args()
 
     paths = list_snapshots(args.ref)
+    if args.until:
+        paths = [p for p in paths if os.path.basename(p)[:10] <= args.until]
     rows, skipped, ends = [], [], {}
     for i, path in enumerate(paths, 1):
         print(f"\rreading {i}/{len(paths)}", end="", file=sys.stderr)

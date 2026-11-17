@@ -410,7 +410,7 @@ def render(metrics: dict, s: dict, img_dir: str) -> list[str]:
     _header(fig, "Prediction change tracks element age far more than lead time",
             f"|Δmiss| between consecutive runs (≤ 12 h apart) when new elements arrived: "
             f"{st['fresh_n']:,} re-predictions.\n{st['identical_elements_pct']:.0f}% of re-predictions "
-            f"reused identical elements (Δmiss ≡ 0) and are excluded.")
+            f"reused identical elements (Δmiss ≈ 0) and are excluded.")
     panels = ((ax, "fresh_by_age_d", "Older element of the pair at the earlier run (days)", SERIES[0]),
               (ax2, "fresh_by_lead_h", "Lead time of the earlier prediction (hours)", MUTED))
     for a, key, xl, col in panels:

@@ -60,13 +60,13 @@ A flagged conjunction is a geometric close approach inside a screening volume, n
 
 This analysis reads all 318 archived snapshots (July 8 – October 29); screen settings were identical in the 296 it uses. Altitude is orbit-averaged (from mean motion, above Earth's equatorial radius), so it won't match SpaceX's round shell numbers; on this scale the lowered shells settle at 460–475 km. "Starlink" means the object name starts with STARLINK; a pair's altitude is the average of its two objects'.
 
-To reproduce: `git fetch origin data && python scripts/analyze_archive.py` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
+To reproduce: `git fetch origin data && python scripts/analyze_archive.py --until 2026-10-29` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
 
 ## Caveats
 
 - **Screening, not risk.** No covariance means no probability of collision. These are geometric flags.
 - **Element accuracy.** Public SGP4 elements are good to roughly 1 km at epoch and degrade by a few km per day, so any single miss distance is uncertain at the kilometre level. The trends aggregate about 3.5 million flagged events over 296 runs (windows overlap, so many are one encounter seen repeatedly).
-- **Counts depend on the volume.** Other screening volumes give other absolute counts; compare trends, not totals, across tools.
+- **Counts depend on the volume.** Other screening volumes give other absolute counts; compare trends, not totals, across tools. The LEO 1 box sets the *level*: 64–72% of Starlink–Starlink events would not be flagged under the smaller LEO 2 box. It does not drive the *growth* (see above).
 - **Excluded runs.** The first 22 snapshots (July 8–14) screened only 5,000 objects and are left out.
 - **Gaps and noise.** 24 of 319 eight-hour cron slots (7.5%) have no snapshot, chiefly from CelesTrak fetch failures. Single runs are noisy (the last week ranged from 12,829 to 18,998 events), so the comparisons use weekly medians.
 - **Correlation, not mechanism.** The archive shows the same satellites moving and conjunctions rising with the square of the band's population. It cannot show intent, and the late-October rise says headcount is not the only driver.

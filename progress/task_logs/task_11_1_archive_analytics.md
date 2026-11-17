@@ -28,9 +28,9 @@ three questions the site couldn't answer: how much do predictions move run to ru
 ## Measured
 | Metric | Value |
 |---|---|
-| Re-predictions reusing identical elements | **49.4%** (Δmiss p99 0.006 km; one outlier 7.9 km) |
+| Re-predictions reusing identical elements | **49.4%** (Δmiss ≈ 0: p99 0.006 km; 121 of 332,354 > 0.1 km and 16 > 1 km, max 7.9 km — likely a different encounter linked within ±900 s) |
 | Fresh-element \|Δmiss\| | median **0.644 km**, p90 6.0 km, 41% > 1 km, 12.5% > 5 km |
-| …by element age | 0.22 km (≤ 6 h) → 1.27 km (1–2 d) |
+| …by element age | 0.22 km (≤ 6 h) → 1.27 km (1–2 d); flat-to-lower beyond 2 d (0.99 / 0.93 km, small bins) |
 | …by lead time | 0.50 km (4–8 h) → 0.84 km (20–24 h) — **weak, not flat** (corrects the draft) |
 | < 1 km predictions re-matched on fresh elements | 56% stay < 1 km, 11% move > 5 km |
 | Growth by pair class (week Jul 15–21 → Nov 10–17 medians) | Starlink–Starlink 5,154 → 10,866 (×2.11, 60% → 76% share); Starlink–other 2,986 → 2,869; other–other 426 → 480 |

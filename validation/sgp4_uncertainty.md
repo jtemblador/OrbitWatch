@@ -87,12 +87,12 @@ for the same pair (TCA within ±900 s, runs ≤ 12 h apart) over the archived sn
 Jul 15 – Nov 17, 2026 (352 runs; `scripts/archive_analysis.py`):
 
 - **49% of re-predictions reuse identical elements** for both objects — no new elset had
-  been issued — and their Δmiss is ≡ 0. They measure nothing, so they are excluded.
+  been issued — and their Δmiss is ≈ 0 (p99 0.006 km). They measure nothing, so they are excluded.
   *(An earlier statement of this measurement, in 9.10, pooled them and reported a
   median of 0.3–0.5 km; that figure is superseded.)*
 - On the 340,481 re-predictions where new elements arrived: **|Δmiss| median 0.64 km,
   p90 6.0 km; 41% moved more than 1 km, 12.5% more than 5 km.**
-- The change **grows with element age** — median 0.22 km when the older element was
+- The change **grows with element age up to ~2 d** — median 0.22 km when the older element was
   ≤ 6 h old, 1.27 km at 1–2 days — and only weakly with lead time (0.50 km at 4–8 h
   ahead → 0.84 km at 20–24 h). Age is the knob, again.
 
