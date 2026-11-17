@@ -669,6 +669,121 @@ def run_screen(
     return events
 
 
+# 11.0b horizon annotation. A window-limited screen reports each pair's closest
+# approach INSIDE the window. 34.5% of archived TCAs land in the last hour of the
+# 24 h window: mostly co-altitude pairs still converging orbit to orbit, whose
+# next node pass (~47 min later at LEO) is closer still. For those the reported
+# miss is only the window's best — an upper bound — so it is labeled.
+HORIZON_NEAR_S = 3600.0        # a TCA this close to the window end qualifies
+# How far past the end we look for a closer pass. A pair converging orbit to
+# orbit meets again at the SAME node one period after its TCA, so the look-ahead
+# must reach TCA + one period from the earliest qualifying TCA (end - near_s):
+# 130 min covers every LEO period (<= ~127 min at 2,000 km). Longer periods
+# (GEO) are not covered — for them an absent flag makes no claim.
+HORIZON_LOOKAHEAD_S = 7800.0
+
+
+def _parse_utc(iso) -> datetime | None:
+    """ISO string -> aware UTC datetime (naive read as UTC), or None."""
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def annotate_horizon(events: list[dict], satrecs: list, meta: list[dict],
+                     start_utc: datetime, duration_hours: float,
+                     step_sec: float = _DEFAULT_STEP_SEC,
+                     near_s: float = HORIZON_NEAR_S,
+                     lookahead_s: float = HORIZON_LOOKAHEAD_S,
+                     **screen_kw) -> list[dict]:
+    """Flag events whose miss is beaten just PAST the window end (11.0b).
+
+    An event gets `beyond_horizon: True` when BOTH hold:
+      * its TCA is within `near_s` of the window end, and
+      * the same pair comes CLOSER than the reported miss within `lookahead_s`
+        after the window end — so the reported miss is not the pair's closest
+        approach, only the best the window could see (an upper bound).
+
+    The second test is a real screen, not a sign check: the candidates'
+    participants are re-screened over [end, end + lookahead] with the same
+    engine (run_screen, legacy Euclidean cut at the largest candidate miss — a
+    superset of every candidate's own cut), and each candidate is compared with
+    its pair's best post-horizon pass. Only the ~1/4–1/3 of events in the last
+    hour take part, over a ~2 h window, so it costs seconds, not minutes.
+
+    Why not the range-rate sign at the window end (the cheaper idea): measured
+    on a full 17k-event archived snapshot it barely discriminates — among the
+    4,656 last-hour events, a closer pass (2 s brute-force grid) followed within
+    1 h for 51.9% of the "still closing at the end" ones and 39.5% of the rest.
+    A co-altitude pair's range oscillates with the half-orbit node geometry, so
+    its sign at an arbitrary instant is mostly orbital phase, not the trend. The
+    look-ahead screen (1 h variant) left 4 of 2,238 unflagged events with a
+    grid-closer pass (0.2%, boundary cases). See task_11_0_trust_fixes.md.
+
+    Annotation only: never adds, drops, or edits a screened field — the main
+    screen's output (what the CI A/B gate compares) is untouched. Pure; returns
+    copies, with the key set ONLY on flagged events (absent otherwise). An
+    unflagged event makes no claim beyond the look-ahead.
+
+    Args:
+        events:    run_screen output (sat{1,2}_norad_id, tca, miss_distance_km).
+        satrecs, meta: the same index-aligned inputs the screen ran on.
+        start_utc, duration_hours, step_sec: the main screen's window + grid.
+        near_s, lookahead_s: qualifying distance from the end / look-ahead span.
+        **screen_kw: forwarded to the look-ahead run_screen (the fused/sieve/
+                   refine accelerators — event-identical either way).
+    """
+    if start_utc.tzinfo is None:
+        start_utc = start_utc.replace(tzinfo=timezone.utc)
+    end_utc = start_utc + timedelta(hours=duration_hours)
+    out = [dict(e) for e in events]
+
+    index = {m["norad_id"]: k for k, m in enumerate(meta)}
+    cand = []
+    for k, e in enumerate(events):
+        tca = _parse_utc(e.get("tca"))
+        miss = e.get("miss_distance_km")
+        if (tca is None or not isinstance(miss, (int, float))
+                or not math.isfinite(miss) or miss <= 0.0
+                or e.get("sat1_norad_id") not in index
+                or e.get("sat2_norad_id") not in index):
+            continue
+        if (end_utc - tca).total_seconds() <= near_s:
+            cand.append(k)
+    if not cand:
+        return out
+
+    ids = sorted({events[k][f] for k in cand
+                  for f in ("sat1_norad_id", "sat2_norad_id")})
+    sub_sat = [satrecs[index[i]] for i in ids]
+    sub_meta = [meta[index[i]] for i in ids]
+    # nextafter: the legacy cut is miss < threshold, so the largest candidate
+    # must still be able to see a pass equal to its own miss.
+    threshold = math.nextafter(max(events[k]["miss_distance_km"] for k in cand),
+                               math.inf)
+    ahead = run_screen(sub_sat, sub_meta, end_utc, lookahead_s / 3600.0,
+                       threshold_km=threshold, step_sec=step_sec, **screen_kw)
+
+    best: dict = {}
+    for a in ahead:
+        # The fine stage's edge-widen may step back over the boundary and
+        # re-find the in-window minimum itself — only passes AFTER the end count.
+        t = _parse_utc(a["tca"])
+        if t is None or t <= end_utc:
+            continue
+        key = frozenset((a["sat1_norad_id"], a["sat2_norad_id"]))
+        if a["miss_distance_km"] < best.get(key, math.inf):
+            best[key] = a["miss_distance_km"]
+    for k in cand:
+        e = events[k]
+        key = frozenset((e["sat1_norad_id"], e["sat2_norad_id"]))
+        if best.get(key, math.inf) < e["miss_distance_km"]:
+            out[k]["beyond_horizon"] = True
+    return out
+
+
 class ConjunctionScreener:
     """
     Orchestrates the conjunction cascade over a propagator's loaded catalog,
