@@ -28,6 +28,9 @@ import orbitcore
 
 from backend.core.propagator import SatellitePropagator, omm_to_sgp4_params, XPDOTP
 from backend.core.tle_fetcher import GPFetcher
+# "now" for station propagation = the loaded catalog's fetch time, not the wall
+# clock: the suite runs on a frozen fixture catalog that ages (11.3a, conftest.py).
+from fixture_catalog import catalog_now
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +294,7 @@ class TestSingleSatPropagation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.prop = SatellitePropagator()
-        cls.now = datetime.now(timezone.utc)
+        cls.now = catalog_now()
 
     def test_iss_altitude(self):
         """ISS altitude should be ~400-435 km."""
@@ -420,7 +423,7 @@ class TestErrorHandling(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.prop = SatellitePropagator()
-        cls.now = datetime.now(timezone.utc)
+        cls.now = catalog_now()
 
     def test_unknown_satellite_raises_keyerror(self):
         """Requesting an unknown satellite should raise KeyError."""
@@ -473,7 +476,7 @@ class TestBatchPropagation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.prop = SatellitePropagator()
-        cls.now = datetime.now(timezone.utc)
+        cls.now = catalog_now()
         cls.results, cls.errors = cls.prop.get_all_positions(cls.now)
 
     def test_all_stations_propagate(self):
@@ -545,7 +548,7 @@ class TestMultiTimePropagation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.prop = SatellitePropagator()
-        cls.now = datetime.now(timezone.utc)
+        cls.now = catalog_now()
 
     def test_ground_track_over_one_orbit(self):
         """ISS ground track over ~90 min should span a wide longitude range."""
@@ -627,7 +630,7 @@ class TestCachingAndIndexes(unittest.TestCase):
     def test_satrec_cached_between_calls(self):
         """Calling get_position twice should reuse the same Satrec."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
 
         prop.get_position("ISS (ZARYA)", now)
         self.assertEqual(len(prop._satrec_cache), 1)
@@ -638,7 +641,7 @@ class TestCachingAndIndexes(unittest.TestCase):
     def test_reload_clears_all_caches(self):
         """reload_data() should clear Satrec cache and indexes."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
 
         prop.get_position("ISS (ZARYA)", now)
         self.assertEqual(len(prop._satrec_cache), 1)
@@ -653,7 +656,7 @@ class TestCachingAndIndexes(unittest.TestCase):
     def test_different_satellites_get_different_satrecs(self):
         """Each satellite gets its own cached Satrec."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
 
         prop.get_position("ISS (ZARYA)", now)
         prop.get_position("CSS (TIANHE)", now)
@@ -689,13 +692,13 @@ class TestCachingAndIndexes(unittest.TestCase):
         """DataFrame should not be loaded until needed."""
         prop = SatellitePropagator()
         self.assertIsNone(prop._df)
-        prop.get_position("ISS (ZARYA)", datetime.now(timezone.utc))
+        prop.get_position("ISS (ZARYA)", catalog_now())
         self.assertIsNotNone(prop._df)
 
     def test_reload_then_reuse(self):
         """After reload, lookups should still work (indexes rebuilt)."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
 
         r1 = prop.get_position("ISS (ZARYA)", now)
         prop.reload_data()
@@ -714,7 +717,7 @@ class TestPerformance(unittest.TestCase):
     def test_stations_group_under_1_second(self):
         """Propagating the full stations group should take < 1 second."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
 
         start = time.perf_counter()
         results, _ = prop.get_all_positions(now)
@@ -727,7 +730,7 @@ class TestPerformance(unittest.TestCase):
     def test_100_time_steps_under_1_second(self):
         """Propagating ISS at 100 time steps should take < 1 second."""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
         times = [now + timedelta(minutes=i) for i in range(100)]
 
         start = time.perf_counter()
@@ -743,7 +746,7 @@ class TestPerformance(unittest.TestCase):
         (Was a cold-vs-warm timing test that could not fail — the cold time
         included the parquet load. Asserts the caching behaviour instead.)"""
         prop = SatellitePropagator()
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
         prop.get_position("ISS (ZARYA)", now)
         self.assertEqual(len(prop._satrec_cache), 1)
         cached = next(iter(prop._satrec_cache.values()))
@@ -757,7 +760,7 @@ class TestPerformance(unittest.TestCase):
         prop = SatellitePropagator()
         prop._ensure_data()
 
-        now = datetime.now(timezone.utc)
+        now = catalog_now()
         # Warm up
         prop.get_position("ISS (ZARYA)", now)
 

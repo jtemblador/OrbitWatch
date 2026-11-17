@@ -979,7 +979,8 @@ class TestCoarseFilter:
         threshold. Survivors must be a strict subset of all pairs and the
         overlap property must hold for every returned pair."""
         import pandas as pd
-        df = pd.read_parquet("backend/data/tle/stations.parquet")
+        from backend.core.tle_fetcher import GPFetcher
+        df = GPFetcher().load_cached("stations")   # frozen fixture (11.3a)
         peri = df["periapsis"].astype(float).tolist()
         apo = df["apoapsis"].astype(float).tolist()
         n = len(peri)
