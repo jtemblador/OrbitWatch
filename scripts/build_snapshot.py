@@ -38,6 +38,8 @@ from backend.core.conjunctions import annotate_horizon, run_screen  # noqa: E402
 from backend.core.propagator import build_satrecs_and_meta       # noqa: E402
 from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
 from backend.core.snapshot import archive_record, build_snapshot # noqa: E402
+from backend.core.socrates_fetcher import SOCRATESFetcher         # noqa: E402
+from backend.core.socrates_monitor import MONITOR_VERSION, agreement_block  # noqa: E402
 from backend.core.tle_fetcher import GPFetcher                   # noqa: E402
 
 _GZ_BUDGET_BYTES = 5_000_000  # ~5 MB gzipped target (see roadmap 9.2)
@@ -75,6 +77,56 @@ def _screen(satrecs, meta, start, args, timings):
                     "threshold_km": args.threshold, "step_sec": args.step_sec}
 
 
+def _socrates_block(args, events, screen_df, start) -> dict | None:
+    """11.2b: SOCRATES agreement for this rebuild → meta.socrates, or None if off.
+
+    Never fatal, like --prev and the horizon pass: SOCRATES is a free public
+    service on someone else's schedule, and monitoring it must never cost us
+    the data refresh. Any failure (download, parse, match, or a value that would
+    break the allow_nan=False dump) is recorded as a status-only stub so the
+    archived trend shows a gap with a reason rather than silently skipping.
+    """
+    if not (args.socrates or args.socrates_csv):
+        return None
+    t0 = time.perf_counter()
+    try:
+        fetcher = SOCRATESFetcher()
+        if args.socrates_csv:
+            with open(args.socrates_csv, encoding="utf-8") as f:
+                soc = fetcher._parse_csv(f.read())
+            origin = "file"
+        else:
+            soc = fetcher.fetch()
+            origin = "celestrak"
+        epochs = dict(zip(screen_df["norad_cat_id"].astype(int),
+                          pd.to_datetime(screen_df["epoch"], utc=True)))
+        block = agreement_block(soc, events, epochs.keys(), epochs, start, args.hours)
+        block["origin"] = origin
+        if len(soc) and "fetch_time" in soc.columns:
+            block["socrates_fetched_at"] = (
+                pd.Timestamp(soc["fetch_time"].iloc[0]).isoformat())
+        block["seconds"] = round(time.perf_counter() - t0, 2)
+        json.dumps(block, allow_nan=False)   # a bad value fails HERE, not the dump
+    except Exception as exc:   # noqa: BLE001 — monitoring must never cost the refresh
+        print(f"::warning::SOCRATES agreement unavailable ({exc!r:.200}) — "
+              f"publishing without it.", file=sys.stderr)
+        return {"version": MONITOR_VERSION, "status": "unavailable",
+                "reason": type(exc).__name__,
+                "seconds": round(time.perf_counter() - t0, 2)}
+    if block.get("status") == "ok":
+        so, os_ = block["socrates_to_ours"], block["ours_to_socrates"]
+        print(f"socrates: {so['n_matched']}/{so['n']} of SOCRATES's <= "
+              f"{block['in_volume_km']} km pairs reproduced; "
+              f"{os_['n_matched']}/{os_['n']} of our < {block['threshold_km']:.0f} km "
+              f"events listed by SOCRATES ({block['overlap']['hours']} h overlap, "
+              f"{block['seconds']}s)")
+    else:
+        print(f"::warning::SOCRATES run does not overlap our window "
+              f"(TCAs {block.get('socrates_first_tca')} … "
+              f"{block.get('socrates_last_tca')}) — stale run?", file=sys.stderr)
+    return block
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build the static-site snapshot.json.")
     ap.add_argument("--group", default="active",
@@ -107,6 +159,13 @@ def main() -> None:
     ap.add_argument("--archive-out", default="",
                     help="also write the slim data-branch archive record "
                          "(snapshot.archive_record) here, gzipped (10.10)")
+    ap.add_argument("--socrates", action="store_true",
+                    help="score this screen against CelesTrak's latest SOCRATES "
+                         "run → meta.socrates (11.2b). One CSV download + an "
+                         "O(rows) match; any failure costs only the block.")
+    ap.add_argument("--socrates-csv", default="",
+                    help="score against this local SOCRATES CSV instead of "
+                         "downloading (offline/testing; implies --socrates)")
     ap.add_argument("--min-conjunctions", type=int, default=0,
                     help="abort (exit 1) if the screen finds fewer conjunctions "
                          "than this — a regression that zeroes the screen must "
@@ -203,6 +262,9 @@ def main() -> None:
 
     generated_at = start.isoformat().replace("+00:00", "Z")
 
+    # 11.2b: SOCRATES agreement (opt-in; non-fatal — see _socrates_block).
+    socrates = _socrates_block(args, events, screen_df, start)
+
     # 9.10: carry each conjunction's prediction history forward from the run
     # before this one. This is the whole mechanism — one small file, no archive
     # scan — so it stays O(current events) and the cron stays ~10 min.
@@ -247,7 +309,7 @@ def main() -> None:
     source = _SOURCE_LABELS[args.catalog_source].format(group=args.group)
     try:
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=prev, run=run)
+                              source=source, prev=prev, run=run, socrates=socrates)
     except Exception as exc:   # noqa: BLE001 — history must never cost the refresh
         if prev is None:
             raise
@@ -258,7 +320,7 @@ def main() -> None:
               f"building without it.", file=sys.stderr)
         prev = None
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=None, run=run)
+                              source=source, prev=None, run=run, socrates=socrates)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0

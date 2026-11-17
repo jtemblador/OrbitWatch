@@ -11,7 +11,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -687,6 +687,61 @@ class TestBuildSnapshotMain:
             run("--min-conjunctions", "1000000000")
         assert exc.value.code == 1
         assert not (tmp / "snapshot.json").exists()
+
+    # --- 11.2b: SOCRATES agreement through the real main() --------------------
+
+    def test_socrates_off_by_default(self, run_main):
+        run, tmp = run_main
+        assert "socrates" not in run()["meta"]
+
+    def test_socrates_csv_is_scored_into_meta(self, run_main):
+        # Round-trip: one of our real screen events, written as a SOCRATES CSV
+        # row (0.1 km, so it's a fair reference), must come back reproduced.
+        run, tmp = run_main
+        snap0 = run(*self._DENSE)
+        mid = datetime.fromisoformat(snap0["meta"]["generated_at"].replace("Z", "+00:00")) \
+            + timedelta(hours=1.5)       # away from the edge trim at either end
+        first = min(snap0["conjunctions"], key=lambda c: abs(
+            (datetime.fromisoformat(c["tca"]) - mid).total_seconds()))
+        tca = datetime.fromisoformat(first["tca"]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        late = (datetime.fromisoformat(first["tca"]) + timedelta(days=6)) \
+            .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        csv = tmp / "soc.csv"
+        csv.write_text(
+            "NORAD_CAT_ID_1,OBJECT_NAME_1,DSE_1,NORAD_CAT_ID_2,OBJECT_NAME_2,DSE_2,"
+            "TCA,TCA_RANGE,TCA_RELATIVE_SPEED,MAX_PROB,DILUTION\n"
+            f"{first['a']},A [+],0.5,{first['b']},B [+],0.5,{tca},0.100,7.0,0,0\n"
+            f"{first['a']},A [+],0.5,{first['b']},B [+],0.5,{late},0.100,7.0,0,0\n")
+        # An early bracket row so the SOCRATES run covers our window start.
+        early = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%d %H:%M:%S.000")
+        csv.write_text(csv.read_text() + f"1,X [-],1,2,Y [-],1,{early},3.0,7.0,0,0\n")
+        snap = run(*self._DENSE, "--socrates-csv", str(csv))
+        s = snap["meta"]["socrates"]
+        assert s["status"] == "ok" and s["origin"] == "file"
+        assert (s["socrates_to_ours"]["n"], s["socrates_to_ours"]["n_matched"]) == (1, 1)
+        assert s["socrates_to_ours"]["median_abs_dtca_s"] < 0.01
+
+    def test_socrates_failure_costs_only_the_block(self, run_main, capsys):
+        run, tmp = run_main
+        snap = run(*self._DENSE, "--socrates-csv", str(tmp / "missing.csv"))
+        assert snap["conjunctions"]                      # the refresh still publishes
+        assert snap["meta"]["socrates"]["status"] == "unavailable"
+        assert snap["meta"]["socrates"]["reason"] == "FileNotFoundError"
+        assert "SOCRATES agreement unavailable" in capsys.readouterr().err
+
+    def test_socrates_nan_cannot_break_the_snapshot_dump(self, run_main, monkeypatch):
+        # The snapshot is dumped allow_nan=False; a NaN smuggled into the block
+        # must be caught inside the non-fatal wrapper, not at the final dump.
+        run, tmp = run_main
+        bs = run.module
+        monkeypatch.setattr(bs, "agreement_block",
+                            lambda *a, **k: {"status": "ok", "x": float("nan")})
+        csv = tmp / "soc.csv"
+        csv.write_text(open(os.path.join(os.path.dirname(__file__), "fixtures",
+                                         "socrates_sample.csv")).read())
+        snap = run("--socrates-csv", str(csv))
+        assert snap["meta"]["socrates"]["status"] == "unavailable"
 
     def test_prev_that_is_valid_json_but_not_a_snapshot_is_not_fatal(self, run_main):
         run, tmp = run_main

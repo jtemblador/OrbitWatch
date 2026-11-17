@@ -412,13 +412,19 @@ jobs:
       # (a valid-but-partial upstream response is non-empty, so this floor — not
       # the empty-check — is what catches it). This is the last guard on the cron
       # path, which skips the A/B gate above. The real active catalog is ~16k.
+      # --socrates (11.2b): score this screen against CelesTrak's latest SOCRATES
+      # run → meta.socrates, so agreement is a monitored trend in the archive,
+      # not a one-off report. Bounded: one CSV GET (30 s timeout + one 30 s curl
+      # fallback, no retry ladder) + a sub-second match. Never fatal — a failed
+      # download/parse/match records {"status": "unavailable"} and publishes.
       - name: Build snapshot.json (fetch active + screen offline)
         if: steps.decide.outputs.rebuild == 'true' && steps.catalog.outputs.ok == 'true'
         run: |
           python scripts/build_snapshot.py --group active --hours 24 \
             --min-objects 8000 --prev prev-snapshot.json \
             --catalog-source ${{ steps.catalog.outputs.source }} \
-            --archive-out archive-snapshot.json.gz --min-conjunctions 1000
+            --archive-out archive-snapshot.json.gz --min-conjunctions 1000 \
+            --socrates
 
       # Inject the Ion token from the repo secret into the gitignored config.js.
       # Passed via env (not string-interpolated into the script) so a token with

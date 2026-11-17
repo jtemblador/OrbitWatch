@@ -386,6 +386,7 @@ def build_snapshot(
     source: str = "CelesTrak",
     prev: dict | None = None,
     run: dict | None = None,
+    socrates: dict | None = None,
 ) -> dict:
     """Assemble the static-site snapshot dict from a catalog frame + screen events.
 
@@ -401,6 +402,10 @@ def build_snapshot(
         run:           per-run telemetry (screen time, catalog source, CI run id)
                        → `meta.run`. CI logs expire after 90 days; the archive
                        doesn't. Omitted → no `run` key.
+        socrates:      the 11.2b SOCRATES agreement block
+                       (socrates_monitor.agreement_block, or a status-only
+                       "unavailable" stub) → `meta.socrates`. Omitted → no
+                       key, so pre-11.2b readers see the schema they know.
     """
     sats = [_satellite(rec) for rec in catalog_df.to_dict("records")]
     conj = [_conjunction(e) for e in events]
@@ -436,6 +441,8 @@ def build_snapshot(
     }
     if run:
         meta["run"] = run
+    if socrates:
+        meta["socrates"] = socrates
     return {"meta": meta, "satellites": sats, "conjunctions": conj}
 
 

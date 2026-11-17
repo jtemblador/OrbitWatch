@@ -927,10 +927,37 @@ function formatAge(generatedAtIso) {
   return `${(mins / 1440).toFixed(1)} d`;
 }
 
+/** 11.2b: this run's SOCRATES overlap as "SOCRATES overlap 60% · 74%", or "" when
+ *  the snapshot has no usable block (pre-11.2b, status != ok, empty sides).
+ *  Numbers only — the result goes into innerHTML, so nothing from the snapshot
+ *  is interpolated except values that passed Number.isFinite. */
+function socratesAgreementText(meta) {
+  const s = meta && meta.socrates;
+  if (!s || s.status !== "ok") return "";
+  const pct = (side) => {
+    const r = side && side.rate;
+    return (typeof r === "number" && Number.isFinite(r) && side.n > 0)
+      ? `${Math.round(r * 100)}%` : null;
+  };
+  const theirs = pct(s.socrates_to_ours);
+  const ours = pct(s.ours_to_socrates);
+  if (!theirs || !ours) return "";
+  return `SOCRATES overlap ${theirs} · ${ours}`;
+}
+
+const SOCRATES_OVERLAP_TITLE =
+  "This run vs CelesTrak's latest SOCRATES run, on the pairs both screens cover. " +
+  "First: share of SOCRATES's closest (0.4 km or nearer) pairs we also flagged. " +
+  "Second: share of our events under 5 km that SOCRATES also lists. Same SGP4 method, " +
+  "different element sets (SOCRATES runs earlier), so the gap is mostly epoch " +
+  "drift — it is a consistency trend, not accuracy against truth.";
+
 function renderFreshness() {
   if (!snapshotMeta) return;
+  const soc = socratesAgreementText(snapshotMeta);
   freshnessLine.innerHTML =
     `data updated ${formatAge(snapshotMeta.generated_at)} ago · ` +
+    (soc ? `<span title="${SOCRATES_OVERLAP_TITLE}">${soc}</span> · ` : "") +
     `<a href="${VALIDATION_REPORT_URL}" target="_blank" rel="noopener"` +
     ` title="Screening validated against CelesTrak SOCRATES">validation ↗</a>`;
 }
