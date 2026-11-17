@@ -305,7 +305,7 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
   `--prev`/archive): a semi-major-axis or mean-motion step beyond the drag-expected trend flags
   "maneuvered in last N h"; events involving it get a "prediction may be stale" tag. Validate on known
   Starlink orbit-raising batches. Cheap, high analyst value.
-- [ ] **11.2b Continuous SOCRATES agreement in the cron** — each rebuild matches our events against the
+- [x] **11.2b Continuous SOCRATES agreement in the cron** *(done Nov 17 — `meta.socrates` via `socrates_monitor.agreement_block` + `build_snapshot.py --socrates`, non-fatal; both-way rates on the fair slice (screened pop, window overlap, SOCRATES ≤ 0.4 km closest-per-pair vs ours < 5 km); freshness-line "SOCRATES overlap"; live numbers unverified until the first cron on main — `task_logs/task_11_2b_socrates_monitoring.md`)* — each rebuild matches our events against the
   latest SOCRATES CSV (the 8.2 `match_events`, already built) and records reproduction rate + Δ stats in
   `meta.run` → a trend line on the stats page. Turns one-time validation into monitoring.
 - [ ] **11.2c Longer horizon** — measure 72 h on the cron (24 h ≈ 12 min → est. ~35 min); if it fits,
