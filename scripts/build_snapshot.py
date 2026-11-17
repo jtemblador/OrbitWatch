@@ -179,8 +179,10 @@ def main() -> None:
     # the refresh.
     t_h = time.perf_counter()
     try:
+        hz_volumes = ([regime_for(m["periapsis_km"], m["eccentricity"], m["period_min"])
+                       for m in meta] if args.mode == "sfs" else None)
         events = annotate_horizon(events, satrecs, meta, start, args.hours,
-                                  step_sec=args.step_sec, **_ACCEL)
+                                  step_sec=args.step_sec, volumes=hz_volumes, **_ACCEL)
     except Exception as exc:   # noqa: BLE001 — a label must never cost the refresh
         print(f"::warning::Horizon annotation failed ({exc!r:.200}) — "
               f"publishing without beyond_horizon flags.", file=sys.stderr)

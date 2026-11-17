@@ -473,13 +473,29 @@ class TestCarryForwardRuns:
 
     def test_chain_counts_up_and_flags_at_the_threshold(self):
         n = PERSISTENT_MIN_RUNS
-        below = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 2)])[0]
-        at = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 1)])[0]
+        below = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 2, **self._SLOW)])[0]
+        at = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 1, **self._SLOW)])[0]
         assert below["runs"] == n - 1 and "persistent" not in below
         assert at["runs"] == n and at["persistent"] is True
 
+    def test_fast_history_then_one_slow_run_is_not_a_formation(self):
+        # Review fix: a pair that crossed fast for 20 runs and is slow once is
+        # NOT a formation — the slow streak starts over at this run.
+        rec = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=20, rel_speed_km_s=12.0)])[0]
+        assert rec["runs"] == 21 and "persistent" not in rec and rec["slow_runs"] == 1
+        # …and the streak then builds run by run from the slow record forward.
+        nxt = carry_forward_runs([_cj(**self._SLOW)], [rec])[0]
+        assert nxt["slow_runs"] == 2 and "persistent" not in nxt
+
+    def test_slow_streak_resets_on_a_fast_run(self):
+        prev = [_cj(runs=30, slow_runs=30, **self._SLOW)]
+        fast = carry_forward_runs([_cj(rel_speed_km_s=12.0)], prev)[0]
+        assert "slow_runs" not in fast and "persistent" not in fast
+        again = carry_forward_runs([_cj(**self._SLOW)], [fast])[0]
+        assert "persistent" not in again
+
     def test_speed_gate_is_strict_and_uses_this_runs_speed(self):
-        prev = [_cj(runs=20)]
+        prev = [_cj(runs=20, **self._SLOW)]
         fast = carry_forward_runs([_cj(rel_speed_km_s=0.01)], prev)[0]
         slow = carry_forward_runs([_cj(rel_speed_km_s=0.009)], prev)[0]
         crossing = carry_forward_runs([_cj(rel_speed_km_s=12.0)], prev)[0]

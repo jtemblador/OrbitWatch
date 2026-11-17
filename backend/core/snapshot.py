@@ -285,8 +285,13 @@ def carry_forward_runs(conjunctions, prev_conjunctions,
     """Count consecutive appearances per PAIR and flag persistent formations (11.0c).
 
     `runs` = previous run's count + 1 when the same unordered pair is in the
-    previous snapshot, else the pair is new (key absent ≡ 1). `persistent`
-    = runs ≥ min_runs AND this run's relative speed < max_rel_speed_km_s.
+    previous snapshot, else the pair is new (key absent ≡ 1). `slow_runs` =
+    the same streak counted only over runs where the pair was ALSO slower than
+    max_rel_speed_km_s (reset by any fast run). `persistent` = slow_runs ≥
+    min_runs. Review fix: gating only the CURRENT run let a pair that crossed
+    fast for 8 runs and then had one slow encounter be flagged a formation.
+    A pre-11.0 / pre-fix previous record has no `slow_runs`; it bootstraps from
+    its `runs`/`hist` count only if that record was itself slow.
 
     Linked on the pair ALONE — deliberately not `hist`'s (pair, TCA ± 900 s).
     A co-moving pair has no well-defined TCA: its range is nearly flat, so the
@@ -302,24 +307,49 @@ def carry_forward_runs(conjunctions, prev_conjunctions,
     if not prev_conjunctions:
         return [dict(c) for c in conjunctions]
     prev_runs: dict = {}
+    prev_slow: dict = {}
     for p in prev_conjunctions:
         try:
             key = _pair_key(p["a"], p["b"])
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
         prev_runs[key] = max(prev_runs.get(key, 0), _prev_runs(p))
+        prev_slow[key] = max(prev_slow.get(key, 0),
+                             _prev_slow_runs(p, max_rel_speed_km_s))
     out = []
     for c in conjunctions:
         rec = dict(c)
-        before = prev_runs.get(_pair_key(rec["a"], rec["b"]))
+        key = _pair_key(rec["a"], rec["b"])
+        before = prev_runs.get(key)
         if before:
             rec["runs"] = before + 1
-            v = rec.get("rel_speed_km_s")
-            if (rec["runs"] >= min_runs and isinstance(v, (int, float))
-                    and math.isfinite(v) and v < max_rel_speed_km_s):
-                rec["persistent"] = True
+            if _is_slow(rec, max_rel_speed_km_s):
+                slow = prev_slow.get(key, 0) + 1
+                # Always written on a linked slow run (even 1): its ABSENCE is
+                # how _prev_slow_runs recognizes a pre-fix record to bootstrap.
+                rec["slow_runs"] = slow
+                if slow >= min_runs:
+                    rec["persistent"] = True
         out.append(rec)
     return out
+
+
+def _is_slow(rec, max_rel_speed_km_s: float) -> bool:
+    v = rec.get("rel_speed_km_s")
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v < max_rel_speed_km_s)
+
+
+def _prev_slow_runs(prev_rec, max_rel_speed_km_s: float) -> int:
+    """The previous record's slow streak (see carry_forward_runs): its valid
+    `slow_runs`; else, if that record was itself slow, its run count (bootstrap
+    from a pre-fix snapshot); else 0."""
+    if not _is_slow(prev_rec, max_rel_speed_km_s):
+        return 0
+    slow = prev_rec.get("slow_runs")
+    if isinstance(slow, int) and not isinstance(slow, bool) and slow >= 1:
+        return slow
+    return _prev_runs(prev_rec)   # pre-fix record (or first appearance → 1)
 
 
 def _element_ages(conjunctions, catalog_df: pd.DataFrame, generated_at) -> list:

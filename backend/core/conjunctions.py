@@ -697,6 +697,7 @@ def annotate_horizon(events: list[dict], satrecs: list, meta: list[dict],
                      step_sec: float = _DEFAULT_STEP_SEC,
                      near_s: float = HORIZON_NEAR_S,
                      lookahead_s: float = HORIZON_LOOKAHEAD_S,
+                     volumes: list | None = None,
                      **screen_kw) -> list[dict]:
     """Flag events whose miss is beaten just PAST the window end (11.0b).
 
@@ -731,6 +732,13 @@ def annotate_horizon(events: list[dict], satrecs: list, meta: list[dict],
         events:    run_screen output (sat{1,2}_norad_id, tca, miss_distance_km).
         satrecs, meta: the same index-aligned inputs the screen ran on.
         start_utc, duration_hours, step_sec: the main screen's window + grid.
+        volumes:   the main screen's per-object SFS volumes (index-aligned), if
+                   it ran in SFS mode. Then the look-ahead uses the SAME
+                   ellipsoid rule, so a post-horizon pass only counts when the
+                   screen itself would have reported it (review fix: a
+                   Euclidean look-ahead flagged pairs whose closer pass lies
+                   outside the ellipsoid — 1.4% of flags). Deep-space events
+                   are skipped: one LEO-period look-ahead cannot cover them.
         near_s, lookahead_s: qualifying distance from the end / look-ahead span.
         **screen_kw: forwarded to the look-ahead run_screen (the fused/sieve/
                    refine accelerators — event-identical either way).
@@ -750,6 +758,8 @@ def annotate_horizon(events: list[dict], satrecs: list, meta: list[dict],
                 or e.get("sat1_norad_id") not in index
                 or e.get("sat2_norad_id") not in index):
             continue
+        if str(e.get("screening_regime", "")).lower().startswith("deep"):
+            continue
         if (end_utc - tca).total_seconds() <= near_s:
             cand.append(k)
     if not cand:
@@ -759,12 +769,17 @@ def annotate_horizon(events: list[dict], satrecs: list, meta: list[dict],
                   for f in ("sat1_norad_id", "sat2_norad_id")})
     sub_sat = [satrecs[index[i]] for i in ids]
     sub_meta = [meta[index[i]] for i in ids]
-    # nextafter: the legacy cut is miss < threshold, so the largest candidate
-    # must still be able to see a pass equal to its own miss.
-    threshold = math.nextafter(max(events[k]["miss_distance_km"] for k in cand),
-                               math.inf)
-    ahead = run_screen(sub_sat, sub_meta, end_utc, lookahead_s / 3600.0,
-                       threshold_km=threshold, step_sec=step_sec, **screen_kw)
+    if volumes is not None:
+        sub_vol = [volumes[index[i]] for i in ids]
+        ahead = run_screen(sub_sat, sub_meta, end_utc, lookahead_s / 3600.0,
+                           volumes=sub_vol, step_sec=step_sec, **screen_kw)
+    else:
+        # Euclidean mode. nextafter: the legacy cut is miss < threshold, so the
+        # largest candidate must still be able to see a pass equal to its miss.
+        threshold = math.nextafter(
+            max(events[k]["miss_distance_km"] for k in cand), math.inf)
+        ahead = run_screen(sub_sat, sub_meta, end_utc, lookahead_s / 3600.0,
+                           threshold_km=threshold, step_sec=step_sec, **screen_kw)
 
     best: dict = {}
     for a in ahead:
