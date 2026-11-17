@@ -1194,6 +1194,21 @@ ones), and the deepest trail observed across 41 days is **4 points**.
 ⚠ Do not widen the de-dupe to raise that rate — the engine is CI-gated
 byte-identical (10.6).
 
+> **Correction (Nov 17, 2026 — 11.0e/11.1).** The 9.10 prediction-stability figures
+> ("consecutive-run |Δmiss| median 0.3–0.5 km, p90 ~5 km, flat against lead time; of
+> < 1 km predictions 70% still < 1 km 8 h later, 8% past 5 km") mixed in re-predictions
+> whose elements had **not changed**: CelesTrak doesn't refresh every object every 8 h,
+> so **49.4% of consecutive re-predictions reuse identical elements** (both epochs equal
+> within 5 s) and their Δmiss is ≡ 0 (p99 0.006 km). They measure nothing and pull the
+> median down. On the 4-month archive (352 full-catalog runs, 672,835 matched
+> re-predictions, `scripts/archive_analysis.py`), **fresh-element re-predictions only**:
+> **|Δmiss| median 0.64 km, p90 6.0 km, 41% > 1 km, 12.5% > 5 km**; it **grows with
+> element age** (median 0.22 km at ≤ 6 h → 1.27 km at 1–2 d) and only mildly with lead
+> time (0.50 km at 4–8 h → 0.84 km at 20–24 h — not flat). Of < 1 km predictions
+> re-matched next run with fresh elements, 56% stayed < 1 km and 11% moved past 5 km.
+> **Lesson: before measuring "how much did the prediction change", check the input
+> changed.** The original text above is kept as the record.
+
 **Read the previous snapshot, never the archive.** The `data` branch is 147 MB and
 grows ~3.6 MB/day; cloning it on the cron path would dominate the ~10-min rebuild.
 Carrying `hist` forward one run from the live `snapshot.json` is O(current events)
