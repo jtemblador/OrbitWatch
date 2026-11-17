@@ -315,6 +315,17 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
   against the primary paper first.
 - [ ] **11.2e MEO/HEO screening** — no SFS handbook volume exists; screen them with a SOCRATES-style
   5 km Euclidean mode, clearly labeled non-handbook.
+- [x] **11.2h Release build of the engine** *(review find, Nov 17)* — CI/deploy ran `cmake` with no
+  build type → **no `-O` flag at all**. `CMakeLists.txt` now defaults to Release (`-O3 -DNDEBUG`; no
+  `assert`s in the source). Full catalog 24 h: **688.7 → 242.1 s (2.8×)**, medium 601 → 178 s,
+  `annotate_horizon` 35 → 16 s, **events byte-identical (15,312 == 15,312)**, peak RSS unchanged
+  (7.08 GB). Pytest 36 → 16 s. Profile at -O3: sieve setup 56 s (single-threaded), medium scan 130 s
+  (1.48 B pair evaluations; propagation only 21 s), C++ refine 31–60 s, Python fine ~4.5 s.
+  **Per-sat propagation refcount: measured out** (every sat has an active pair at nearly every step →
+  47.4 M propagations either way, 176.8 vs 177.5 s) — dropped as a lever.
+  Next levers, not built: multi-thread the sieve interval build (~40 s on 4 cores, deterministic join);
+  **compact the pair list after the sieve** (53 M dropped pairs still hold ~49 B each → ~2.6 GB of the
+  7.08 GB peak) — a prerequisite for 11.2f.
 - [ ] **11.2f Debris + rocket bodies (largest lift)** — screen active payloads *against* debris/R-B
   (primary-vs-secondary, ~2× pairs not ~4×) with streamed/blocked pair processing so it fits 16 GB.
   Same byte-identical A/B gate discipline as Phase 10. Fetch via Space-Track bulk `gp` (10.10).
