@@ -293,7 +293,7 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
 - [x] **11.1c Confounder test** *(done — re-screen Jul 16 / Oct 29 Starlinks: actual 4,670→12,219 (×2.62), held in LEO 2 1,191→4,910 (×4.12), forced LEO 1 4,817→12,221 (×2.54); actual re-screens reproduce archived pair sets exactly → **crowding, not the box**; written up in the findings doc)* — re-screen one current catalog with Starlink forced to the LEO 2 box
   and compare counts → how much of the ×2.3 is box-size vs crowding. Update
   `docs/findings/starlink-shell-lowering.md` with the answer before publishing it.
-- [ ] **11.1e Consolidate the archive scripts** *(from the Nov 17 review)* — fold
+- [x] **11.1e Consolidate the archive scripts** *(done Nov 17 — `archive_analysis.py trends` (dir or `--ref`, `--until UTC`); old script deleted; write-up numbers unchanged (CSV row-set identical, figures pixel-identical vs the old script); the old `--until 2026-10-29` pin was 2 runs too wide → `2026-10-29T01:00`; +13 tests)* — fold
   `scripts/analyze_archive.py`'s altitude-band / band-crowding measures into `archive_analysis.py`
   (shared loader + `constellation_of`), delete the old script, update its references (CLAUDE.md, the
   Starlink write-up's reproduce line, task_11_1). Today both agree; two definitions of "Starlink" drift.

@@ -58,9 +58,9 @@ A flagged conjunction is a geometric close approach inside a screening volume, n
 
 [OrbitWatch](https://jtemblador.github.io/OrbitWatch/) is a conjunction screener built on a from-scratch C++ SGP4 propagator. Three times a day a GitHub Actions job fetches CelesTrak's "active" catalog (about 16,800 objects), screens 24 hours ahead on a 30-second grid using the screening volumes from the 18th/19th SDS Spaceflight Safety Handbook (LEO and GEO; MEO and HEO objects are shown but not screened), publishes the result to the live site, and archives a gzipped copy to an orphan `data` branch. On epoch-matched elements the screener reproduces CelesTrak's SOCRATES to 0.000 km.
 
-This analysis reads all 318 archived snapshots (July 8 – October 29); screen settings were identical in the 296 it uses. Altitude is orbit-averaged (from mean motion, above Earth's equatorial radius), so it won't match SpaceX's round shell numbers; on this scale the lowered shells settle at 460–475 km. "Starlink" means the object name starts with STARLINK; a pair's altitude is the average of its two objects'.
+This analysis reads all 318 archived snapshots (July 8 – October 29); screen settings were identical in the 296 it uses. Altitude is orbit-averaged (from mean motion, above Earth's equatorial radius), so it won't match SpaceX's round shell numbers; on this scale the lowered shells settle at 460–475 km. "Starlink" means the object name starts with the word STARLINK (the same rule as the live site's constellation filter); a pair's altitude is the average of its two objects'.
 
-To reproduce: `git fetch origin data && python scripts/analyze_archive.py --until 2026-10-29` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
+To reproduce: `git fetch origin data && python scripts/archive_analysis.py trends --ref origin/data --until 2026-10-29T01:00` (about a minute). Per-run numbers are in [archive_trends.csv](archive_trends.csv).
 
 ## Caveats
 
