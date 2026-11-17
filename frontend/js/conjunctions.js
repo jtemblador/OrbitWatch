@@ -61,6 +61,34 @@ const STALE_TIP =
   `${STALE_ELEMENT_AGE_D} days old when this was screened, and SGP4 prediction ` +
   `error grows with element age.`;
 
+// 11.2a. The tag is evidence the prediction may be stale; its ABSENCE is not
+// evidence of stability — the detector sees one element set per run (3x/day),
+// so burns below ~100–300 m of altitude change (most collision-avoidance
+// maneuvers) and phasing burns are invisible, and it catches only a minority
+// of the large run-to-run jumps (prototype: ~13% of > 5 km).
+const MANEUVER_TIP =
+  "Recent maneuver: this object's orbit changed beyond what drag explains, so " +
+  "the prediction may be stale until fresh elements settle. No tag does NOT " +
+  "mean no maneuver: with one element set per run (3x/day) changes under " +
+  "~100–300 m of altitude, most small avoidance burns, and phasing burns are " +
+  "invisible.";
+
+/** Which participant(s) maneuvered, by name ("ISS (ZARYA)", "both"). Raw
+ *  upstream text — the caller escapes it. */
+function maneuverWho(e) {
+  if (e.mnv_who === "ab") return "both";
+  const a = e.mnv_who === "a";
+  return (a ? e.sat1_name : e.sat2_name) || `NORAD ${a ? e.sat1_norad_id : e.sat2_norad_id}`;
+}
+
+/** "maneuvered N h ago" tag (11.2a), or "" when the event carries none. */
+function maneuverTag(e) {
+  if (!Number.isFinite(e.mnv_h) || !e.mnv_who) return "";
+  const h = e.mnv_h < 1 ? "<1" : String(Math.round(e.mnv_h));
+  return `<span class="cd-tag mnv-tag" title="${MANEUVER_TIP}">` +
+    `${escapeHtml(maneuverWho(e))} maneuvered ${h} h ago</span>`;
+}
+
 /** Miss distance as an HTML span: threat-colored, and "≥ X km" with a tooltip
  *  when the closest approach lies past the window end (11.0b). */
 function missHtml(e, digits) {
@@ -83,7 +111,8 @@ function ageText(d) {
  *  for a pre-11.0 event (no ages, no flags) — the row then reads as before. */
 function trustLine(e) {
   const hasAge = e.sat1_age_d !== null || e.sat2_age_d !== null;
-  if (!hasAge && !e.persistent) return "";
+  const mnv = maneuverTag(e);
+  if (!hasAge && !e.persistent && !mnv) return "";
   let html = `<div class="cd-trust">`;
   if (hasAge) {
     html += `<span title="Age of each object's orbital elements when screened">` +
@@ -92,6 +121,7 @@ function trustLine(e) {
   if (isStaleEvent(e)) {
     html += `<span class="cd-tag stale-tag" title="${STALE_TIP}">low confidence (stale elements)</span>`;
   }
+  html += mnv;
   if (e.persistent) {
     html += `<span class="cd-tag persist-tag" title="Seen in every screen for ` +
       `${e.runs ?? "9+"} consecutive runs at under 10 m/s: a formation or ` +

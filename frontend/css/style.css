@@ -364,6 +364,11 @@ html, body, #cesiumContainer {
   color: #90caf9;
   border: 1px solid rgba(144, 202, 249, 0.5);
 }
+.mnv-tag {
+  color: #ce93d8;              /* 11.2a recent maneuver — a label, not a tier */
+  border: 1px solid rgba(206, 147, 216, 0.5);
+  white-space: normal;         /* the name can be long */
+}
 
 /* Freshness line — snapshot age + validation-report link (9.3) */
 #conjunction-freshness {
