@@ -20,6 +20,7 @@ import orbitcore
 from core.conjunctions import (
     ConjunctionScreener,
     _dedupe_to_unique_pairs,
+    annotate_horizon,
     fine_filter,
     fine_filter_batch,
     run_screen,
@@ -1497,3 +1498,142 @@ class TestFlipContract:
         sf, sd = set(surv_full), set(surv_defl)
         assert all(r in sf for r in kept)      # correct pre-cut: superset
         assert any(r not in sd for r in kept)  # deflated pre-cut: BITES
+
+
+# --- 11.0b: beyond-horizon annotation ---------------------------------------
+
+def _drift_variant(dmo_deg, dnodeo_deg, dn_frac):
+    """A drag-free ISS-shaped orbit with its mean motion scaled by (1 + dn_frac)
+    — paired with the drag-free base, the phase at the plane crossings drifts
+    orbit to orbit, so the per-pass miss converges (or diverges) secularly."""
+    p = _parsed()
+    return orbitcore.sgp4init(
+        orbitcore.GravConst.WGS72, "a", "25544",
+        p.jdsatepoch + p.jdsatepochF - 2433281.5, 0.0, 0.0, 0.0,
+        p.ecco, p.argpo, p.inclo,
+        (p.mo + math.radians(dmo_deg)) % (2 * math.pi),
+        p.no_kozai * (1.0 + dn_frac),
+        (p.nodeo + math.radians(dnodeo_deg)) % (2 * math.pi))
+
+
+def _horizon_meta():
+    return [dict(norad_id=i, name=f"S{i}", object_type="PAYLOAD",
+                 epoch_age_days=0.0, periapsis_km=400.0, apoapsis_km=430.0,
+                 object_id=f"2000-00{i}A", eccentricity=0.0004, period_min=92.7)
+            for i in (1, 2)]
+
+
+class TestHorizonAnnotation:
+    """11.0b — `annotate_horizon` labels an event whose pair comes CLOSER just
+    past the window end (the reported miss is then only an upper bound). It is
+    an annotation: the screened events themselves must come back unchanged."""
+
+    _START = datetime(2024, 2, 25, 6, 30, tzinfo=timezone.utc)
+
+    def _setup(self, dn_frac, dmo_deg):
+        sats = [_drift_variant(0.0, 0.0, 0.0),
+                _drift_variant(dmo_deg, 180.0, dn_frac)]
+        meta = _horizon_meta()
+        passes = sorted(run_screen(sats, meta, self._START, 12.0, threshold_km=200.0),
+                        key=lambda e: e["tca"])
+        return sats, meta, passes
+
+    def _screen_to(self, sats, meta, end):
+        """The production shape: ONE event per pair (the window's closest)."""
+        hours = (end - self._START).total_seconds() / 3600.0
+        ev = run_screen(sats, meta, self._START, hours, threshold_km=200.0)
+        return _dedupe_to_unique_pairs(ev), hours
+
+    def _converging_case(self):
+        # Every other pass (same node) closes ~5 km per orbit: 49 → 44 → 38 ...
+        sats, meta, passes = self._setup(0.0002, 179.0)
+        same_node = passes[1::2]
+        assert all(b["miss_distance_km"] < a["miss_distance_km"]
+                   for a, b in zip(same_node, same_node[1:]))   # fixture sanity
+        p = same_node[3]
+        end = datetime.fromisoformat(p["tca"]) + timedelta(minutes=20)
+        events, hours = self._screen_to(sats, meta, end)
+        assert len(events) == 1 and events[0]["tca"] == p["tca"]  # window's best
+        return sats, meta, events, hours
+
+    def test_converging_pair_cut_by_the_horizon_is_flagged(self):
+        sats, meta, events, hours = self._converging_case()
+        out = annotate_horizon(events, sats, meta, self._START, hours)
+        # The next same-node pass (~73 min past the end) is closer → upper bound.
+        assert out[0].get("beyond_horizon") is True
+
+    def test_lookahead_must_reach_one_period_past_the_tca(self):
+        # The closer pass is at the SAME node, one period (~93 min) after the
+        # TCA = ~73 min past the end. A 1 h look-ahead (the first draft) misses
+        # it — this is why HORIZON_LOOKAHEAD_S covers a full LEO period.
+        sats, meta, events, hours = self._converging_case()
+        out = annotate_horizon(events, sats, meta, self._START, hours,
+                               lookahead_s=3600.0)
+        assert "beyond_horizon" not in out[0]
+
+    def _diverging_case(self):
+        # dn = 0: the close passes slowly OPEN (6.590 → 6.596 → 6.601 km), so
+        # a diverging pair's window best is its EARLIEST pass — start the window
+        # 30 min before the 3rd close pass so that pass is the (last-hour) best.
+        sats, meta, passes = self._setup(0.0, 180.2)
+        close = [e for e in passes if e["miss_distance_km"] < 10.0]
+        assert close[1]["miss_distance_km"] > close[0]["miss_distance_km"]
+        tca = datetime.fromisoformat(close[2]["tca"])
+        start = tca - timedelta(minutes=30)
+        events = _dedupe_to_unique_pairs(run_screen(
+            sats, meta, start, 50.0 / 60.0, threshold_km=200.0))
+        assert len(events) == 1 and events[0]["tca"] == close[2]["tca"]
+        return sats, meta, events, start, 50.0 / 60.0
+
+    def test_diverging_pair_is_not_flagged(self):
+        sats, meta, events, start, hours = self._diverging_case()
+        out = annotate_horizon(events, sats, meta, start, hours)
+        assert "beyond_horizon" not in out[0]
+
+    def test_a_farther_post_horizon_pass_is_not_flagged(self):
+        # The look-ahead cut is the LARGEST candidate miss, so with a second,
+        # wider candidate in the set the diverging pair's later (farther) passes
+        # ARE screened — and must still lose the comparison with its own miss.
+        sats, meta, events, start, hours = self._diverging_case()
+        sats = sats + [_drift_variant(90.0, 90.0, 0.0)]
+        meta = meta + [dict(meta[0], norad_id=3, name="S3", object_id="2000-003A")]
+        wide = dict(events[0], sat2_norad_id=3, miss_distance_km=100.0)
+        out = annotate_horizon(events + [wide], sats, meta, start, hours)
+        assert "beyond_horizon" not in out[0]
+
+    def test_tca_outside_the_near_band_is_not_a_candidate(self):
+        sats, meta, events, hours = self._converging_case()
+        # Same geometry as the flagged case, but the TCA (20 min before the end)
+        # is outside a 10-min near band → no claim.
+        out = annotate_horizon(events, sats, meta, self._START, hours, near_s=600.0)
+        assert "beyond_horizon" not in out[0]
+
+    def test_annotation_never_changes_the_screened_events(self):
+        sats, meta, events, hours = self._converging_case()
+        before = [dict(e) for e in events]
+        out = annotate_horizon(events, sats, meta, self._START, hours)
+        assert events == before                                  # input untouched
+        assert [{k: v for k, v in e.items() if k != "beyond_horizon"}
+                for e in out] == before                          # only the label
+
+    def test_accelerated_lookahead_agrees(self):
+        # The production call forwards fused/sieve/refine to the look-ahead
+        # screen — the label must not depend on which engine path ran it.
+        sats, meta, events, hours = self._converging_case()
+        plain = annotate_horizon(events, sats, meta, self._START, hours)
+        fast = annotate_horizon(events, sats, meta, self._START, hours,
+                                fused=True, sieve=True, refine=True)
+        assert plain == fast and plain[0].get("beyond_horizon") is True
+
+    def test_degenerate_inputs_are_skipped_not_raised(self):
+        sats, meta = [_drift_variant(0, 0, 0)] * 2, _horizon_meta()
+        t = self._START.isoformat()
+        junk = [{"sat1_norad_id": 1, "sat2_norad_id": 99, "tca": t,
+                 "miss_distance_km": 1.0},                     # unknown satellite
+                {"sat1_norad_id": 1, "sat2_norad_id": 2, "tca": "garbage",
+                 "miss_distance_km": 1.0},
+                {"sat1_norad_id": 1, "sat2_norad_id": 2, "tca": t,
+                 "miss_distance_km": float("nan")}]
+        out = annotate_horizon(junk, sats, meta, self._START, 1.0)
+        assert all("beyond_horizon" not in e for e in out) and len(out) == 3
+        assert annotate_horizon([], sats, meta, self._START, 1.0) == []

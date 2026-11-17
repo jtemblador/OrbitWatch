@@ -40,6 +40,15 @@ HISTORY_MAX_POINTS = 3
 # the pair alone would splice unrelated approaches into one trail.
 TCA_MATCH_WINDOW_S = 900.0
 
+# 11.0c persistent / formation flag. A pair present in this many CONSECUTIVE
+# runs (~3 days at the 3x/day cron) at a relative speed below this is a
+# co-moving formation or co-located slot (TerraSAR-X/TanDEM-X; GEO co-location
+# clusters like Optus D3/MEV-1), not a crossing. It stays in the snapshot —
+# labeled, not dropped: the 7.2 co-located suppression rule is deliberately
+# NOT loosened (cross-launch suppression still needs < 50 m AND < 5 m/s).
+PERSISTENT_MIN_RUNS = 9
+PERSISTENT_MAX_REL_SPEED_KM_S = 0.01
+
 # 10.10 slim archive record (see `archive_record`). The data branch keeps every
 # run's screen output — the one thing that can't be reproduced later — but not
 # the full OMM, which Space-Track gp_history returns by (NORAD_CAT_ID, EPOCH).
@@ -117,8 +126,12 @@ def _satellite(row) -> dict:
 
 
 def _conjunction(e: dict) -> dict:
-    """One run_screen event → a compact conjunction record (rounded)."""
-    return {
+    """One run_screen event → a compact conjunction record (rounded).
+
+    `beyond_horizon` (11.0b, from conjunctions.annotate_horizon) is emitted
+    only when true — absent otherwise, like `hist`, so it costs nothing on the
+    events it doesn't apply to and an older frontend never sees a new key."""
+    rec = {
         "a": int(e["sat1_norad_id"]), "b": int(e["sat2_norad_id"]),
         "a_name": e["sat1_name"], "b_name": e["sat2_name"],
         "a_type": e["sat1_object_type"], "b_type": e["sat2_object_type"],
@@ -129,6 +142,9 @@ def _conjunction(e: dict) -> dict:
                    round(_num(e["n_km"]), 3)],
         "regime": e.get("screening_regime"),
     }
+    if e.get("beyond_horizon") is True:
+        rec["beyond_horizon"] = True
+    return rec
 
 
 def _pair_key(a, b) -> tuple:
@@ -248,6 +264,90 @@ def carry_forward_history(conjunctions, prev_conjunctions, prev_generated_at,
     return out
 
 
+def _prev_runs(prev_rec) -> int:
+    """How many consecutive runs a previous record's pair had been present.
+
+    `runs` when it carries a valid one; otherwise (a pre-11.0 snapshot, or a
+    first-appearance record, which omits the key) 1 + the length of its `hist`
+    trail. Every trail point is a run the pair was linked in, so this is a
+    sound LOWER bound — it lets the counter bootstrap off a pre-11.0 chain
+    instead of restarting from 1 on the deploy that introduces it."""
+    runs = prev_rec.get("runs")
+    if isinstance(runs, int) and not isinstance(runs, bool) and runs >= 1:
+        return runs
+    return 1 + len(_clean_trail(prev_rec.get("hist")))
+
+
+def carry_forward_runs(conjunctions, prev_conjunctions,
+                       min_runs: int = PERSISTENT_MIN_RUNS,
+                       max_rel_speed_km_s: float = PERSISTENT_MAX_REL_SPEED_KM_S
+                       ) -> list:
+    """Count consecutive appearances per PAIR and flag persistent formations (11.0c).
+
+    `runs` = previous run's count + 1 when the same unordered pair is in the
+    previous snapshot, else the pair is new (key absent ≡ 1). `persistent`
+    = runs ≥ min_runs AND this run's relative speed < max_rel_speed_km_s.
+
+    Linked on the pair ALONE — deliberately not `hist`'s (pair, TCA ± 900 s).
+    A co-moving pair has no well-defined TCA: its range is nearly flat, so the
+    window's minimum hops between orbits run to run (TerraSAR-X/TanDEM-X: TCA
+    moved by hours between consecutive snapshots). Measured over the last 30
+    archived runs, of 351 events at v_rel < 0.01 km/s, 217 recur by pair but
+    only 81 would link by (pair, TCA) — the TCA key would never reach 9. The
+    speed gate is what keeps this from flagging the recurring Starlink
+    crossings a pair-only link also counts.
+
+    Pure; returns new records. Malformed previous records are skipped.
+    """
+    if not prev_conjunctions:
+        return [dict(c) for c in conjunctions]
+    prev_runs: dict = {}
+    for p in prev_conjunctions:
+        try:
+            key = _pair_key(p["a"], p["b"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        prev_runs[key] = max(prev_runs.get(key, 0), _prev_runs(p))
+    out = []
+    for c in conjunctions:
+        rec = dict(c)
+        before = prev_runs.get(_pair_key(rec["a"], rec["b"]))
+        if before:
+            rec["runs"] = before + 1
+            v = rec.get("rel_speed_km_s")
+            if (rec["runs"] >= min_runs and isinstance(v, (int, float))
+                    and math.isfinite(v) and v < max_rel_speed_km_s):
+                rec["persistent"] = True
+        out.append(rec)
+    return out
+
+
+def _element_ages(conjunctions, catalog_df: pd.DataFrame, generated_at) -> list:
+    """Attach `age_a_d` / `age_b_d` — each object's element age in days at
+    `generated_at` (11.0a), rounded to 0.01 d (~15 min).
+
+    Measured from EPOCH at generation time, not the frozen epoch_age_days
+    column (same reason as meta.max_epoch_age_days). Omitted per side when the
+    object or the timestamp is unknown — never a fabricated 0."""
+    gen = _epoch_seconds(generated_at)
+    if gen is None or not len(catalog_df) or "epoch" not in catalog_df.columns:
+        return conjunctions
+    epochs = pd.to_datetime(catalog_df["epoch"], utc=True)
+    age_by_id = {}
+    for nid, t in zip(catalog_df["norad_cat_id"], epochs):
+        if pd.isna(t) or _is_missing(nid):
+            continue
+        age = (gen - t.timestamp()) / 86400.0
+        if math.isfinite(age):
+            age_by_id[int(nid)] = round(age, 2)
+    for c in conjunctions:
+        for side in ("a", "b"):
+            age = age_by_id.get(c[side])
+            if age is not None:
+                c[f"age_{side}_d"] = age
+    return conjunctions
+
+
 def build_snapshot(
     catalog_df: pd.DataFrame,
     events: list[dict],
@@ -278,6 +378,8 @@ def build_snapshot(
         conj = carry_forward_history(
             conj, prev.get("conjunctions"),
             (prev.get("meta") or {}).get("generated_at"))
+        conj = carry_forward_runs(conj, prev.get("conjunctions"))
+    conj = _element_ages(conj, catalog_df, generated_at)
     # NaN would serialize to a bare `NaN` token that JS JSON.parse rejects — guard it.
     # Measured at GENERATION time from the epochs: the epoch_age_days column is
     # frozen when the cache was parsed, so an older cache would understate it.

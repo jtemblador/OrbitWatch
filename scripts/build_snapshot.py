@@ -34,7 +34,7 @@ for _p in (_ROOT, os.path.join(_ROOT, "backend")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from backend.core.conjunctions import run_screen                 # noqa: E402
+from backend.core.conjunctions import annotate_horizon, run_screen  # noqa: E402
 from backend.core.propagator import build_satrecs_and_meta       # noqa: E402
 from backend.core.screening_volumes import is_screenable, regime_for  # noqa: E402
 from backend.core.snapshot import archive_record, build_snapshot # noqa: E402
@@ -173,6 +173,22 @@ def main() -> None:
               f"--min-conjunctions floor of {args.min_conjunctions} — refusing to "
               f"publish (screen regression?).", file=sys.stderr)
         sys.exit(1)
+    # 11.0b: label events whose miss is beaten just past the window end. An
+    # annotation on a COPY of the event list — the screen above (what the A/B
+    # gate compares) is final. Non-fatal: a failure here costs the label, never
+    # the refresh.
+    t_h = time.perf_counter()
+    try:
+        events = annotate_horizon(events, satrecs, meta, start, args.hours,
+                                  step_sec=args.step_sec, **_ACCEL)
+    except Exception as exc:   # noqa: BLE001 — a label must never cost the refresh
+        print(f"::warning::Horizon annotation failed ({exc!r:.200}) — "
+              f"publishing without beyond_horizon flags.", file=sys.stderr)
+    horizon_s = time.perf_counter() - t_h
+    n_beyond = sum(1 for e in events if e.get("beyond_horizon"))
+    print(f"horizon: {n_beyond} of {len(events)} conjunctions have a closer pass "
+          f"just past the window end ({horizon_s:.1f}s)")
+
     # Stale-elements warning: a supplier serving old elements with a 200 would
     # otherwise publish as "updated just now". Normal median age is ~0.8 d.
     # Measured from the EPOCHS at screen start — the epoch_age_days column is
@@ -216,7 +232,8 @@ def main() -> None:
     # 10.10 run telemetry → meta.run. GitHub deletes run logs after 90 days, so
     # without this the archive can't say how long a screen took or which
     # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
-    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source}
+    run = {"screen_seconds": round(elapsed, 1), "catalog_source": args.catalog_source,
+           "horizon_seconds": round(horizon_s, 1)}
     # git_sha lets the next cron diff ENGINE code against what the live snapshot
     # was built with (deploy.yml's gate decision) instead of trusting commit dates.
     for key, env in (("github_run_id", "GITHUB_RUN_ID"),

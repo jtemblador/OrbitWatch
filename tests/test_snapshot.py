@@ -20,10 +20,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from core.snapshot import (  # noqa: E402
     ARCHIVE_ELEMENT_KEYS,
     ARCHIVE_FORMAT,
+    PERSISTENT_MIN_RUNS,
     SCHEMA_VERSION,
     _conjunction,
     archive_record,
     carry_forward_history,
+    carry_forward_runs,
     _epoch_iso,
     _num,
     _satellite,
@@ -145,6 +147,48 @@ class TestConjunction:
         assert c["rtn_km"] == [-0.123, 0.568, 0.9]
         assert c["regime"] == "LEO 1"
         assert c["tca"] == "2026-06-01T18:00:00+00:00"   # passed through untouched
+
+    def test_beyond_horizon_only_when_true(self):
+        # 11.0b: absent unless set — an old frontend never sees a new key on the
+        # ~3/4 of events it doesn't apply to, and they cost zero bytes.
+        assert _conjunction(_event(beyond_horizon=True))["beyond_horizon"] is True
+        for v in (None, False, 1, "yes"):
+            assert "beyond_horizon" not in _conjunction(_event(beyond_horizon=v))
+        assert "beyond_horizon" not in _conjunction(_event())
+
+
+class TestElementAge:
+    """11.0a — per-event element age (days from each object's EPOCH to
+    generated_at), the input to the "low confidence (stale elements)" tag."""
+
+    def _snap(self, gen="2026-06-02T00:00:00Z", events=None):
+        df = pd.DataFrame([
+            _row(norad_cat_id=25544, epoch=pd.Timestamp("2026-06-01T12:00:00", tz="UTC"),
+                 epoch_age_days=0.01),                     # frozen column: ignored
+            _row(norad_cat_id=12345, epoch=pd.Timestamp("2026-05-28T00:00:00", tz="UTC"))])
+        return build_snapshot(df, events or [_event()], {}, gen)
+
+    def test_ages_are_measured_from_each_epoch_at_generation(self):
+        c = self._snap()["conjunctions"][0]
+        assert c["age_a_d"] == 0.5 and c["age_b_d"] == 5.0
+
+    def test_rounded_to_hundredths(self):
+        c = self._snap(gen="2026-06-02T00:07:12Z")["conjunctions"][0]   # +0.005 d
+        assert c["age_a_d"] == 0.51 and c["age_b_d"] == 5.0
+
+    def test_unknown_object_omits_only_that_side(self):
+        c = self._snap(events=[_event(sat2_norad_id=999)])["conjunctions"][0]
+        assert c["age_a_d"] == 0.5 and "age_b_d" not in c
+
+    def test_unparseable_generated_at_emits_no_ages(self):
+        c = self._snap(gen="t")["conjunctions"][0]
+        assert "age_a_d" not in c and "age_b_d" not in c
+
+    def test_ages_survive_strict_json_and_the_archive(self):
+        snap = self._snap()
+        json.loads(json.dumps(snap, allow_nan=False), parse_constant=_reject_const)
+        arch = archive_record(snap)["conjunctions"][0]
+        assert arch["age_a_d"] == 0.5 and arch["age_b_d"] == 5.0
 
 
 class TestHistoryRobustness:
@@ -410,6 +454,87 @@ class TestCarryForwardHistory:
         json.loads(json.dumps(out, allow_nan=False), parse_constant=_reject_const)
 
 
+class TestCarryForwardRuns:
+    """11.0c — consecutive-appearance counter + the persistent-formation flag.
+
+    Linked on the PAIR alone (not hist's pair+TCA): a co-moving pair's TCA hops
+    between orbits run to run, so the TCA key would never accumulate."""
+
+    _SLOW = dict(rel_speed_km_s=0.0, miss_km=0.119)   # TerraSAR-X / TanDEM-X
+
+    def test_new_pair_has_no_runs_key(self):
+        out = carry_forward_runs([_cj()], [_cj(a=1, b=2)])
+        assert "runs" not in out[0] and "persistent" not in out[0]
+
+    def test_links_on_pair_even_when_the_tca_moved_by_hours(self):
+        out = carry_forward_runs([_cj(tca="2026-06-02T05:13:24+00:00")],
+                                 [_cj(b=100, a=200, tca="2026-06-01T15:01:40+00:00")])
+        assert out[0]["runs"] == 2
+
+    def test_chain_counts_up_and_flags_at_the_threshold(self):
+        n = PERSISTENT_MIN_RUNS
+        below = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 2)])[0]
+        at = carry_forward_runs([_cj(**self._SLOW)], [_cj(runs=n - 1)])[0]
+        assert below["runs"] == n - 1 and "persistent" not in below
+        assert at["runs"] == n and at["persistent"] is True
+
+    def test_speed_gate_is_strict_and_uses_this_runs_speed(self):
+        prev = [_cj(runs=20)]
+        fast = carry_forward_runs([_cj(rel_speed_km_s=0.01)], prev)[0]
+        slow = carry_forward_runs([_cj(rel_speed_km_s=0.009)], prev)[0]
+        crossing = carry_forward_runs([_cj(rel_speed_km_s=12.0)], prev)[0]
+        assert "persistent" not in fast and slow["persistent"] is True
+        # A recurring Starlink CROSSING keeps counting runs but is never a formation.
+        assert crossing["runs"] == 21 and "persistent" not in crossing
+
+    def test_bootstraps_from_a_pre_11_0_hist_trail(self):
+        # A pre-11.0 prev has no `runs`; each hist point is a run the pair was
+        # linked in, so 1 + len(hist) is a sound lower bound.
+        prev = [_cj(hist=[[1, 1.0], [2, 2.0], [3, 3.0]])]
+        assert carry_forward_runs([_cj()], prev)[0]["runs"] == 5
+
+    def test_malformed_runs_fall_back_not_crash(self):
+        for bad in (True, -3, 0, "8", 2.5, None):
+            out = carry_forward_runs([_cj()], [_cj(runs=bad)])
+            assert out[0]["runs"] == 2, bad
+
+    def test_malformed_prev_records_are_skipped(self):
+        prev = [{"a": 100}, _cj(a=float("inf")), "junk", _cj(runs=4)]
+        assert carry_forward_runs([_cj()], prev)[0]["runs"] == 5
+
+    def test_is_pure(self):
+        cur = [_cj(**self._SLOW)]
+        carry_forward_runs(cur, [_cj(runs=50)])
+        assert "runs" not in cur[0]
+
+    def test_motivating_case_through_build_snapshot(self):
+        """TerraSAR-X / TanDEM-X: miss 0.119 km, v_rel 0.0, TCA wandering by
+        hours. Nine consecutive runs through the REAL builder (and the real
+        `_conjunction` shape) → persistent on the 9th, not before; one missed
+        run resets the chain."""
+        df = pd.DataFrame([_row(norad_cat_id=31698), _row(norad_cat_id=36605)])
+        ev = _event(sat1_norad_id=31698, sat2_norad_id=36605,
+                    miss_distance_km=0.119, relative_speed_km_s=0.0)
+        prev, flags = None, []
+        for k in range(PERSISTENT_MIN_RUNS):
+            tca = f"2026-06-0{1 + k % 3}T{(k * 5) % 24:02d}:00:00+00:00"
+            snap = build_snapshot(df, [dict(ev, tca=tca)], {},
+                                  f"2026-06-01T{k:02d}:00:00Z", prev=prev)
+            flags.append(snap["conjunctions"][0].get("persistent", False))
+            prev = snap
+        assert flags == [False] * (PERSISTENT_MIN_RUNS - 1) + [True]
+        gap = build_snapshot(df, [], {}, "2026-06-02T00:00:00Z", prev=prev)
+        back = build_snapshot(df, [ev], {}, "2026-06-02T08:00:00Z", prev=gap)
+        assert "runs" not in back["conjunctions"][0]
+
+    def test_flags_survive_the_archive(self):
+        rec = archive_record({"meta": {}, "satellites": [],
+                              "conjunctions": [_cj(runs=12, persistent=True,
+                                                   beyond_horizon=True)]})
+        c = rec["conjunctions"][0]
+        assert c["runs"] == 12 and c["persistent"] is True and c["beyond_horizon"] is True
+
+
 class TestOMMCrossValidation:
     """The headline lock: our shipped OMM must reconstruct the same orbit
     satellite.js json2satrec will — checked via the reference python-sgp4 OMM
@@ -480,6 +605,7 @@ class TestBuildSnapshotMain:
                                               "--out", str(out), *extra])
             bs.main()
             return json.loads(out.read_text())
+        run.module = bs
         return run, tmp_path
 
     def test_spacetrack_source_is_cited_and_archive_is_slim_json(self, run_main):
@@ -496,6 +622,41 @@ class TestBuildSnapshotMain:
         assert rec["meta"]["archive"]["format"] == "slim-v1"
         assert len(rec["conjunctions"]) == snap["meta"]["n_conjunctions"]
         assert len(rec["elements"]["NORAD_CAT_ID"]) == snap["meta"]["n_satellites"]
+
+    # The evenly phased 40-sat shell never comes within 500 km; a 1000 km
+    # Euclidean cut gives ~150 events (~25 flagged) — enough to exercise wiring.
+    _DENSE = ("--mode", "euclidean", "--threshold", "1000", "--hours", "3")
+
+    def test_trust_fields_are_wired_through_main(self, run_main, monkeypatch):
+        # 11.0a/b through the real main(): every event carries both element ages,
+        # the horizon pass is timed in meta.run, and the label is ANNOTATION
+        # only — the events main() publishes equal the bare screen's.
+        run, tmp = run_main
+        bs = run.module
+        seen = {}
+        real = bs.annotate_horizon
+
+        def spy(events, *a, **k):
+            seen["in"] = [dict(e) for e in events]
+            return real(events, *a, **k)
+        monkeypatch.setattr(bs, "annotate_horizon", spy)
+        snap = run(*self._DENSE)
+        assert snap["conjunctions"], "fixture should produce conjunctions"
+        assert all("age_a_d" in c and "age_b_d" in c for c in snap["conjunctions"])
+        assert "horizon_seconds" in snap["meta"]["run"]
+        assert any(c.get("beyond_horizon") for c in snap["conjunctions"])
+        assert len(seen["in"]) == len(snap["conjunctions"])
+
+    def test_horizon_failure_is_not_fatal(self, run_main, monkeypatch, capsys):
+        run, tmp = run_main
+        bs = run.module
+
+        def boom(*a, **k):
+            raise RuntimeError("synthetic")
+        monkeypatch.setattr(bs, "annotate_horizon", boom)
+        snap = run(*self._DENSE)
+        assert snap["conjunctions"] and "Horizon annotation failed" in capsys.readouterr().err
+        assert all("beyond_horizon" not in c for c in snap["conjunctions"])
 
     def test_stale_warning_measures_age_from_the_epochs(self, run_main, capsys, monkeypatch):
         # The epoch_age_days COLUMN is frozen at cache-parse time; the stale
