@@ -307,8 +307,9 @@ html, body, #cesiumContainer {
   padding: 4px 0;
 }
 
-/* "Hide same-constellation pairs" (10.10) — sits under the sticky header */
-#conjunction-filter {
+/* List filters — "Hide same-constellation pairs" (10.10) + "Hide persistent
+   formations" (11.0c) — sit under the sticky header */
+.conjunction-filter {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -319,10 +320,49 @@ html, body, #cesiumContainer {
   cursor: pointer;
   user-select: none;
 }
-#conjunction-filter input {
+.conjunction-filter input {
   margin: 0;
   accent-color: #ff9800;
   cursor: pointer;
+}
+#conj-persistent-count {
+  color: #666;
+}
+
+/* 11.0 trust annotations */
+.conjunction-row.stale,
+.cd-row.stale {
+  opacity: 0.55;               /* stale elements: de-emphasized, not hidden */
+}
+.conjunction-meta > span {
+  white-space: nowrap;         /* a tag in the row must not wrap "0.4 km" */
+}
+.conjunction-miss.beyond-horizon {
+  cursor: help;
+  text-decoration: underline dotted;
+}
+.cd-trust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 2px;
+  color: #888;
+  font-size: 10px;
+}
+.cd-tag {
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  cursor: help;
+  white-space: nowrap;
+}
+.stale-tag {
+  color: #ffb74d;
+  border: 1px solid rgba(255, 183, 77, 0.5);
+}
+.persist-tag {
+  color: #90caf9;
+  border: 1px solid rgba(144, 202, 249, 0.5);
 }
 
 /* Freshness line — snapshot age + validation-report link (9.3) */

@@ -10,7 +10,8 @@
  *   • snapshotReady        — Promise the render modules await
  *   • snapshotMeta         — freshness + screen params (drives the header line)
  *   • satelliteMetadata    — Map<norad_id, {name, object_type, epoch, …}>
- *   • snapshotConjunctions — events adapted to the field names the UX code uses
+ *   • conjunctionView()    — events adapted to the field names the UX code uses,
+ *                            filtered (same-constellation / persistent) + capped
  *   • single-satellite compute helpers (satrec cache, geodetic position, TEME
  *     track) — cheap enough on the main thread; the all-catalog batch runs in
  *     js/propagation-worker.js instead.
@@ -69,12 +70,44 @@ function isSameConstellation(c) {
   return fam !== null && fam === constellationOf(c.b_name);
 }
 
-/** The cross-constellation view of raw (closest-first) snapshot conjunctions:
- *  FILTER, then cap — so the view holds the closest `cap` cross-operator events,
- *  not just the few that made the overall top `cap`. Returns the raw records. */
+// 11.0c persistent formations. The snapshot builder marks a pair `persistent`
+// when it has appeared in >= 9 consecutive runs (~3 days) at < 10 m/s relative
+// speed — TerraSAR-X / TanDEM-X flying in formation, GEO co-located slots. They
+// are real geometry (the screen keeps them; nothing is suppressed) but not
+// crossings, so the list hides them by default behind a toggle. Absent from
+// every event in a pre-11.0 snapshot → the filter is then a no-op.
+function isPersistentFormation(c) {
+  return c.persistent === true;
+}
+
+/** The filtered view of raw (closest-first) snapshot conjunctions: FILTER, then
+ *  cap — so the view holds the closest `cap` events that pass the filters, not
+ *  just the few that made the overall top `cap`. Returns the raw records.
+ *  opts: { hideSame: same-constellation pairs, hidePersistent: formations }. */
+function filterConjunctions(conjunctions, opts, cap) {
+  const o = opts || {};
+  const kept = conjunctions.filter((c) =>
+    !(o.hideSame && isSameConstellation(c)) &&
+    !(o.hidePersistent && isPersistentFormation(c)));
+  return { total: kept.length, shown: kept.slice(0, cap) };
+}
+
+/** The cross-constellation view (10.10) — filterConjunctions with only that filter. */
 function crossConstellationSet(conjunctions, cap) {
-  const cross = conjunctions.filter((c) => !isSameConstellation(c));
-  return { total: cross.length, shown: cross.slice(0, cap) };
+  return filterConjunctions(conjunctions, { hideSame: true }, cap);
+}
+
+// 11.0a: element age (days at generated_at) beyond which an event's prediction
+// is tagged "low confidence (stale elements)". Mirrors the 3-day threshold of
+// build_snapshot.py's median-age warning; normal event ages are ~1 d (p95
+// 1.3-1.7 d across the archive), so this tags the genuinely stale tail only.
+const STALE_ELEMENT_AGE_D = 3.0;
+
+/** True if either participant's elements were older than STALE_ELEMENT_AGE_D
+ *  when the snapshot was built. Unknown ages (pre-11.0 snapshot) are not stale. */
+function isStaleEvent(e) {
+  return [e.sat1_age_d, e.sat2_age_d].some(
+    (a) => Number.isFinite(a) && a > STALE_ELEMENT_AGE_D);
 }
 
 // Populated by loadSnapshot(); consumed as globals by the other modules
@@ -82,9 +115,21 @@ function crossConstellationSet(conjunctions, cap) {
 const satelliteMetadata = new Map(); // norad_id -> derived metadata (see below)
 let snapshotMeta = null;             // snapshot.json "meta" block
 let snapshotSatellites = [];         // raw OMM records (worker init payload)
-let snapshotConjunctions = [];       // adapted events, closest-first (capped)
-let snapshotCrossConjunctions = [];  // same, minus same-constellation pairs (capped)
-let snapshotCrossTotal = 0;          // cross-constellation events in the FULL snapshot
+let snapshotRawConjunctions = [];    // every screened event, raw, closest-first
+let snapshotPersistentTotal = 0;     // persistent formations in the FULL snapshot
+
+/** The adapted, capped conjunction set for a filter combination (see
+ *  filterConjunctions). `total` counts every passing event in the full
+ *  snapshot, so the header can say "closest N of TOTAL"; `hidden` is how many
+ *  the filters removed. */
+function conjunctionView(opts) {
+  const v = filterConjunctions(snapshotRawConjunctions, opts, CONJ_DISPLAY_CAP);
+  return {
+    events: v.shown.map(_adaptConjunction),
+    total: v.total,
+    hidden: snapshotRawConjunctions.length - v.total,
+  };
+}
 
 // Per-satellite satrec cache for main-thread single-sat computations (info
 // panel, trails, TCA orb). json2satrec is the expensive call (~15 µs) — cache
@@ -179,6 +224,14 @@ function _adaptConjunction(c) {
     // still serves, since that path reuses the live snapshot rather than
     // re-screening. Downstream must treat null as the ordinary case.
     history: c.hist || null,
+    // 11.0 trust fields — all optional (absent in a pre-11.0 snapshot, which
+    // the reuse deploy path still serves to new code). Strictly typed here so
+    // the renderers can trust them: a non-number age is "unknown", not 0.
+    sat1_age_d: Number.isFinite(c.age_a_d) ? c.age_a_d : null,
+    sat2_age_d: Number.isFinite(c.age_b_d) ? c.age_b_d : null,
+    beyond_horizon: c.beyond_horizon === true,
+    persistent: c.persistent === true,
+    runs: Number.isInteger(c.runs) ? c.runs : null,
   };
 }
 
@@ -200,20 +253,17 @@ const snapshotReady = (async () => {
     _ommById.set(omm.NORAD_CAT_ID, omm);
     satelliteMetadata.set(omm.NORAD_CAT_ID, _deriveMetadata(omm));
   }
-  // Cap to the closest CAP events for display (see CONJ_DISPLAY_CAP above).
-  // Events are closest-first in the snapshot (run_screen sorts by miss).
-  snapshotConjunctions =
-    snap.conjunctions.slice(0, CONJ_DISPLAY_CAP).map(_adaptConjunction);
-  // Filtered BEFORE the cap, so the filter shows the closest CAP cross-
-  // constellation events — not just the few that made the overall top CAP.
-  const cross = crossConstellationSet(snap.conjunctions, CONJ_DISPLAY_CAP);
-  snapshotCrossTotal = cross.total;
-  snapshotCrossConjunctions = cross.shown.map(_adaptConjunction);
+  // Events are closest-first in the snapshot (run_screen sorts by miss). The
+  // display set is built per filter combination by conjunctionView(): filtered
+  // BEFORE the CONJ_DISPLAY_CAP cap, so a filter shows the closest CAP events
+  // that pass it — not just the few that made the overall top CAP.
+  snapshotRawConjunctions = Array.isArray(snap.conjunctions) ? snap.conjunctions : [];
+  snapshotPersistentTotal = snapshotRawConjunctions.filter(isPersistentFormation).length;
 
   console.log(
     `snapshot: ${snap.meta.n_satellites} satellites, ` +
     `${snap.meta.n_conjunctions} conjunctions ` +
-    `(displaying closest ${snapshotConjunctions.length}), ` +
+    `(${snapshotPersistentTotal} persistent formations), ` +
     `generated ${snap.meta.generated_at}`
   );
   return snap;
