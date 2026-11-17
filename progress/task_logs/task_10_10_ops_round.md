@@ -24,7 +24,7 @@
 6. **GoatCounter** — https://orbitwatch.goatcounter.com
 7. **Basemap** — NASA GIBS Black Marble (keyless), brightness 1.8 / gamma 1.15.
 8. **CI upkeep** — Node-24 action majors, runner pinned `ubuntu-24.04`.
-9. **Write-up draft** — `docs/findings/starlink-shell-lowering.md` + `scripts/analyze_archive.py`.
+9. **Write-up draft** — `docs/findings/starlink-shell-lowering.md` + `scripts/analyze_archive.py` *(folded into `scripts/archive_analysis.py trends` in 11.1e)*.
 10. Strays gitignored.
 
 ## Verification

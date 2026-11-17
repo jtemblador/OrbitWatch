@@ -126,3 +126,166 @@ class TestMatchConsecutive:
         assert [r["n"] for r in b] == [2, 1, 1]
         assert b[0]["median_km"] == pytest.approx(0.2) and b[1]["gt1km_pct"] == 100.0
         assert b[2]["hi"] is None
+
+
+# ── 11.1e: the trends mode (was scripts/analyze_archive.py) ───────────────────
+
+def _mm(alt_km):
+    """Mean motion (rev/day) of a circular orbit at alt_km — inverse of mean_altitude."""
+    a = A.R_EARTH + alt_km
+    return np.sqrt(A.GM_EARTH / a**3) * 86400.0 / (2.0 * np.pi)
+
+
+# (norad, name, altitude km, inclination)
+_SATS = [(1, "STARLINK-1", 460.0, 53.0), (2, "STARLINK-2", 462.0, 53.0),
+         (3, "STARLINK-3", 551.0, 97.0), (4, "STARLINKX 9", 455.0, 53.0),   # not a Starlink
+         (5, "COSMOS 1408 DEB", 470.0, 82.0), (6, "ONEWEB-0012", 1200.0, 87.9)]
+_CONJ = [(1, 2), (1, 5), (4, 5), (3, 6)]     # SL–SL, SL–other, other–other, SL–other
+
+
+def _snapshot(gen, slim, sats=_SATS, conj=_CONJ):
+    els = [{"NORAD_CAT_ID": n, "OBJECT_NAME": nm, "MEAN_MOTION": _mm(alt), "INCLINATION": inc,
+            "ECCENTRICITY": 0.0001, "EPOCH": "2026-01-01T00:00:00"} for n, nm, alt, inc in sats]
+    names = {n: nm for n, nm, *_ in sats}
+    cj = [{"a": a, "b": b, "tca": "2026-01-01T06:00:00", "miss_km": 1.0, "rel_speed_km_s": 1.0,
+           "rtn_km": [0.1, 1.0, 1.0], "regime": "LEO 1"} for a, b in conj]
+    meta = {"generated_at": gen, "n_satellites": len(sats), "n_conjunctions": len(cj),
+            "screen": {"window_hours": 24}, "max_epoch_age_days": 1.0}
+    if slim:
+        meta["archive"] = {"format": "slim-v1"}
+        return {"meta": meta, "conjunctions": cj,
+                "elements": {k: [e[k] for e in els] for k in els[0]}}
+    for c in cj:
+        c["a_name"], c["b_name"] = names[c["a"]], names[c["b"]]
+    return {"meta": meta, "conjunctions": cj, "satellites": [{"omm": e} for e in els]}
+
+
+def _write(dirpath, snap):
+    import gzip
+    import json
+    name = snap["meta"]["generated_at"].replace(":", "-") + ".json.gz"
+    p = os.path.join(dirpath, name)
+    with gzip.open(p, "wt") as f:
+        json.dump(snap, f)
+    return p
+
+
+def _rows(rows, measure):
+    return {g: v for _, m, g, v in rows if m == measure}
+
+
+class TestTrendMeasures:
+    def test_mean_altitude_inverts_and_matches_circular_perigee(self):
+        assert A.mean_altitude(_mm(550.0)) == pytest.approx(550.0, abs=1e-9)
+        assert A.mean_altitude(15.05) == pytest.approx(A.orbit_shape(15.05, 0.0)[0])
+        # orbit-averaged, not perigee: eccentricity lowers perigee, not mean altitude
+        assert A.orbit_shape(15.05, 0.01)[0] < A.mean_altitude(15.05)
+
+    def test_band_edges_and_altitude_order(self):
+        assert list(A.band_labels([449.999, 450.0, 474.999, 475.0])) == \
+            ["425-450", "450-475", "450-475", "475-500"]
+        c = A.band_counts([1210, 460, 551, 470, 1205, 552])     # ties: 2/2/2
+        assert list(c.index) == ["450-475", "550-575", "1200-1225"]   # by altitude, not tie order
+        assert list(c) == [2, 2, 2]
+
+    @pytest.mark.parametrize("slim", [False, True])
+    def test_trend_rows_both_shapes(self, slim):
+        sats, conj = A.trend_frames(_snapshot("2026-01-01T00:00:00Z", slim))
+        rows = A.trend_rows("t", sats, conj)
+        assert _rows(rows, "catalog") == {"all": 6, "starlink": 3}       # STARLINKX excluded
+        assert _rows(rows, "starlink_by_band") == {"450-475": 2, "550-575": 1}
+        fam = _rows(rows, "conj_family")
+        assert fam == {"total": 4, "Starlink–Starlink": 1, "Starlink–other": 2, "other–other": 1}
+        # pair altitude = mean of the two: (460+462)/2, (460+470)/2, (455+470)/2, (551+1200)/2
+        assert _rows(rows, "conj_by_band") == {"450-475": 3, "875-900": 1}
+
+    def test_slim_and_full_give_identical_rows(self):
+        full = A.trend_rows("t", *A.trend_frames(_snapshot("2026-01-01T00:00:00Z", False)))
+        slim = A.trend_rows("t", *A.trend_frames(_snapshot("2026-01-01T00:00:00Z", True)))
+        assert full == slim
+
+    def test_track_objects(self):
+        first = A.trend_frames(_snapshot("x", True, sats=[
+            (1, "STARLINK-1", 550.0, 53.0), (2, "STARLINK-2", 551.0, 53.0),
+            (3, "STARLINK-3", 560.0, 53.0), (4, "STARLINK-4", 460.0, 97.0),
+            (5, "STARLINK-5", 400.0, 53.0)], conj=[]))[0]
+        last = A.trend_frames(_snapshot("y", True, sats=[
+            (1, "STARLINK-1", 465.0, 53.0), (2, "STARLINK-2", 551.0, 53.0),  # 3 decayed
+            (4, "STARLINK-4", 461.0, 97.0), (5, "STARLINK-5", 470.0, 53.0),  # 5 raised
+            (9, "STARLINK-9", 455.0, 70.0)], conj=[]))[0]                   # 9 new
+        tr = A.track_objects(first, last)
+        assert tr["from_525_575"] == {"n": 3, "at_450_500": 1, "at_500_525": 0, "below_450": 0,
+                                      "still_525_575": 1, "gone": 1}
+        assert tr["into_450_475"] == {"n": 4, "already": 1, "came_down": 1, "came_up": 1, "new": 1}
+        assert tr["inc_mix_450_475"] == [{97.0: 1}, {53.0: 2, 97.0: 1, 70.0: 1}]
+
+    def test_crowding_exponent(self):
+        n = np.array([1000.0, 2000, 3000, 5000])
+        slope, r = A.crowding_exponent(n, 3e-4 * n**2)
+        assert slope == pytest.approx(2.0) and r == pytest.approx(1.0)
+
+    def test_pivot_merges_550_shell_with_a_missing_half(self):
+        df = pd.DataFrame([("2026-01-01T00:00:00Z", "starlink_by_band", "525-550", 5),
+                           ("2026-01-01T00:00:00Z", "starlink_by_band", "550-575", 7),
+                           ("2026-01-02T00:00:00Z", "starlink_by_band", "525-550", 4)],
+                          columns=["generated_at", "measure", "group", "value"])
+        assert A.trend_pivot(df)[("starlink_by_band", "525-575")].tolist() == [12, 4]
+
+
+class TestArchiveSource:
+    def test_snapshot_time_from_name(self):
+        assert A.snapshot_time("/x/2026-10-29T00-58-01.304098Z.json.gz") == \
+            pd.Timestamp("2026-10-29 00:58:01")
+        item = ("git", "/r", "origin/data", "snapshots/2026-07-08T02-12-42.4Z.json.gz")
+        assert A.snapshot_time(item) == pd.Timestamp("2026-07-08 02:12:42")
+
+    def test_parse_until(self):
+        assert A.parse_until(None) is None
+        assert A.parse_until("2026-10-29") == pd.Timestamp("2026-10-29 23:59:59.999999")
+        assert A.parse_until("2026-10-29T01:00") == pd.Timestamp("2026-10-29 01:00")
+        assert A.parse_until("2026-10-29T03:00+02:00") == pd.Timestamp("2026-10-29 01:00")
+
+    def test_until_cuts_directory(self, tmp_path):
+        for g in ("2026-10-28T21:17:00Z", "2026-10-29T00:58:01Z", "2026-10-29T12:26:08Z"):
+            _write(tmp_path, _snapshot(g, True))
+        names = lambda items: [os.path.basename(i)[:19] for i in items]  # noqa: E731
+        assert len(A.list_snapshots(str(tmp_path))) == 3
+        assert names(A.list_snapshots(str(tmp_path), until="2026-10-29T01:00")) == \
+            ["2026-10-28T21-17-00", "2026-10-29T00-58-01"]
+        assert len(A.list_snapshots(str(tmp_path), until="2026-10-29")) == 3   # end of day
+        with pytest.raises(ValueError):
+            A.list_snapshots()
+
+    def test_git_ref_source_matches_directory(self, tmp_path):
+        import shutil
+        import subprocess
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        repo = tmp_path / "repo"
+        snaps = repo / "snapshots"
+        snaps.mkdir(parents=True)
+        paths = [_write(snaps, _snapshot(g, slim)) for g, slim in
+                 (("2026-01-01T00:00:00Z", False), ("2026-01-01T08:00:00Z", True))]
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["init", "-q"], ["add", "."], ["commit", "-qm", "s", "--no-gpg-sign"]):
+            subprocess.run(["git", "-C", str(repo), *cmd], check=True, env=env)
+        items = A.list_snapshots(ref="HEAD", repo=str(repo))
+        assert [i[-1] for i in items] == [f"snapshots/{os.path.basename(p)}" for p in paths]
+        for item, p in zip(items, paths):
+            assert A.read_snapshot(item) == A.read_snapshot(p)
+
+    def test_trends_cli_end_to_end(self, tmp_path, capsys):
+        d = tmp_path / "snaps"
+        d.mkdir()
+        _write(d, _snapshot("2026-01-01T00:00:00Z", False))
+        _write(d, _snapshot("2026-01-01T08:00:00Z", True))
+        _write(d, _snapshot("2026-01-02T08:00:00Z", True, sats=_SATS[:2], conj=[(1, 2)]))  # small
+        A.main(["trends", str(d), "--out", str(tmp_path / "out"), "--min-sats", "5",
+                "--workers", "1", "--no-figures"])
+        csv = pd.read_csv(tmp_path / "out" / "archive_trends.csv")
+        assert csv["generated_at"].nunique() == 2                      # the 2-object run skipped
+        assert "skipped 1 under --min-sats" in capsys.readouterr().out
+        a, b = (g.drop(columns="generated_at").reset_index(drop=True)
+                for _, g in csv.groupby("generated_at"))
+        pd.testing.assert_frame_equal(a, b)                             # full ≡ slim, row for row
