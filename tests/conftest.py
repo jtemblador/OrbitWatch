@@ -32,6 +32,10 @@ def pytest_configure(config):
     global _tmp_cache
     if os.environ.get("ORBITWATCH_TEST_LIVE_CACHE"):
         return
+    # The fixture only seeds the default group: a developer shell's dataset
+    # overrides would point the app at an empty cache or a live fetch.
+    for var in ("ORBITWATCH_GROUP", "ORBITWATCH_LIVE", "ORBITWATCH_MAX_SATS"):
+        os.environ.pop(var, None)
     import importlib
     import fixture_catalog
 
