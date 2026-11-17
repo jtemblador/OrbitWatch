@@ -232,6 +232,11 @@ function _adaptConjunction(c) {
     beyond_horizon: c.beyond_horizon === true,
     persistent: c.persistent === true,
     runs: Number.isInteger(c.runs) ? c.runs : null,
+    // 11.2a maneuver label — optional like the 11.0 fields. `mnv_h` = hours
+    // since the latest confirmed maneuver of either participant (present only
+    // when ≤ 48 h); `mnv_who` = which participant(s). A label, never a filter.
+    mnv_h: Number.isFinite(c.mnv_h) && c.mnv_h >= 0 ? c.mnv_h : null,
+    mnv_who: c.mnv_who === "a" || c.mnv_who === "b" || c.mnv_who === "ab" ? c.mnv_who : null,
   };
 }
 

@@ -150,6 +150,15 @@ def main() -> None:
                     help="previous snapshot.json — carries each conjunction's "
                          "prediction history forward (9.10). Missing or "
                          "unreadable is non-fatal: the run just emits no history.")
+    ap.add_argument("--prev-maneuver-state", default="",
+                    help="the previous run's maneuver_state.json sidecar (11.2a) — "
+                         "the maneuver detector's per-object state. Missing or "
+                         "unreadable is non-fatal: the detector cold-starts "
+                         "(no labels for ~2 days, noisier for ~5; deploy.yml seeds from the archive instead).")
+    ap.add_argument("--maneuver-state-out", default="",
+                    help="where to write this run's maneuver_state sidecar "
+                         "(default: maneuver_state.json next to --out). Kept OUT "
+                         "of snapshot.json: only the next run reads it.")
     ap.add_argument("--catalog-source", choices=sorted(_SOURCE_LABELS),
                     default="celestrak",
                     help="who supplied the cached elements — sets meta.source "
@@ -293,6 +302,17 @@ def main() -> None:
                   f"building without prediction history.", file=sys.stderr)
             prev = None
 
+    # 11.2a: the maneuver detector's state, carried forward like --prev (and
+    # just as non-fatal). Not inside snapshot.json — see --maneuver-state-out.
+    prev_mnv = None
+    if args.prev_maneuver_state:
+        try:
+            with open(args.prev_maneuver_state, encoding="utf-8") as f:
+                prev_mnv = json.load(f)
+        except (OSError, ValueError, RecursionError) as exc:
+            print(f"WARNING: --prev-maneuver-state {args.prev_maneuver_state} unusable "
+                  f"({exc!r:.200}) — the maneuver detector cold-starts.", file=sys.stderr)
+
     # 10.10 run telemetry → meta.run. GitHub deletes run logs after 90 days, so
     # without this the archive can't say how long a screen took or which
     # supplier fed it. GITHUB_* are unset locally → those keys are just omitted.
@@ -309,7 +329,8 @@ def main() -> None:
     source = _SOURCE_LABELS[args.catalog_source].format(group=args.group)
     try:
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=prev, run=run, socrates=socrates)
+                              source=source, prev=prev, run=run, socrates=socrates,
+                              prev_maneuver_state=prev_mnv)
     except Exception as exc:   # noqa: BLE001 — history must never cost the refresh
         if prev is None:
             raise
@@ -320,7 +341,27 @@ def main() -> None:
               f"building without it.", file=sys.stderr)
         prev = None
         snap = build_snapshot(df, events, screen_params, generated_at,
-                              source=source, prev=None, run=run, socrates=socrates)
+                              source=source, prev=None, run=run, socrates=socrates,
+                              prev_maneuver_state=prev_mnv)
+    # 11.2a maneuver labels. Warn-only in every failure mode — a label never
+    # costs the refresh.
+    mnv_state = snap.pop("maneuver_state", None)
+    mi = snap["meta"].get("maneuvers") or {}
+    if "error" in mi:
+        print(f"::warning::Maneuver detection failed ({mi['error']}) — publishing "
+              f"without maneuver labels; the detector cold-starts next run.",
+              file=sys.stderr)
+    else:
+        print(f"maneuvers: {mi.get('objects')} objects tracked "
+              f"({mi.get('armed')} armed, {mi.get('carried')} carried from --prev), "
+              f"{mi.get('confirmed')} confirmed this run, "
+              f"{mi.get('tagged_events')} conjunctions tagged (≤ {mi.get('tag_max_h'):.0f} h)")
+        if mi.get("cold_start") and isinstance(prev_mnv, dict) and prev_mnv.get("id"):
+            # A state WAS there but none of it decoded: schema drift, not a first
+            # deploy. Silent, this would keep the tag dark for ~a day each time.
+            print("::warning::--prev-maneuver-state did not decode — the maneuver "
+                  "detector cold-started (no labels for ~2 days, noisier for ~5).",
+                  file=sys.stderr)
     n_hist = sum(1 for c in snap["conjunctions"] if "hist" in c)
     if prev:
         pct = 100.0 * n_hist / len(snap["conjunctions"]) if snap["conjunctions"] else 0.0
@@ -354,6 +395,20 @@ def main() -> None:
     if gz > _GZ_BUDGET_BYTES:
         print(f"  ⚠ over the ~{_GZ_BUDGET_BYTES / 1e6:.0f} MB gzipped budget "
               f"— trim the catalog or drop fields")
+
+    if mnv_state is not None:
+        mnv_out = args.maneuver_state_out or os.path.join(
+            os.path.dirname(args.out) or ".", "maneuver_state.json")
+        try:
+            body = json.dumps(mnv_state, separators=(",", ":"), allow_nan=False)
+            with open(mnv_out, "w", encoding="utf-8") as f:
+                f.write(body)
+            print(f"wrote maneuver state {mnv_out}: {len(body) / 1e6:.2f} MB raw / "
+                  f"{len(gzip.compress(body.encode())) / 1e6:.2f} MB gzipped "
+                  f"(not downloaded by the site)")
+        except (OSError, ValueError) as exc:
+            print(f"::warning::Could not write the maneuver state ({exc!r:.200}) — "
+                  f"the detector cold-starts next run.", file=sys.stderr)
 
     if args.archive_out:
         rec = json.dumps(archive_record(snap), separators=(",", ":"), allow_nan=False)

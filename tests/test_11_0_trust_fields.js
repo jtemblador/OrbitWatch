@@ -58,7 +58,8 @@ eval([
   D("filterConjunctions"), D("isStaleEvent"), D("_isoToEcma"), D("_adaptConjunction"),
   extractConst(CONJ, "conjunctions.js", "HORIZON_TIP"),
   extractConst(CONJ, "conjunctions.js", "STALE_TIP"),
-  C("missColor"), C("missHtml"), C("ageText"), C("trustLine"),
+  extractConst(CONJ, "conjunctions.js", "MANEUVER_TIP"), D("escapeHtml"),
+  C("missColor"), C("missHtml"), C("ageText"), C("maneuverWho"), C("maneuverTag"), C("trustLine"),
 ].join("\n"));
 
 /** A raw snapshot record (snapshot.py `_conjunction` shape). */
