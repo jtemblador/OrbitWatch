@@ -46,8 +46,9 @@ The screening volume is picked by perigee: below 500 km a satellite gets the "LE
 |---|---:|---:|---:|
 | Actual volumes | 4,670 | 12,219 | ×2.62 |
 | Starlink held in LEO 2 | 1,191 | 4,910 | ×4.12 |
+| Starlink forced into LEO 1 | 4,817 | 12,221 | ×2.54 |
 
-The actual-volume re-screens reproduce the archived Starlink–Starlink pair sets exactly (same pairs, both dates), so the setup matches production. With the box held fixed the growth is *faster*, not slower. That makes sense: by July 9,002 of about 10,800 Starlinks were already below 500 km perigee (10,945 by November), so few satellites changed box, and a tighter box keeps only the closest approaches, which rise faster than linearly as a shell fills. An archive-wide estimate from each event's stored RTN offsets agrees: weekly medians grow ×2.11 with actual volumes and ×2.80 under a fixed LEO 2 box. **The rise is crowding, not a change of screening volume.** Reproduce with `scripts/box_confounder.py`.
+The actual-volume re-screens reproduce the archived Starlink–Starlink pair sets exactly (same pairs, both dates), so the setup matches production. With either box held fixed for every Starlink, the growth stays at or above the actual ×2.62: ×2.54 all in LEO 1, ×4.12 all in LEO 2. That makes sense: in these two catalogs 8,940 of 10,787 Starlinks were already below 500 km perigee in July and 10,839 of 11,159 by late October, so few satellites changed box, and a tighter box keeps only the closest approaches, which rise faster than linearly as a shell fills. An archive-wide estimate from each event's stored RTN offsets agrees: weekly medians grow ×2.11 with actual volumes and ×2.80 under a fixed LEO 2 box. **The rise is crowding, not a change of screening volume.** Reproduce with `scripts/box_confounder.py`.
 
 ## What it does and does not mean
 

@@ -265,14 +265,14 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
 > Draft analysis (scripts + PNGs, not yet in the repo) lives in the session scratchpad — 11.1 ports it.
 
 ### 11.0 Trust fixes — make each event honest (small, do first)
-- [ ] **11.0a Per-event element age** — add `age_a_d`/`age_b_d` (days at `generated_at`) to each
+- [x] **11.0a Per-event element age** *(done — `age_a_d`/`age_b_d`; > 3 d dimmed + tagged, 0.33% of events)* — add `age_a_d`/`age_b_d` (days at `generated_at`) to each
   conjunction in `snapshot.py`; show it in the detail panel; grey out / tag events where either is
   > 3 d ("low confidence"). *Done when:* field in snapshot + UI, test locks the computation.
-- [ ] **11.0b Horizon flag** — mark events whose TCA is within ~1 h of the window end AND whose range
+- [x] **11.0b Horizon flag** *(done, redesigned — the range-rate-sign test measured out as near-useless (51.9% vs 39.5%); shipped `annotate_horizon`: re-screen last-hour participants 130 min past the end, flag if the pair passes closer → 24.7% flagged, +~36 s/cron, annotation-only)* — mark events whose TCA is within ~1 h of the window end AND whose range
   is still decreasing at the boundary as `"beyond_horizon": true` ("closest approach after window;
   miss is an upper bound"). UI shows "≥" on the miss. *Done when:* the 34% pile-up is labeled, not
   hidden; byte-identical screening otherwise (A/B gate unaffected).
-- [ ] **11.0c Formation / persistent-pair flag** — use the `--prev` chain (already carries pair
+- [x] **11.0c Formation / persistent-pair flag** *(done — `runs` linked on pair (formation TCAs jump hours), bootstraps from `hist`; archive replay flags only TerraSAR-X/TanDEM-X; hidden by default, filtered before the cap)* — use the `--prev` chain (already carries pair
   identity run-to-run) to count consecutive appearances; pairs present ≥ 9 runs (~3 d) with
   |Δmiss| small and v_rel < ~10 m/s get `"persistent": true` and are hidden by default behind a toggle
   (like same-constellation). Do NOT loosen the 7.2 suppression rule — label, don't drop.
@@ -290,7 +290,7 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
   (the empirical error bar); (2) **stacked events over time by pair class** (Starlink-Starlink /
   Starlink-other / other-other); (3) **event element age (median/p95) vs catalog max**. Drop the
   < 1 km panel. Optional: relative-speed by pair class, altitude histogram.
-- [x] **11.1c Confounder test** *(done — re-screen Jul 16 / Oct 29 Starlinks: actual 4,670→12,219 (×2.62), held in LEO 2 1,191→4,910 (×4.12); actual re-screens reproduce archived pair sets exactly → **crowding, not the box**; written up in the findings doc)* — re-screen one current catalog with Starlink forced to the LEO 2 box
+- [x] **11.1c Confounder test** *(done — re-screen Jul 16 / Oct 29 Starlinks: actual 4,670→12,219 (×2.62), held in LEO 2 1,191→4,910 (×4.12), forced LEO 1 4,817→12,221 (×2.54); actual re-screens reproduce archived pair sets exactly → **crowding, not the box**; written up in the findings doc)* — re-screen one current catalog with Starlink forced to the LEO 2 box
   and compare counts → how much of the ×2.3 is box-size vs crowding. Update
   `docs/findings/starlink-shell-lowering.md` with the answer before publishing it.
 - [ ] **11.1d 9.11 stats page** (absorbs 9.11) — publish the figures + one-sentence findings on the

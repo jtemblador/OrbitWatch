@@ -44,13 +44,14 @@ inflate counts by itself. Re-screen, 24 h, production engine, Starlinks only:
 |---|---:|---:|---:|
 | Actual volumes | 4,670 | 12,219 | ×2.62 |
 | Held in LEO 2 | 1,191 | 4,910 | ×4.12 |
+| Forced into LEO 1 | 4,817 | 12,221 | ×2.54 |
 
 Actual-volume re-screens reproduce the archived Starlink–Starlink **pair sets exactly** on both
 dates. A fixed box grows *faster*; archive-wide RTN counterfactual agrees (×2.11 actual vs ×2.80
 held). **Verdict: crowding, not the box** (9,002 of ~10.8k Starlinks were already LEO 1 in July).
 Written up in `docs/findings/starlink-shell-lowering.md` ("Is it the screening box? No.").
-The forced-LEO-1 runs (a third policy) were still running at write-up time — a cross-check only;
-the verdict doesn't depend on them.
+Forced-LEO-1 (every Starlink in the big box) grows ×2.54 — essentially the actual ×2.62, so a
+fixed box of either size leaves the rise intact.
 
 ## Notes / follow-ups
 - Two archive scripts now exist: `scripts/analyze_archive.py` (10.10, feeds the Starlink write-up
