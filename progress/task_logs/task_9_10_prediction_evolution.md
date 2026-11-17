@@ -39,6 +39,21 @@ tracks *element age*, not how far ahead you look). Of predictions **< 1 km, only
 empirical version of what `validation/sgp4_uncertainty.md` argues from citations
 alone — our own operational output showing why we report geometry, never Pc.
 
+> **Correction (Nov 17, 2026 — Phase 11.0e; see `task_11_1_archive_analytics.md`).**
+> The numbers in the paragraph above are understated. They pooled every matched
+> re-prediction, but **49.4% of consecutive re-predictions reuse identical elements**
+> for both objects (CelesTrak had not issued a new elset in the 8 h between runs), so
+> their Δmiss is ≡ 0 (p99 0.006 km) — half the sample measured nothing. Re-measured on
+> the full 4-month archive (352 full-catalog runs, Jul 15 – Nov 17), counting only
+> re-predictions where at least one object's elements changed (340,481):
+> **|Δmiss| median 0.64 km, p90 6.0 km, 41% > 1 km, 12.5% > 5 km.** It grows with
+> element age (median 0.22 km when the older element was ≤ 6 h old → 1.27 km at
+> 1–2 d) and, more weakly, with lead time (0.50 km at 4–8 h → 0.84 km at 20–24 h), so
+> "flat against lead time" was also too strong. For < 1 km predictions re-matched on
+> fresh elements the next run: 56% stayed < 1 km, 11% moved past 5 km (the 70%/8%
+> above used a different denominator and the identical-element rows). The
+> sparkline mechanism is unaffected — only these headline statistics change.
+
 ## The structural constraint (the thing that would have been got wrong)
 
 `_dedupe_to_unique_pairs` keeps **one event per pair per 24 h window** (the
