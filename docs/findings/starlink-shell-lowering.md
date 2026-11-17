@@ -38,6 +38,17 @@ The number of possible pairs in a shell grows with the square of its population,
 
 That is a strong pattern, not a full explanation. In the last two weeks the band's population levelled off near 6,100 while its conjunctions kept climbing, and the neighbouring 475–500 km band saw conjunctions rise 11% while its Starlink count fell 17%. Satellites in transit crossing other shells, and three inclination groups now sharing one altitude, are plausible contributors that I have not tested.
 
+## Is it the screening box? No.
+
+The screening volume is picked by perigee: below 500 km a satellite gets the "LEO 1" ellipsoid (0.4 × 44 × 51 km), above it the smaller "LEO 2" one (0.4 × 25 × 25 km), and a pair uses the larger of the two. So a satellite lowered under 500 km is screened with roughly 3.6× the volume, which could inflate the count without any real crowding. We tested this by re-screening two archived catalogs' Starlinks for 24 hours with the production engine, once with their real volumes and once with every Starlink held in the LEO 2 box:
+
+| Volume policy | Jul 16 | Oct 29 | Growth |
+|---|---:|---:|---:|
+| Actual volumes | 4,670 | 12,219 | ×2.62 |
+| Starlink held in LEO 2 | 1,191 | 4,910 | ×4.12 |
+
+The actual-volume re-screens reproduce the archived Starlink–Starlink pair sets exactly (same pairs, both dates), so the setup matches production. With the box held fixed the growth is *faster*, not slower. That makes sense: by July 9,002 of about 10,800 Starlinks were already below 500 km perigee (10,945 by November), so few satellites changed box, and a tighter box keeps only the closest approaches, which rise faster than linearly as a shell fills. An archive-wide estimate from each event's stored RTN offsets agrees: weekly medians grow ×2.11 with actual volumes and ×2.80 under a fixed LEO 2 box. **The rise is crowding, not a change of screening volume.** Reproduce with `scripts/box_confounder.py`.
+
 ## What it does and does not mean
 
 A flagged conjunction is a geometric close approach inside a screening volume, not a predicted collision. In a Starlink–Starlink pair, one operator flies both satellites, using an autonomous collision-avoidance system; SpaceX reports hundreds of thousands of avoidance maneuvers a year to the FCC. The doubling is mostly extra coordination work inside SpaceX's own fleet, accepted in exchange for faster cleanup of dead satellites. The count that measures exposure for other operators, Starlink–other, went slightly down.

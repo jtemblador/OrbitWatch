@@ -290,7 +290,7 @@ near-circular co-altitude orbits — the pair class a megaconstellation is made 
   (the empirical error bar); (2) **stacked events over time by pair class** (Starlink-Starlink /
   Starlink-other / other-other); (3) **event element age (median/p95) vs catalog max**. Drop the
   < 1 km panel. Optional: relative-speed by pair class, altitude histogram.
-- [ ] **11.1c Confounder test** — re-screen one current catalog with Starlink forced to the LEO 2 box
+- [x] **11.1c Confounder test** *(done — re-screen Jul 16 / Oct 29 Starlinks: actual 4,670→12,219 (×2.62), held in LEO 2 1,191→4,910 (×4.12); actual re-screens reproduce archived pair sets exactly → **crowding, not the box**; written up in the findings doc)* — re-screen one current catalog with Starlink forced to the LEO 2 box
   and compare counts → how much of the ×2.3 is box-size vs crowding. Update
   `docs/findings/starlink-shell-lowering.md` with the answer before publishing it.
 - [ ] **11.1d 9.11 stats page** (absorbs 9.11) — publish the figures + one-sentence findings on the
